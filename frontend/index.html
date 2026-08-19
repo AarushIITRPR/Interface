@@ -5,12 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Multimodal Session Console — CVPR Lab, IIT Ropar</title>
 <link rel="stylesheet" href="styles/main.css">
+<link rel="stylesheet" href="styles/design.css">
 </head>
 <body>
-<header>
-  <div><div class="title">Multimodal Session Console</div>
-  <div class="sub">CVPR Lab, IIT Ropar · interleaved affective protocol · v6</div></div>
-  <div class="sub mono" id="clockBadge">clock: idle</div>
+<header class="app-header">
+  <div class="brand-lockup">
+    <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+    <div>
+      <div class="title">Affect Lab</div>
+      <div class="sub">CVPR · IIT Ropar</div>
+    </div>
+  </div>
+  <div class="header-actions">
+    <div class="recording-state"><span></span>Research session</div>
+    <div class="sub mono" id="clockBadge">00:00</div>
+    <button class="protocol-button" type="button" onclick="openRail()">Protocol <span>↗</span></button>
+  </div>
 </header>
 
 <div class="railProgressMini" id="railProgressMini" title="Overall progress"><i id="railProgressMiniFill"></i></div>
@@ -32,13 +42,23 @@
 
   <main class="stage" id="stage">
     <section id="setupCard" class="card setup-shell">
-      <div class="setup-hero">
-        <div>
-          <div class="setup-eyebrow"><i></i>Session setup</div>
-          <div class="step-title">Prepare a new session</div>
-          <p>Enter the participant details and complete the safety checks. Their clip order and tasks will be assigned automatically.</p>
+      <div class="setup-hero setup-hero-new">
+        <div class="setup-hero-copy">
+          <div class="setup-eyebrow"><i></i>New research session</div>
+          <div class="step-title">A clearer read on<br>how we feel.</div>
+          <p>Prepare the participant, confirm the essentials, and begin a guided 30-minute emotion study.</p>
+          <div class="session-facts" aria-label="Session overview">
+            <span><b>30</b> minutes</span>
+            <span><b>34</b> guided steps</span>
+            <span><b>11</b> live signals</span>
+          </div>
         </div>
-        <div class="protocol-chip"><b>Protocol v6</b>34 guided steps</div>
+        <div class="emotion-orbit" aria-hidden="true">
+          <div class="orbit orbit-one"></div>
+          <div class="orbit orbit-two"></div>
+          <div class="emotion-core"><span></span></div>
+          <i class="orbit-dot dot-one"></i><i class="orbit-dot dot-two"></i><i class="orbit-dot dot-three"></i>
+        </div>
       </div>
 
       <div class="setup-grid">
@@ -46,7 +66,7 @@
           <section class="setup-block">
             <div class="setup-block-head">
               <span class="setup-step-number">1</span>
-              <div><h2>Participant details</h2><p>Used to create a counterbalanced session plan.</p></div>
+              <div><h2>Who is taking part?</h2><p>Use their study ID. Personal details are not needed.</p></div>
             </div>
             <div class="grid2">
               <div class="field"><label for="pid">Participant ID <small>Required · 1–100</small></label>
@@ -59,7 +79,7 @@
           <section class="setup-block">
             <div class="setup-block-head">
               <span class="setup-step-number">2</span>
-              <div><h2>Ready to record?</h2><p>Confirm each item before the participant begins.</p></div>
+              <div><h2>Ready to begin?</h2><p>Three quick checks keep the session safe and complete.</p></div>
             </div>
             <div class="readiness-list">
               <label class="readiness-item">
@@ -86,36 +106,68 @@
         </div>
 
         <aside class="setup-aside">
-          <h3>Before you begin</h3>
+          <div class="aside-kicker">A calm start</div>
+          <h3>Everything in one guided flow.</h3>
+          <p class="aside-intro">The protocol takes care of sequencing so you can stay present with the participant.</p>
           <ul class="before-list">
-            <li><span class="mini-icon">01</span><span>Keep the participant facing the camera and minimize unnecessary movement.</span></li>
-            <li><span class="mini-icon">02</span><span>Confirm the external sensor and recording applications are already running.</span></li>
-            <li><span class="mini-icon">03</span><span>Session markers stay in this page until you export them.</span></li>
+            <li><span class="mini-icon"><i></i></span><span><b>Stay in frame</b>Keep the participant comfortably facing the camera.</span></li>
+            <li><span class="mini-icon"><i></i></span><span><b>Let signals settle</b>Confirm external sensors are already streaming.</span></li>
+            <li><span class="mini-icon"><i></i></span><span><b>Export at the end</b>Markers remain available throughout the session.</span></li>
           </ul>
         </aside>
       </div>
     </section>
 
     <section id="runnerCard" class="card hide">
-      <div class="kicker"><span class="tag" id="stepTag"></span><span id="stepKicker">Step</span></div>
-      <div class="step-title" id="stepTitle">—</div>
-      <div id="stepBody"></div>
-      <div id="mediaSlot"></div>
-      <div class="timer-row hide" id="timerRow">
-        <div class="timer" id="timerDisplay"><span id="timerDot">🟡</span> <span id="timerStatusText">Preparing</span></div>
-        <div class="flex"><button class="btn-go" id="timerStart" onclick="timerStartStop()">Start</button>
-        <button id="timerReset" onclick="timerReset()">Reset</button></div>
+      <div class="runner-heading">
+        <div>
+          <div class="kicker"><span class="tag" id="stepTag"></span><span id="stepKicker">Step</span></div>
+          <div class="step-title" id="stepTitle">—</div>
+        </div>
+        <div class="step-position"><span id="stepCounter">01 / 34</span><small>Session progress</small></div>
       </div>
-      <div id="featureSlot"></div>
-      <div class="controls">
-        <button id="prevBtn" onclick="gotoStep(state.i-1)">‹ Back</button>
-        <button class="btn-go" id="nextBtn" onclick="advance()">Next step ›</button>
-        <button class="btn-stop" onclick="abortSession()">Abort &amp; export</button>
+
+      <div class="runner-grid">
+        <div class="runner-primary">
+          <div id="stepBody"></div>
+          <div id="mediaSlot"></div>
+          <div class="timer-row hide" id="timerRow">
+            <div class="timer" id="timerDisplay"><span id="timerDot">●</span> <span id="timerStatusText">Preparing</span></div>
+            <div class="flex"><button class="btn-go" id="timerStart" onclick="timerStartStop()">Start</button>
+            <button id="timerReset" onclick="timerReset()">Reset</button></div>
+          </div>
+          <div id="featureSlot"></div>
+        </div>
+
+        <aside class="signal-panel" aria-label="Session signal preview">
+          <div class="signal-panel-top"><span>Signal overview</span><b><i></i> Listening</b></div>
+          <div class="signal-visual" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <div class="signal-list">
+            <div><span class="signal-icon camera-icon"></span><p><b>Camera</b><small>Face centered</small></p><i>Ready</i></div>
+            <div><span class="signal-icon pulse-icon"></span><p><b>Physiology</b><small>11 signals streaming</small></p><i>Stable</i></div>
+            <div><span class="signal-icon sync-icon"></span><p><b>Synchronisation</b><small>Markers armed</small></p><i>Ready</i></div>
+          </div>
+          <div class="privacy-note"><span>◉</span><p><b>Recording is visible</b><small>The participant can pause at any time.</small></p></div>
+        </aside>
       </div>
-      <div class="divider"></div>
-      <div class="note-input">
-        <input type="text" id="noteText" placeholder="Log a timestamped operator note…" onkeydown="if(event.key==='Enter')logNote()">
-        <button onclick="logNote()">Mark note</button>
+
+      <div class="runner-footer">
+        <div class="controls">
+          <button id="prevBtn" class="button-quiet" onclick="gotoStep(state.i-1)"><span>←</span> Previous</button>
+          <button class="btn-go" id="nextBtn" onclick="advance()">Continue <span>→</span></button>
+        </div>
+        <div class="runner-utilities">
+          <details class="note-drawer">
+            <summary>Add operator note</summary>
+            <div class="note-input">
+              <input type="text" id="noteText" placeholder="Add an observation…" onkeydown="if(event.key==='Enter')logNote()">
+              <button onclick="logNote()">Save note</button>
+            </div>
+          </details>
+          <button class="abort-link" onclick="abortSession()">End session</button>
+        </div>
       </div>
     </section>
 

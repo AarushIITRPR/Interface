@@ -223,7 +223,8 @@ function logEvent(label,detail,extra){
     step:state.plan[state.i]?shortLabel(state.plan[state.i]).t:"—", step_type:state.plan[state.i]?state.plan[state.i].type:"",
     t_perf_ms:perf.toFixed(1), t_session_ms:tSession.toFixed(1), wall_iso:new Date().toISOString() };
   if(extra)Object.assign(m,extra); state.markers.push(m); renderLog();
-  document.getElementById("clockBadge").textContent=`clock: ${(tSession/1000).toFixed(1)}s`; return m;
+  const totalSeconds=Math.floor(tSession/1000);
+  document.getElementById("clockBadge").textContent=`${String(Math.floor(totalSeconds/60)).padStart(2,"0")}:${String(totalSeconds%60).padStart(2,"0")}`; return m;
 }
 function renderLog(){
   document.getElementById("logBody").innerHTML=state.markers.slice().reverse().map(m=>`<tr>
@@ -291,6 +292,7 @@ function startSession(){
   document.getElementById("setupCard").classList.add("hide");
   document.getElementById("runnerCard").classList.remove("hide");
   document.getElementById("logCard").classList.add("hide");
+  window.scrollTo({top:0,behavior:"smooth"});
   state.i=0; renderStep();
 }
 
@@ -309,9 +311,16 @@ function renderStep(){
   clearTimer(); stopWashout(); stopStroop(); stopNback(); stopConversationTimer(); stopBodyScanAudio();
   const logDetails=document.getElementById("logDetails"); if(logDetails) logDetails.open=false;
   const s=state.plan[state.i]; renderRail(state.plan,state.i);
+  const runnerCard=document.getElementById("runnerCard");
+  runnerCard.classList.remove("step-enter");
+  void runnerCard.offsetWidth;
+  runnerCard.classList.add("step-enter");
+  requestAnimationFrame(()=>window.scrollTo({top:0,behavior:"smooth"}));
   document.getElementById("stepTag").style.background=tagColor(s);
   document.getElementById("stepKicker").textContent=s.kick;
   document.getElementById("stepTitle").textContent=s.title;
+  const stepCounter=document.getElementById("stepCounter");
+  if(stepCounter)stepCounter.textContent=`${String(state.i+1).padStart(2,"0")} / ${String(state.plan.length).padStart(2,"0")}`;
   let html=""; if(s.script)html+=`<div class="script"><div class="who">Say to participant <button class="speakBtn" id="speakBtn" onclick="speakScript()" title="Play / replay aloud">🔊</button></div><span id="scriptText">${s.script}</span></div>`;
   if(s.op)html+=`<div class="opnote"><b>Operator:</b> ${s.op}</div>`;
   document.getElementById("stepBody").innerHTML=html;
@@ -1118,7 +1127,7 @@ function initDetailsAccordion(){
 
 function initRailDrawer(){
   const rail=document.getElementById("rail"), handle=document.getElementById("railHandle"), backdrop=document.getElementById("railBackdrop");
-  const W=()=>Math.min(280,window.innerWidth*0.82);
+  const W=()=>Math.min(328,window.innerWidth*0.82);
   let dragging=false, startX=0, startTranslate=0, current=0, open=false;
   function setOpen(v,animate=true){
     open=v;
