@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multimodal Session Console — CVPR Lab, IIT Ropar</title>
+<link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+<header>
+  <div><div class="title">Multimodal Session Console</div>
+  <div class="sub">CVPR Lab, IIT Ropar · interleaved affective protocol · v6</div></div>
+  <div class="sub mono" id="clockBadge">clock: idle</div>
+</header>
+
+<div class="railProgressMini" id="railProgressMini" title="Overall progress"><i id="railProgressMiniFill"></i></div>
+<div class="railBackdrop" id="railBackdrop" onclick="closeRail()"></div>
+<div class="railHandle" id="railHandle" title="Slide to view progress">
+  <span class="arrow">›</span>
+  <span class="grip"></span><span class="grip"></span><span class="grip"></span>
+</div>
+<div class="fixation-overlay" id="fixationOverlay"><div class="fixation-cross"></div></div>
+
+<div class="layout">
+  <nav class="rail" id="rail">
+    <div class="flex rail-head">
+      <h3>Progress</h3>
+      <button id="planToggle" onclick="togglePlanDetail()">Show plan detail</button>
+    </div>
+    <div id="railSteps" class="muted">Enter a participant ID to build the plan.</div>
+  </nav>
+
+  <main class="stage" id="stage">
+    <section id="setupCard" class="card setup-shell">
+      <div class="setup-hero">
+        <div>
+          <div class="setup-eyebrow"><i></i>Session setup</div>
+          <div class="step-title">Prepare a new session</div>
+          <p>Enter the participant details and complete the safety checks. Their clip order and tasks will be assigned automatically.</p>
+        </div>
+        <div class="protocol-chip"><b>Protocol v6</b>34 guided steps</div>
+      </div>
+
+      <div class="setup-grid">
+        <div class="setup-main">
+          <section class="setup-block">
+            <div class="setup-block-head">
+              <span class="setup-step-number">1</span>
+              <div><h2>Participant details</h2><p>Used to create a counterbalanced session plan.</p></div>
+            </div>
+            <div class="grid2">
+              <div class="field"><label for="pid">Participant ID <small>Required · 1–100</small></label>
+                <input type="number" id="pid" min="1" max="100" placeholder="e.g. 27" oninput="previewAssign()"></div>
+              <div class="field"><label for="operator">Operator <small>Optional</small></label>
+                <input type="text" id="operator" placeholder="Name or initials"></div>
+            </div>
+          </section>
+
+          <section class="setup-block">
+            <div class="setup-block-head">
+              <span class="setup-step-number">2</span>
+              <div><h2>Ready to record?</h2><p>Confirm each item before the participant begins.</p></div>
+            </div>
+            <div class="readiness-list">
+              <label class="readiness-item">
+                <input type="checkbox" id="rdyConsent">
+                <span class="readiness-copy"><strong>Consent is complete</strong><small>Signed consent received and withdrawal explained.</small></span>
+              </label>
+              <label class="readiness-item">
+                <input type="checkbox" id="rdyPhys">
+                <span class="readiness-copy"><strong>Safety screening is clear</strong><small>No contraindication to standing, exertion, or breath-hold.</small></span>
+              </label>
+              <label class="readiness-item">
+                <input type="checkbox" id="rdySensors">
+                <span class="readiness-copy"><strong>Recording systems are ready</strong><small>Sensors streaming, photodiode visible, and recorders armed.</small></span>
+              </label>
+            </div>
+          </section>
+
+          <div class="setup-actionbar">
+            <div class="readiness-status" id="startStatus">
+              <span class="status-dot"></span><strong>Add a participant ID</strong><small>Then complete all three readiness checks.</small>
+            </div>
+            <button class="btn-go" id="startBtn" onclick="startSession()" disabled>Start session <span class="arrow">→</span></button>
+          </div>
+        </div>
+
+        <aside class="setup-aside">
+          <h3>Before you begin</h3>
+          <ul class="before-list">
+            <li><span class="mini-icon">01</span><span>Keep the participant facing the camera and minimize unnecessary movement.</span></li>
+            <li><span class="mini-icon">02</span><span>Confirm the external sensor and recording applications are already running.</span></li>
+            <li><span class="mini-icon">03</span><span>Session markers stay in this page until you export them.</span></li>
+          </ul>
+        </aside>
+      </div>
+    </section>
+
+    <section id="runnerCard" class="card hide">
+      <div class="kicker"><span class="tag" id="stepTag"></span><span id="stepKicker">Step</span></div>
+      <div class="step-title" id="stepTitle">—</div>
+      <div id="stepBody"></div>
+      <div id="mediaSlot"></div>
+      <div class="timer-row hide" id="timerRow">
+        <div class="timer" id="timerDisplay"><span id="timerDot">🟡</span> <span id="timerStatusText">Preparing</span></div>
+        <div class="flex"><button class="btn-go" id="timerStart" onclick="timerStartStop()">Start</button>
+        <button id="timerReset" onclick="timerReset()">Reset</button></div>
+      </div>
+      <div id="featureSlot"></div>
+      <div class="controls">
+        <button id="prevBtn" onclick="gotoStep(state.i-1)">‹ Back</button>
+        <button class="btn-go" id="nextBtn" onclick="advance()">Next step ›</button>
+        <button class="btn-stop" onclick="abortSession()">Abort &amp; export</button>
+      </div>
+      <div class="divider"></div>
+      <div class="note-input">
+        <input type="text" id="noteText" placeholder="Log a timestamped operator note…" onkeydown="if(event.key==='Enter')logNote()">
+        <button onclick="logNote()">Mark note</button>
+      </div>
+    </section>
+
+    <section id="logCard" class="card hide">
+      <div class="logbar">
+        <div class="kicker log-kicker"><span class="tag"></span>Marker log</div>
+        <span class="muted mono" id="logCount">0 markers</span><span class="log-spacer"></span>
+        <button onclick="exportCSV()">Export CSV</button><button onclick="exportJSON()">Export JSON</button>
+      </div>
+      <details id="logDetails"><summary class="muted">Show full log table</summary>
+      <div class="logscroll log-details-scroll"><table>
+        <thead><tr><th>#</th><th>t_session</th><th>t_perf (ms)</th><th>wall</th><th>step</th><th>label</th><th>detail</th></tr></thead>
+        <tbody id="logBody"></tbody></table></div>
+      </details>
+    </section>
+  </main>
+</div>
+
+<script src="scripts/api.js"></script>
+<script src="scripts/app.js"></script>
+</body>
+</html>

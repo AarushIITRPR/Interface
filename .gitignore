@@ -1,0 +1,14 @@
+node_modules/
+.env
+npm-debug.log*
+
+# Runtime data
+backend/data/media-config.json
+backend/data/sessions/*.json
+!backend/data/sessions/.gitkeep
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
