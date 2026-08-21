@@ -42,6 +42,7 @@ export function SubjectPortal() {
 
   useEffect(() => { if(!code)return; const first=window.setTimeout(refresh,0); const id=window.setInterval(refresh,850); return()=>{clearTimeout(first);clearInterval(id)}; },[code,refresh]);
   const act = useCallback(async (action:string,payload:Record<string,unknown>={}) => { if(!code)return; const next=await sessionRequest(code,action,payload); setSnapshot(next); },[code]);
+  const changeSession = useCallback(() => { window.localStorage.removeItem("meridian.subject.code");window.history.replaceState(null,"","/subject");setSnapshot(null);setDraft("");setError("");setCode(""); },[]);
 
   if (!code) return (
     <main className="subject-shell paper">
@@ -57,12 +58,12 @@ export function SubjectPortal() {
 
   const step = snapshot.step;
   if (!step || snapshot.status === "complete" || snapshot.status === "aborted" || step.type === "end") return <main className="subject-shell paper"><p className="completion">Thank you.</p></main>;
-  if (!snapshot.operatorConnected) return <main className="subject-shell paper"><p className="subject-wait">Please wait.</p></main>;
+  if (!snapshot.operatorConnected) return <main className="subject-shell paper"><section className="subject-center"><h1>Please wait.</h1><button className="paper-button" onClick={changeSession}>Change session</button></section></main>;
 
   return (
     <main className={`subject-shell ${["washout","bodyscan","clip"].includes(step.type) ? "subject-dark" : "paper"}`}>
       {!["washout","bodyscan","clip"].includes(step.type) ? <div className="thin-progress" style={{width:`${(snapshot.stepIndex/snapshot.stepCount)*100}%`}} /> : null}
-      {snapshot.status === "paused" ? <div className="subject-overlay"><p>{snapshot.announcement?.text || "Please wait a moment."}</p></div> : null}
+      {snapshot.status === "paused" ? <div className="subject-overlay"><p>{snapshot.announcement?.text || "Please wait a moment."}</p><button className="paper-button" onClick={changeSession}>Change session</button></div> : null}
       {snapshot.status !== "paused" && snapshot.announcement ? (
         <div className="subject-overlay announcement" role="alert"><p>{snapshot.announcement.text}</p><button className="paper-button" onClick={()=>act("ack")}>Understood</button></div>
       ) : null}
