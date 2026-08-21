@@ -142,6 +142,21 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (expectedStepId && step?.id !== expectedStepId) return current;
 
     if (action === "advance" && current.status === "running") advance(current,String(payload.reason ?? ""),(payload.source === "subject" ? "subject" : "operator"));
+    if (action === "navigate" && current.status !== "aborted") {
+      const direction = Number(payload.direction) < 0 ? -1 : 1;
+      const targetIndex = Math.max(0,Math.min(plan.length - 1,current.stepIndex + direction));
+      if (targetIndex !== current.stepIndex) {
+        const previousLabel = step ? shortLabel(step) : "Unknown step";
+        const target = plan[targetIndex];
+        appendEvent(current,{eventType:"operator_navigation",label:direction < 0 ? "Moved to previous task" : "Moved to next task",detail:`${previousLabel} to ${shortLabel(target)}`,source:"operator",metadata:{fromIndex:current.stepIndex,toIndex:targetIndex}});
+        current.stepIndex = targetIndex;
+        current.attempt = 1;
+        current.stepStartedAt = now();
+        if (current.status === "complete") current.status = "running";
+        if (current.status === "paused") current.pausedAt = current.stepStartedAt;
+        appendEvent(current,{eventType:"step_start",label:"Step started",detail:shortLabel(target),source:"operator"});
+      }
+    }
     if (action === "autoAdvance" && current.status === "running" && step?.durationSec) advance(current,"Timer completed","system");
     if (action === "pause" && current.status === "running") { current.status="paused"; current.pausedAt=now(); current.announcement={id:uid("ann"),text:"Please wait a moment.",kind:"pause",createdAt:now()}; appendEvent(current,{eventType:"session_paused",label:"Session paused",detail:String(payload.reason ?? ""),severity:"warn",source:payload.source === "subject" ? "subject" : "operator"}); }
     if (action === "resume" && current.status === "paused") { const delta = current.pausedAt ? Date.now()-Date.parse(current.pausedAt) : 0; current.stepStartedAt=new Date(Date.parse(current.stepStartedAt)+delta).toISOString(); current.status="running"; current.pausedAt=null; current.announcement=null; appendEvent(current,{eventType:"session_resumed",label:"Session resumed",source:"operator",metadata:{pauseMs:delta}}); }
