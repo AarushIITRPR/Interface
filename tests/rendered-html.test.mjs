@@ -40,7 +40,12 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(subject, /operatorConnected/);
   assert.match(subject, /Change session/);
   assert.match(instructor, /Recording health/);
-  assert.match(instructor, /Subject connection code/);
+  assert.match(instructor, /Subject code/);
+  assert.match(instructor, /Acquisition token/);
+  assert.match(instructor, /Acquisition agent offline/);
+  assert.match(instructor, /Sensor CSV/);
+  assert.match(instructor, /Recording manifest/);
+  assert.match(subject, /acquisitionReady/);
   assert.match(instructor, /Previous task/);
   assert.match(instructor, /Next task/);
   assert.match(instructor, /Live event log/);

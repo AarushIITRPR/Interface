@@ -7,6 +7,7 @@ Meridian is a dual-portal research instrument for controlled multimodal human-su
 - `/subject` presents one neutral activity at a time, with no study labels, sensor information, condition names, or operational detail.
 - `/instructor` provides participant assignment, preflight readiness, live protocol progress, recording health, interventions, notes, recovery, configuration, and exports.
 - `/api/sessions` is the authoritative session state and event mutation API.
+- `/api/acquisition` is the token-authenticated command and telemetry channel for the local recording agent.
 - `/api/media` stores future video, audio, image, and animated stimuli in object storage.
 
 ## Protocol integrity
@@ -53,7 +54,11 @@ The Sites runtime provides local D1 and R2 bindings from `.openai/hosting.json`.
 
 ## Sensor integration
 
-The current sensor panel exposes the integration contract and operational states. Replace manual status updates with authenticated device heartbeat calls that submit channel ID, state, latency, and diagnostic detail. The subject interface does not need to change when real devices are connected.
+The `acquisition_agent` directory contains the local hardware service adapted from the supplied Dataset Sync, CSI HR C5, and EMG Checker projects. It records camera, microphone, CMS50E oximeter, ESP32 WiFi CSI, ESP32 EMG, ESP32 GSR, configured ECG serial, and thermal camera streams on the computer connected to the subject.
+
+The agent receives session and task changes from Meridian, writes common-clock markers, keeps raw high-rate data local, and submits low-bandwidth health reports. The instructor sees device state, sample rate, sample count, latest values, disconnects, recording paths, and finalized file manifests. The subject remains on the waiting screen until the selected required sensors are receiving samples.
+
+See `acquisition_agent/README.md` for installation, device configuration, Linux and Windows notes, and simulated verification.
 
 ## Media integration
 

@@ -61,7 +61,37 @@ export type SensorChannel = {
   status: SensorStatus;
   latencyMs: number | null;
   detail: string;
+  rateHz: number | null;
+  sampleCount: number;
+  latestValue: string;
+  device: string;
+  recordingFile: string;
+  bytesWritten: number;
   updatedAt: string;
+};
+
+export type AcquisitionAgent = {
+  id: string;
+  state: "waiting" | "online" | "offline" | "finalized";
+  host: string;
+  platform: string;
+  version: string;
+  recordingRoot: string;
+  lastSeenAt: string | null;
+  connectedAt: string | null;
+  finalizedAt: string | null;
+};
+
+export type RecordingArtifact = {
+  sensorId: string;
+  relativePath: string;
+  format: string;
+  sampleCount: number;
+  bytes: number;
+  sha256: string;
+  startedAt: string;
+  endedAt: string;
+  quality: "pending" | "pass" | "warning" | "fail";
 };
 
 export type MediaConfig = {
@@ -94,6 +124,11 @@ export type SessionSnapshot = {
   media: MediaConfig;
   nbackLevel: 1 | 2 | 3;
   operatorLastSeenAt: string | null;
+  acquisitionToken: string;
+  acquisition: AcquisitionAgent;
+  recordings: RecordingArtifact[];
+  requiredSensors: string[];
+  hardwareGateOverride: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -115,6 +150,7 @@ export type SubjectSnapshot = {
   announcement: SessionSnapshot["announcement"];
   nbackLevel: 1 | 2 | 3;
   operatorConnected: boolean;
+  acquisitionReady: boolean;
   mediaSrc: string;
   step: SubjectStep | null;
 };
@@ -130,8 +166,12 @@ export const DEFAULT_MEDIA: MediaConfig = {
 export const SENSOR_CATALOG: Array<Pick<SensorChannel, "id" | "label" | "group">> = [
   { id: "face", label: "Face camera", group: "video" },
   { id: "audio", label: "Room audio", group: "audio" },
+  { id: "oximeter", label: "Pulse oximeter", group: "physio" },
+  { id: "csi", label: "WiFi CSI", group: "physio" },
+  { id: "emg", label: "EMG", group: "physio" },
   { id: "gsr", label: "EDA / GSR", group: "physio" },
   { id: "ecg", label: "ECG", group: "physio" },
+  { id: "thermal", label: "Thermal camera", group: "video" },
   { id: "ppg", label: "PPG", group: "physio" },
   { id: "resp", label: "Respiration", group: "physio" },
   { id: "imu", label: "Motion IMU", group: "physio" },

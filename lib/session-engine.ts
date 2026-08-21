@@ -1,12 +1,14 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
-import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type ExperimentEvent, type MediaConfig, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
+import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
 const bindings = () => env as unknown as Bindings;
 const now = () => new Date().toISOString();
 const uid = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 18)}`;
+const acquisitionToken = () => `mac_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 const OPERATOR_LEASE_MS = 12_000;
+export const ACQUISITION_LEASE_MS = 10_000;
 
 export async function ensureSchema() {
   const db = bindings().DB;
@@ -39,6 +41,28 @@ function sessionCode(pid: number) {
   return `${String(pid).padStart(4,"0")}${suffix}`;
 }
 
+function emptySensor(sensor: Pick<SensorChannel,"id"|"label"|"group">, createdAt: string): SensorChannel {
+  return { ...sensor, status:"unknown", latencyMs:null, detail:"Waiting for acquisition agent", rateHz:null, sampleCount:0, latestValue:"", device:"", recordingFile:"", bytesWritten:0, updatedAt:createdAt };
+}
+
+function emptyAcquisition(): AcquisitionAgent {
+  return { id:"", state:"waiting", host:"", platform:"", version:"", recordingRoot:"", lastSeenAt:null, connectedAt:null, finalizedAt:null };
+}
+
+function hydrateSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
+  const source = Array.isArray(snapshot.sensors) ? snapshot.sensors : [];
+  snapshot.sensors = SENSOR_CATALOG.map((catalog) => {
+    const existing = source.find((sensor) => sensor.id === catalog.id);
+    return { ...emptySensor(catalog,snapshot.createdAt), ...existing, ...catalog };
+  });
+  snapshot.acquisitionToken ||= `mac_${snapshot.id.replaceAll("-","").slice(-18)}${snapshot.code}`;
+  snapshot.acquisition = { ...emptyAcquisition(), ...(snapshot.acquisition ?? {}) };
+  snapshot.recordings = Array.isArray(snapshot.recordings) ? snapshot.recordings : [];
+  snapshot.requiredSensors = Array.isArray(snapshot.requiredSensors) ? snapshot.requiredSensors : ["face","oximeter","csi","emg"];
+  snapshot.hardwareGateOverride = Boolean(snapshot.hardwareGateOverride);
+  return snapshot;
+}
+
 export async function createSession(participantId: number, operator: string) {
   await ensureSchema();
   const assignment = assignFor(participantId);
@@ -47,8 +71,9 @@ export async function createSession(participantId: number, operator: string) {
     id: uid("ses"), code: sessionCode(assignment.pid), revision: 1, participantId: assignment.pid,
     operator: operator.trim() || "Operator", protocolVersion: PROTOCOL_VERSION, assignment, status:"running",
     stepIndex:0, attempt:1, stepStartedAt:createdAt, pausedAt:null, announcement:null, events:[], notes:[], ratings:[],
-    sensors:SENSOR_CATALOG.map((sensor) => ({ ...sensor, status:"recording", latencyMs:Math.floor(18 + Math.random()*24), detail:"Signal present", updatedAt:createdAt })),
-    bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt, createdAt, updatedAt:createdAt,
+    sensors:SENSOR_CATALOG.map((sensor) => emptySensor(sensor,createdAt)),
+    bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt,
+    acquisitionToken:acquisitionToken(), acquisition:emptyAcquisition(), recordings:[], requiredSensors:["face","oximeter","csi","emg"], hardwareGateOverride:false, createdAt, updatedAt:createdAt,
   };
   const event = appendEvent(snapshot,{ eventType:"session_start", label:"Session started", detail:`Participant ${assignment.pid}, Williams row ${assignment.row}`, source:"operator", metadata:{ assignment } });
   appendEvent(snapshot,{ eventType:"step_start", label:"Step started", detail:shortLabel(buildPlan(assignment)[0]), source:"system" });
@@ -64,7 +89,7 @@ export async function createSession(participantId: number, operator: string) {
 export async function getSession(code: string) {
   await ensureSchema();
   const row = await bindings().DB.prepare(`SELECT snapshot_json FROM sessions WHERE code = ? LIMIT 1`).bind(code.toUpperCase()).first<{snapshot_json:string}>();
-  return row ? JSON.parse(row.snapshot_json) as SessionSnapshot : null;
+  return row ? hydrateSnapshot(JSON.parse(row.snapshot_json) as SessionSnapshot) : null;
 }
 
 export async function listSessions() {
@@ -84,6 +109,11 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   if (current?.title === "Box breathing") mediaSrc = snapshot.media.boxBreathing;
 
   const operatorConnected = Boolean(snapshot.operatorLastSeenAt && Date.now() - Date.parse(snapshot.operatorLastSeenAt) <= OPERATOR_LEASE_MS);
+  const agentConnected = Boolean(snapshot.acquisition.lastSeenAt && Date.now() - Date.parse(snapshot.acquisition.lastSeenAt) <= ACQUISITION_LEASE_MS);
+  const acquisitionReady = snapshot.hardwareGateOverride || (agentConnected && snapshot.requiredSensors.every((id) => {
+    const sensor = snapshot.sensors.find((item)=>item.id===id);
+    return sensor?.status === "recording" && Date.now() - Date.parse(sensor.updatedAt) <= ACQUISITION_LEASE_MS;
+  }));
   return {
     code: snapshot.code,
     revision: snapshot.revision,
@@ -95,6 +125,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
     announcement: snapshot.announcement,
     nbackLevel: snapshot.nbackLevel,
     operatorConnected,
+    acquisitionReady,
     mediaSrc,
     step: current ? {
       id: current.id,
@@ -179,6 +210,18 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "taskComplete") { appendEvent(current,{eventType:String(payload.eventType ?? "task_complete"),label:String(payload.label ?? "Task completed"),source:"subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}}); advance(current,"Task completed","subject"); }
     if (action === "note") { const body=String(payload.body ?? "").trim().slice(0,500); if(body){ current.notes.push({id:uid("note"),body,category:String(payload.category ?? "general"),stepId:step?.id ?? "",stepLabel:step ? shortLabel(step) : "",createdAt:now()}); appendEvent(current,{eventType:"operator_note",label:"Operator note",detail:body,source:"operator"}); } }
     if (action === "sensor") { const sensor=current.sensors.find((item)=>item.id===payload.id); if(sensor){ sensor.status=String(payload.status) as SensorStatus; sensor.detail=String(payload.detail ?? sensor.detail); sensor.updatedAt=now(); appendEvent(current,{eventType:"sensor_status",label:`${sensor.label}: ${sensor.status}`,severity:["missing","error"].includes(sensor.status)?"error":sensor.status==="delayed"?"warn":"info",source:"sensor",metadata:{sensorId:sensor.id,status:sensor.status}}); } }
+    if (action === "acquisitionHeartbeat") applyAcquisitionHeartbeat(current,payload);
+    if (action === "acquisitionFinalize") applyAcquisitionFinalize(current,payload);
+    if (action === "requiredSensors") {
+      const ids = Array.isArray(payload.ids) ? payload.ids.map(String).filter((id)=>SENSOR_CATALOG.some((sensor)=>sensor.id===id)) : [];
+      current.requiredSensors = [...new Set(ids)];
+      current.hardwareGateOverride = false;
+      appendEvent(current,{eventType:"required_sensors_updated",label:"Required sensors updated",detail:current.requiredSensors.join(", ")||"None",source:"operator"});
+    }
+    if (action === "hardwareGateOverride") {
+      current.hardwareGateOverride = Boolean(payload.enabled);
+      appendEvent(current,{eventType:"hardware_gate_override",label:current.hardwareGateOverride?"Hardware readiness override enabled":"Hardware readiness override cleared",severity:current.hardwareGateOverride?"warn":"info",source:"operator"});
+    }
     if (action === "bp") { current.bpReadings.push({stepId:step?.id ?? "",label:String(payload.label ?? step?.bpLabel ?? "Reading"),systolic:Number(payload.systolic),diastolic:Number(payload.diastolic),pulse:payload.pulse ? Number(payload.pulse) : null,createdAt:now()}); appendEvent(current,{eventType:"bp_recorded",label:"Blood pressure recorded",source:"operator",metadata:{systolic:payload.systolic,diastolic:payload.diastolic,pulse:payload.pulse}}); }
     if (action === "nbackLevel") current.nbackLevel = Math.max(1,Math.min(3,Number(payload.level))) as 1|2|3;
     if (action === "media") { current.media = payload.media as MediaConfig; appendEvent(current,{eventType:"media_config",label:"Media configuration updated",source:"operator"}); }
@@ -195,3 +238,72 @@ export async function mutateSession(code: string, action: string, payload: Actio
 }
 
 export function getBindings() { return bindings(); }
+
+function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPayload) {
+  const seenAt = now();
+  const previous = snapshot.acquisition;
+  const wasOffline = previous.state !== "online" || !previous.lastSeenAt || Date.now() - Date.parse(previous.lastSeenAt) > ACQUISITION_LEASE_MS;
+  snapshot.acquisition = {
+    id:clean(payload.agentId,80), state:"online", host:clean(payload.host,120), platform:clean(payload.platform,120),
+    version:clean(payload.version,32), recordingRoot:clean(payload.recordingRoot,300), lastSeenAt:seenAt,
+    connectedAt:previous.connectedAt ?? seenAt, finalizedAt:null,
+  };
+  if (wasOffline) appendEvent(snapshot,{eventType:"acquisition_connected",label:"Acquisition agent connected",detail:snapshot.acquisition.host,source:"sensor"});
+
+  const reports = Array.isArray(payload.sensors) ? payload.sensors.slice(0,SENSOR_CATALOG.length) : [];
+  for (const raw of reports) {
+    if (!raw || typeof raw !== "object") continue;
+    const report = raw as Record<string,unknown>;
+    const sensor = snapshot.sensors.find((item) => item.id === report.id);
+    if (!sensor) continue;
+    const previousStatus = sensor.status;
+    const status = validSensorStatus(report.status);
+    sensor.status = status;
+    sensor.latencyMs = finiteOrNull(report.latencyMs,0,60_000);
+    sensor.detail = clean(report.detail,160);
+    sensor.rateHz = finiteOrNull(report.rateHz,0,100_000);
+    sensor.sampleCount = finite(report.sampleCount,0,Number.MAX_SAFE_INTEGER);
+    sensor.latestValue = clean(report.latestValue,160);
+    sensor.device = clean(report.device,180);
+    sensor.recordingFile = clean(report.recordingFile,260);
+    sensor.bytesWritten = finite(report.bytesWritten,0,Number.MAX_SAFE_INTEGER);
+    sensor.updatedAt = seenAt;
+    if (previousStatus !== status) appendEvent(snapshot,{
+      eventType:"sensor_status", label:`${sensor.label}: ${status}`, detail:sensor.detail,
+      severity:["missing","error"].includes(status)?"error":status==="delayed"?"warn":"info", source:"sensor",
+      metadata:{sensorId:sensor.id,status,rateHz:sensor.rateHz,sampleCount:sensor.sampleCount},
+    });
+  }
+}
+
+function applyAcquisitionFinalize(snapshot: SessionSnapshot, payload: ActionPayload) {
+  const endedAt = now();
+  const artifacts = Array.isArray(payload.recordings) ? payload.recordings.slice(0,32) : [];
+  snapshot.recordings = artifacts.flatMap((raw): RecordingArtifact[] => {
+    if (!raw || typeof raw !== "object") return [];
+    const item = raw as Record<string,unknown>;
+    const sensorId = clean(item.sensorId,40);
+    if (!SENSOR_CATALOG.some((sensor)=>sensor.id===sensorId)) return [];
+    const quality = ["pending","pass","warning","fail"].includes(String(item.quality)) ? String(item.quality) as RecordingArtifact["quality"] : "pending";
+    return [{sensorId,relativePath:clean(item.relativePath,260),format:clean(item.format,40),sampleCount:finite(item.sampleCount,0,Number.MAX_SAFE_INTEGER),bytes:finite(item.bytes,0,Number.MAX_SAFE_INTEGER),sha256:clean(item.sha256,64),startedAt:clean(item.startedAt,40),endedAt:clean(item.endedAt,40)||endedAt,quality}];
+  });
+  snapshot.acquisition.state = "finalized";
+  snapshot.acquisition.lastSeenAt = endedAt;
+  snapshot.acquisition.finalizedAt = endedAt;
+  appendEvent(snapshot,{eventType:"recordings_finalized",label:"Acquisition files finalized",detail:`${snapshot.recordings.length} files`,source:"sensor",metadata:{recordings:snapshot.recordings.length}});
+}
+
+function clean(value: unknown, max: number) { return Array.from(String(value ?? "")).filter((character)=>character.charCodeAt(0)>=32).join("").slice(0,max); }
+function finite(value: unknown, min: number, max: number) { const number=Number(value); return Number.isFinite(number)?Math.max(min,Math.min(max,Math.round(number))):min; }
+function finiteOrNull(value: unknown, min: number, max: number) { const number=Number(value); return Number.isFinite(number)?Math.max(min,Math.min(max,Math.round(number*100)/100)):null; }
+function validSensorStatus(value: unknown): SensorStatus { const status=String(value) as SensorStatus; return ["connected","recording","delayed","missing","error","unknown"].includes(status)?status:"unknown"; }
+
+export function acquisitionCommand(snapshot: SessionSnapshot) {
+  const step = buildPlan(snapshot.assignment)[snapshot.stepIndex] ?? null;
+  return {
+    serverTime:now(), sessionCode:snapshot.code, participantId:snapshot.participantId,
+    command:["complete","aborted"].includes(snapshot.status)?"finalize":"record",
+    sessionStatus:snapshot.status, revision:snapshot.revision, stepIndex:snapshot.stepIndex,
+    step:step?{id:step.id,label:shortLabel(step),phase:step.phase,startedAt:snapshot.stepStartedAt,attempt:snapshot.attempt}:null,
+  };
+}
