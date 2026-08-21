@@ -15,7 +15,9 @@ export function InstructorConsole({operatorName}:{operatorName:string}) {
   const [clockNow,setClockNow]=useState(()=>Date.now());
   const code=snapshot?.code ?? "";
   const refresh=useCallback(async()=>{if(!code)return;try{setSnapshot(await load(code));setError("")}catch(err){setError(err instanceof Error?err.message:"Unable to refresh.")}},[code]);
+  const heartbeat=useCallback(async()=>{if(!code)return;try{setSnapshot(await api({code,action:"heartbeat"}));setError("")}catch(err){setError(err instanceof Error?err.message:"Unable to keep the session connected.")}},[code]);
   useEffect(()=>{if(!code)return;const id=window.setInterval(refresh,900);return()=>clearInterval(id)},[code,refresh]);
+  useEffect(()=>{if(!code)return;const first=window.setTimeout(heartbeat,0);const id=window.setInterval(heartbeat,4000);return()=>{clearTimeout(first);clearInterval(id)}},[code,heartbeat]);
   useEffect(()=>{const id=window.setInterval(()=>setClockNow(Date.now()),1000);return()=>clearInterval(id)},[]);
   const act=useCallback(async(action:string,payload:Record<string,unknown>={})=>{if(!code)return;try{setSnapshot(await api({code,action,payload}));setError("")}catch(err){setError(err instanceof Error?err.message:"Unable to save.")}},[code]);
 

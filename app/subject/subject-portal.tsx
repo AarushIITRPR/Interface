@@ -57,6 +57,7 @@ export function SubjectPortal() {
 
   const step = snapshot.step;
   if (!step || snapshot.status === "complete" || snapshot.status === "aborted" || step.type === "end") return <main className="subject-shell paper"><p className="completion">Thank you.</p></main>;
+  if (!snapshot.operatorConnected) return <main className="subject-shell paper"><p className="subject-wait">Please wait.</p></main>;
 
   return (
     <main className={`subject-shell ${["washout","bodyscan","clip"].includes(step.type) ? "subject-dark" : "paper"}`}>

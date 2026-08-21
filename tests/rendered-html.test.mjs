@@ -37,6 +37,7 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(subject, /removeItem\("meridian\.subject\.code"\)/);
   assert.match(subject, /role="alert"/);
   assert.match(subject, /Code shown by instructor/);
+  assert.match(subject, /operatorConnected/);
   assert.match(instructor, /Recording health/);
   assert.match(instructor, /Subject connection code/);
   assert.match(instructor, /Previous task/);

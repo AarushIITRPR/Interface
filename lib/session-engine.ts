@@ -6,6 +6,7 @@ type Bindings = { DB: D1Database; MEDIA: R2Bucket };
 const bindings = () => env as unknown as Bindings;
 const now = () => new Date().toISOString();
 const uid = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 18)}`;
+const OPERATOR_LEASE_MS = 12_000;
 
 export async function ensureSchema() {
   const db = bindings().DB;
@@ -47,7 +48,7 @@ export async function createSession(participantId: number, operator: string) {
     operator: operator.trim() || "Operator", protocolVersion: PROTOCOL_VERSION, assignment, status:"running",
     stepIndex:0, attempt:1, stepStartedAt:createdAt, pausedAt:null, announcement:null, events:[], notes:[], ratings:[],
     sensors:SENSOR_CATALOG.map((sensor) => ({ ...sensor, status:"recording", latencyMs:Math.floor(18 + Math.random()*24), detail:"Signal present", updatedAt:createdAt })),
-    bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, createdAt, updatedAt:createdAt,
+    bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt, createdAt, updatedAt:createdAt,
   };
   const event = appendEvent(snapshot,{ eventType:"session_start", label:"Session started", detail:`Participant ${assignment.pid}, Williams row ${assignment.row}`, source:"operator", metadata:{ assignment } });
   appendEvent(snapshot,{ eventType:"step_start", label:"Step started", detail:shortLabel(buildPlan(assignment)[0]), source:"system" });
@@ -82,6 +83,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   if (current?.fixation) mediaSrc = snapshot.media.fixation;
   if (current?.title === "Box breathing") mediaSrc = snapshot.media.boxBreathing;
 
+  const operatorConnected = Boolean(snapshot.operatorLastSeenAt && Date.now() - Date.parse(snapshot.operatorLastSeenAt) <= OPERATOR_LEASE_MS);
   return {
     code: snapshot.code,
     revision: snapshot.revision,
@@ -92,6 +94,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
     stepStartedAt: snapshot.stepStartedAt,
     announcement: snapshot.announcement,
     nbackLevel: snapshot.nbackLevel,
+    operatorConnected,
     mediaSrc,
     step: current ? {
       id: current.id,
@@ -142,6 +145,14 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (expectedStepId && step?.id !== expectedStepId) return current;
 
     if (action === "advance" && current.status === "running") advance(current,String(payload.reason ?? ""),(payload.source === "subject" ? "subject" : "operator"));
+    if (action === "heartbeat") {
+      const previousSeen = current.operatorLastSeenAt ? Date.parse(current.operatorLastSeenAt) : NaN;
+      const gap = Number.isFinite(previousSeen) ? Date.now() - previousSeen : 0;
+      if (gap > OPERATOR_LEASE_MS && current.status === "running") {
+        current.stepStartedAt = new Date(Date.parse(current.stepStartedAt) + gap - OPERATOR_LEASE_MS).toISOString();
+      }
+      current.operatorLastSeenAt = now();
+    }
     if (action === "navigate" && current.status !== "aborted") {
       const direction = Number(payload.direction) < 0 ? -1 : 1;
       const targetIndex = Math.max(0,Math.min(plan.length - 1,current.stepIndex + direction));

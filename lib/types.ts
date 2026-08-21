@@ -93,6 +93,7 @@ export type SessionSnapshot = {
   bpReadings: Array<{ stepId: string; label: string; systolic: number; diastolic: number; pulse: number | null; createdAt: string }>;
   media: MediaConfig;
   nbackLevel: 1 | 2 | 3;
+  operatorLastSeenAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -113,6 +114,7 @@ export type SubjectSnapshot = {
   stepStartedAt: string;
   announcement: SessionSnapshot["announcement"];
   nbackLevel: 1 | 2 | 3;
+  operatorConnected: boolean;
   mediaSrc: string;
   step: SubjectStep | null;
 };
