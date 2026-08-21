@@ -97,6 +97,26 @@ export type SessionSnapshot = {
   updatedAt: string;
 };
 
+export type SubjectStep = Pick<ProtocolStep,
+  "id" | "index" | "type" | "subjectPrompt" | "durationSec" | "safety" | "fixation" | "advance"
+> & {
+  variant: "box_breathing" | "breath_hold" | null;
+};
+
+export type SubjectSnapshot = {
+  code: string;
+  revision: number;
+  status: SessionStatus;
+  stepIndex: number;
+  stepCount: number;
+  attempt: number;
+  stepStartedAt: string;
+  announcement: SessionSnapshot["announcement"];
+  nbackLevel: 1 | 2 | 3;
+  mediaSrc: string;
+  step: SubjectStep | null;
+};
+
 export const DEFAULT_MEDIA: MediaConfig = {
   emotions: { happy: "", sad: "", anger: "", fear: "", surprise: "", disgust: "" },
   washout: "",

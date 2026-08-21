@@ -8,7 +8,7 @@ type HistoryItem = {code:string;participant_id:number;operator:string;status:str
 async function api(body:Record<string,unknown>) { const response=await fetch("/api/sessions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||"Unable to save.");return data.session as SessionSnapshot; }
 async function load(code:string) { const response=await fetch(`/api/sessions?code=${encodeURIComponent(code)}`,{cache:"no-store"});const data=await response.json();if(!response.ok)throw new Error(data.error||"Session not found.");return data.session as SessionSnapshot; }
 
-export function InstructorConsole() {
+export function InstructorConsole({operatorName}:{operatorName:string}) {
   const [snapshot,setSnapshot]=useState<SessionSnapshot|null>(null);
   const [tab,setTab]=useState<"live"|"data"|"config"|"history">("live");
   const [error,setError]=useState("");
@@ -19,7 +19,7 @@ export function InstructorConsole() {
   useEffect(()=>{const id=window.setInterval(()=>setClockNow(Date.now()),1000);return()=>clearInterval(id)},[]);
   const act=useCallback(async(action:string,payload:Record<string,unknown>={})=>{if(!code)return;try{setSnapshot(await api({code,action,payload}));setError("")}catch(err){setError(err instanceof Error?err.message:"Unable to save.")}},[code]);
 
-  if(!snapshot) return <Preflight onStarted={(session)=>setSnapshot(session)} onRestore={async(value)=>setSnapshot(await load(value))} />;
+  if(!snapshot) return <Preflight defaultOperator={operatorName} onStarted={(session)=>setSnapshot(session)} onRestore={async(value)=>setSnapshot(await load(value))} />;
   const plan=buildPlan(snapshot.assignment); const step=plan[snapshot.stepIndex]; const elapsed=Math.max(0,(clockNow-Date.parse(snapshot.createdAt))/1000);
   const warningCount=snapshot.sensors.filter(sensor=>["delayed","missing","error"].includes(sensor.status)).length;
 
@@ -42,8 +42,8 @@ export function InstructorConsole() {
   </main>;
 }
 
-function Preflight({onStarted,onRestore}:{onStarted:(s:SessionSnapshot)=>void;onRestore:(code:string)=>Promise<void>}) {
-  const [participant,setParticipant]=useState("");const [operator,setOperator]=useState("");const [restore,setRestore]=useState("");const [busy,setBusy]=useState(false);const [error,setError]=useState("");
+function Preflight({defaultOperator,onStarted,onRestore}:{defaultOperator:string;onStarted:(s:SessionSnapshot)=>void;onRestore:(code:string)=>Promise<void>}) {
+  const [participant,setParticipant]=useState("");const [operator,setOperator]=useState(defaultOperator);const [restore,setRestore]=useState("");const [busy,setBusy]=useState(false);const [error,setError]=useState("");
   const checks=["Participant ID","Protocol assignment","Recording services","Sensor connectivity","Synchronization","Protocol version"];
   const start=async()=>{setBusy(true);setError("");try{const session=await api({action:"create",participantId:Number(participant),operator});window.localStorage.setItem("meridian.operator.code",session.code);onStarted(session)}catch(err){setError(err instanceof Error?err.message:"Unable to start.")}finally{setBusy(false)}};
   return <main className="preflight-shell"><header><span className="console-wordmark">Meridian</span><span>Instructor console</span></header><section className="preflight-card"><div className="preflight-intro"><p className="eyebrow">New session</p><h1>Ready the room.</h1><p>Confirm the assignment and recording chain before the subject begins.</p></div><div className="preflight-form"><label>Participant ID<input inputMode="numeric" value={participant} onChange={event=>setParticipant(event.target.value.replace(/\D/g,""))} placeholder="0001"/></label><label>Operator<input value={operator} onChange={event=>setOperator(event.target.value)} placeholder="Name"/></label><div className="readiness"><div><strong>{participant?"Ready":"Action required"}</strong><span>{participant?"Deterministic assignment prepared":"Enter a participant ID"}</span></div>{checks.map((check,index)=><p key={check}><span className={participant||index>0?"check-dot ok":"check-dot"}/>{check}<b>{participant||index>0?"Ready":"Required"}</b></p>)}</div>{error?<p className="form-error">{error}</p>:null}<button className="primary-action" disabled={!participant||busy} onClick={start}>{busy?"Preparing":"Start session"}</button></div></section><section className="restore-row"><label>Resume session<input value={restore} onChange={event=>setRestore(event.target.value.toUpperCase())} placeholder="Session code"/></label><button disabled={!restore} onClick={()=>onRestore(restore)}>Restore</button></section></main>;

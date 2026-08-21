@@ -1,4 +1,5 @@
 import { ensureSchema, getBindings } from "@/lib/session-engine";
+import { getOperatorUser } from "@/app/operator-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -13,11 +14,13 @@ export async function GET(request: Request) {
     object.writeHttpMetadata(headers); headers.set("etag",object.httpEtag); headers.set("cache-control","public, max-age=86400");
     return new Response(object.body,{headers});
   }
+  if (!await getOperatorUser()) return Response.json({error:"Instructor authorization is required."},{status:401});
   const rows = await getBindings().DB.prepare(`SELECT id, object_key, filename, content_type, size, created_at FROM media_assets ORDER BY created_at DESC LIMIT 100`).all();
   return Response.json({assets:rows.results});
 }
 
 export async function POST(request: Request) {
+  if (!await getOperatorUser()) return Response.json({error:"Instructor authorization is required."},{status:401});
   await ensureSchema();
   const form = await request.formData();
   const file = form.get("file");

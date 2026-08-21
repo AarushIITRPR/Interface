@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
-import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type ExperimentEvent, type MediaConfig, type SensorStatus, type SessionSnapshot } from "./types";
+import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type ExperimentEvent, type MediaConfig, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
 const bindings = () => env as unknown as Bindings;
@@ -70,6 +70,41 @@ export async function listSessions() {
   await ensureSchema();
   const result = await bindings().DB.prepare(`SELECT code, participant_id, operator, status, step_index, revision, created_at, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 50`).all();
   return result.results;
+}
+
+export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
+  const plan = buildPlan(snapshot.assignment);
+  const current = plan[snapshot.stepIndex] ?? null;
+  let mediaSrc = "";
+  if (current?.type === "clip" && current.emo) mediaSrc = snapshot.media.emotions[current.emo];
+  if (current?.type === "washout") mediaSrc = snapshot.media.washout;
+  if (current?.type === "bodyscan") mediaSrc = snapshot.media.bodyScan;
+  if (current?.fixation) mediaSrc = snapshot.media.fixation;
+  if (current?.title === "Box breathing") mediaSrc = snapshot.media.boxBreathing;
+
+  return {
+    code: snapshot.code,
+    revision: snapshot.revision,
+    status: snapshot.status,
+    stepIndex: snapshot.stepIndex,
+    stepCount: plan.length,
+    attempt: snapshot.attempt,
+    stepStartedAt: snapshot.stepStartedAt,
+    announcement: snapshot.announcement,
+    nbackLevel: snapshot.nbackLevel,
+    mediaSrc,
+    step: current ? {
+      id: current.id,
+      index: current.index,
+      type: current.type,
+      subjectPrompt: current.subjectPrompt,
+      durationSec: current.durationSec,
+      safety: current.safety,
+      fixation: current.fixation,
+      advance: current.advance,
+      variant: current.title === "Box breathing" ? "box_breathing" : current.title === "Breath hold" ? "breath_hold" : null,
+    } : null,
+  };
 }
 
 async function persistEvent(sessionId: string, event: ExperimentEvent) {
