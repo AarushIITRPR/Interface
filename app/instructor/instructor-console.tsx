@@ -26,13 +26,16 @@ export function InstructorConsole({operatorName}:{operatorName:string}) {
   return <main className="console-shell">
     <header className="console-header">
       <div><span className="console-wordmark">Meridian</span><span className="live-dot"/> <span className="session-state">{snapshot.status}</span></div>
-      <div className="session-identity"><span>P{snapshot.participantId}</span><span>{snapshot.code}</span><span>v{snapshot.revision}</span><span>{formatClock(elapsed)}</span></div>
+      <div className="session-identity"><span>Participant P{snapshot.participantId}</span><span>v{snapshot.revision}</span><span>{formatClock(elapsed)}</span></div>
       <div className="header-actions">{snapshot.status==="paused"?<button onClick={()=>act("resume")}>Resume</button>:<button onClick={()=>act("pause",{reason:"Operator pause"})}>Pause</button>}<button className="danger-text" onClick={()=>act("abort")}>End</button></div>
     </header>
     <nav className="console-tabs" aria-label="Console sections">
       {(["live","data","config","history"] as const).map(value=><button key={value} className={tab===value?"active":""} onClick={()=>setTab(value)}>{value}</button>)}
       {warningCount>0?<span className="health-warning">{warningCount} warnings</span>:<span className="health-ok">Recording healthy</span>}
     </nav>
+    <section className="session-connect-strip" aria-label="Subject connection">
+      <span>Subject connection code</span><strong>{snapshot.code}</strong><button onClick={()=>void navigator.clipboard?.writeText(snapshot.code)}>Copy code</button><a href={`/subject?session=${snapshot.code}`} target="_blank" rel="noreferrer">Open subject display</a>
+    </section>
     {error?<div className="console-error" role="alert">{error}</div>:null}
     {tab==="live"?<LiveWorkspace snapshot={snapshot} act={act}/>:null}
     {tab==="data"?<DataPanel snapshot={snapshot}/>:null}

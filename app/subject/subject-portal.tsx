@@ -30,7 +30,7 @@ export function SubjectPortal() {
     try { const next=await sessionRequest(code); setSnapshot(next); setError(""); }
     catch (err) {
       const message=err instanceof Error ? err.message : "Unable to connect.";
-      setError(message);
+      setError(message === "Session not found." ? "Check the instructor code." : message);
       if(message === "Session not found.") {
         window.localStorage.removeItem("meridian.subject.code");
         setSnapshot(null);
@@ -46,8 +46,8 @@ export function SubjectPortal() {
   if (!code) return (
     <main className="subject-shell paper">
       <form className="connect-form" onSubmit={(event)=>{event.preventDefault();const value=draft.trim().toUpperCase();if(!value)return;setError("");window.localStorage.setItem("meridian.subject.code",value);setCode(value);}}>
-        <label htmlFor="session-code">Session code</label>
-        <input id="session-code" value={draft} onChange={(event)=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} />
+        <label htmlFor="session-code">Code shown by instructor</label>
+        <input id="session-code" value={draft} onChange={(event)=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} placeholder="0009AB7K" />
         {error ? <p className="form-error" role="alert">{error}</p> : null}
         <button type="submit" className="paper-button">Connect</button>
       </form>
