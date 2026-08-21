@@ -28,7 +28,16 @@ export function SubjectPortal() {
   const refresh = useCallback(async () => {
     if (!code) return;
     try { const next=await sessionRequest(code); setSnapshot(next); setError(""); }
-    catch (err) { setError(err instanceof Error ? err.message : "Unable to connect."); }
+    catch (err) {
+      const message=err instanceof Error ? err.message : "Unable to connect.";
+      setError(message);
+      if(message === "Session not found.") {
+        window.localStorage.removeItem("meridian.subject.code");
+        setSnapshot(null);
+        setDraft("");
+        setCode("");
+      }
+    }
   },[code]);
 
   useEffect(() => { if(!code)return; const first=window.setTimeout(refresh,0); const id=window.setInterval(refresh,850); return()=>{clearTimeout(first);clearInterval(id)}; },[code,refresh]);
@@ -36,9 +45,10 @@ export function SubjectPortal() {
 
   if (!code) return (
     <main className="subject-shell paper">
-      <form className="connect-form" onSubmit={(event)=>{event.preventDefault();const value=draft.trim().toUpperCase();if(!value)return;window.localStorage.setItem("meridian.subject.code",value);setCode(value);}}>
+      <form className="connect-form" onSubmit={(event)=>{event.preventDefault();const value=draft.trim().toUpperCase();if(!value)return;setError("");window.localStorage.setItem("meridian.subject.code",value);setCode(value);}}>
         <label htmlFor="session-code">Session code</label>
         <input id="session-code" value={draft} onChange={(event)=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} />
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
         <button type="submit" className="paper-button">Connect</button>
       </form>
     </main>
