@@ -1,5 +1,5 @@
 import { getOperatorUser } from "@/app/operator-auth";
-import { createSession, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
+import { createSession, getLatestActiveSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +10,11 @@ export async function GET(request: Request) {
   if (url.searchParams.get("list") === "1") {
     if (!operator) return unauthorized();
     return Response.json({ sessions: await listSessions() });
+  }
+  const participantId = Number(url.searchParams.get("participantId"));
+  if (subjectView && Number.isSafeInteger(participantId) && participantId > 0) {
+    const active = await getLatestActiveSessionForParticipant(participantId);
+    return active ? Response.json({session:toSubjectSnapshot(active)}) : Response.json({error:"No active session for this participant."},{status:404});
   }
   const code = url.searchParams.get("code")?.trim().toUpperCase() ?? "";
   if (!code) return Response.json({ error:"Session code is required." },{status:400});
@@ -39,7 +44,7 @@ export async function POST(request: Request) {
   }
 }
 
-const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete"]);
+const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat"]);
 
 function isSubjectAction(action:string,payload:Record<string,unknown>) {
   if (!SUBJECT_ACTIONS.has(action)) return false;
@@ -49,6 +54,7 @@ function isSubjectAction(action:string,payload:Record<string,unknown>) {
 
 function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): Record<string,unknown> {
   const expectedStepId = String(payload.expectedStepId ?? "").slice(0,80);
+  if (action === "subjectHeartbeat") return {};
   if (action === "ack") return {};
   if (action === "pause") return {reason:"Subject requested a stop",source:"subject"};
   if (action === "advance") return {expectedStepId,reason:"Subject completed the step",source:"subject"};

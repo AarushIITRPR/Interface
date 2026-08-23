@@ -4,17 +4,20 @@ import argparse
 import json
 import os
 import platform
+import shutil
 import signal
 import socket
 import sys
 import time
 import uuid
 from pathlib import Path
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import __version__
-from .sensors import Sensor, discover_serial_assignments, iso_now, make_sensor
+from .preview import PreviewServer
+from .sensors import CameraSensor, Sensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor
 
 
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
@@ -43,12 +46,21 @@ class MeridianAgent:
         self.stop_requested = False
         self.last_marker: tuple | None = None
         self.last_command: dict | None = None
+        self.inventory: dict[str,list[dict]] = {"video":[],"audio":[],"serial":[]}
+        self.device_config: dict[str,str] = {}
+        self.config_revision = -1
+        self.clock_offset_ms = 0.0
+        self.recording_started = False
+        self.preview: PreviewServer | None = None
+        self.preflight_started_mono = 0.0
+        self.preflight_result: dict = {"status":"idle","detail":"Not run","completedAt":None}
 
     def request(self, action: str, **content) -> dict:
         payload = {"code":self.code,"token":self.token,"action":action,**content}
         body = json.dumps(payload,separators=(",",":")).encode("utf-8")
         request = Request(self.endpoint,data=body,method="POST",headers={"content-type":"application/json","user-agent":f"meridian-agent/{__version__}"})
         try:
+            sent_at = time.time()
             with urlopen(request,timeout=self.args.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
@@ -59,19 +71,40 @@ class MeridianAgent:
             raise MeridianHttpError(message) from exc
         if "command" not in data:
             raise RuntimeError(data.get("error","Meridian returned no command"))
-        return data["command"]
+        command = data["command"]
+        try:
+            server_time = datetime.fromisoformat(str(command.get("serverTime","")).replace("Z","+00:00")).timestamp()
+            self.clock_offset_ms = round((server_time - ((sent_at + time.time()) / 2)) * 1000,2)
+        except (ValueError,TypeError):
+            pass
+        return command
 
     def agent_payload(self) -> dict:
+        usage = shutil.disk_usage(self.session_dir)
+        free_gb = usage.free / (1024 ** 3)
+        reports = [sensor.report() for sensor in self.sensors]
+        recorded = [report for report in reports if report.status == "recording"]
+        dropped = sum(report.droppedSamples for report in reports)
+        samples = sum(report.sampleCount for report in reports)
         return {
             "id":self.agent_id,
             "host":self.host,
             "platform":f"{platform.system()} {platform.release()}",
             "version":__version__,
             "recordingRoot":str(self.session_dir),
+            "inventory":self.inventory,
+            "diskFreeGb":round(free_gb,2),
+            "estimatedHours":round(free_gb/18.0,1),
+            "clockOffsetMs":self.clock_offset_ms,
+            "openFileCount":len(recorded) if self.recording_started else 0,
+            "droppedPct":round(100*dropped/max(1,samples+dropped),3),
+            "previewUrls":self.preview.urls() if self.preview else {},
+            "configRevision":self.config_revision,
+            "preflightTest":self.preflight_result,
         }
 
-    def configure(self) -> None:
-        values = {
+    def configure(self, requested: dict | None = None, revision: int = 0) -> None:
+        defaults = {
             "face":self.args.camera,
             "audio":self.args.audio,
             "oximeter":self.args.oximeter,
@@ -81,16 +114,62 @@ class MeridianAgent:
             "ecg":self.args.ecg,
             "thermal":self.args.thermal,
         }
+        values = {sensor_id:("simulate" if self.args.simulate_all else str((requested or {}).get(sensor_id,defaults[sensor_id]))) for sensor_id in SENSOR_IDS}
         bauds = {"csi":self.args.csi_baud,"emg":self.args.emg_baud,"gsr":self.args.gsr_baud,"ecg":self.args.ecg_baud}
         values,inventory = discover_serial_assignments(values,bauds)
         self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono) for sensor_id in SENSOR_IDS]
+        self.device_config = values
+        self.config_revision = revision
         metadata = {
             "sessionCode":self.code,"agentId":self.agent_id,"host":self.host,
             "platform":platform.platform(),"agentVersion":__version__,"startedAt":iso_now(),
             "clock":{"hostEpochNs":time.time_ns(),"monotonicOrigin":self.origin_mono},
-            "devices":values,"serialInventory":inventory,"bauds":bauds,
+            "devices":values,"serialInventory":inventory,"deviceInventory":self.inventory,"bauds":bauds,
         }
         (self.session_dir / "acquisition.json").write_text(json.dumps(metadata,indent=2),encoding="utf-8")
+
+    def start_sensors(self) -> None:
+        for sensor in self.sensors:
+            sensor.start()
+
+    def reconfigure(self, requested: dict, revision: int) -> None:
+        if self.recording_started:
+            return
+        self.inventory = discover_device_inventory()
+        for sensor in self.sensors:
+            sensor.stop()
+        self.configure(requested,revision)
+        self.preflight_result = {"status":"idle","detail":"Run preflight after changing hardware","completedAt":None}
+        self.start_sensors()
+
+    def preview_frame(self, sensor_id: str) -> bytes | None:
+        sensor = next((item for item in self.sensors if item.sensor_id == sensor_id),None)
+        return sensor.preview_frame() if isinstance(sensor,CameraSensor) else None
+
+    def apply_command(self, command: dict, reports: list[dict] | None = None) -> None:
+        requested = command.get("deviceConfig") if isinstance(command.get("deviceConfig"),dict) else {}
+        revision = int(command.get("configRevision",0))
+        if revision != self.config_revision and command.get("command") != "record":
+            self.reconfigure(requested,revision)
+        if command.get("command") == "record" and not self.recording_started:
+            for sensor in self.sensors:
+                sensor.start_recording()
+            self.recording_started = True
+        if command.get("command") == "test" and self.preflight_result.get("status") != "running":
+            self.preflight_started_mono = time.monotonic()
+            self.preflight_result = {"status":"running","detail":"Validating streams and local storage","completedAt":None}
+        if self.preflight_result.get("status") == "running" and time.monotonic()-self.preflight_started_mono >= 10:
+            current_reports = reports or [sensor.report().payload() for sensor in self.sensors]
+            required = set(map(str,command.get("requiredSensors") or []))
+            failed = [item["id"] for item in current_reports if item["id"] in required and item.get("quality") != "good"]
+            probe = self.session_dir / "preflight_test.json"
+            payload = {"completedAt":iso_now(),"required":sorted(required),"failed":failed,"diskFreeGb":round(shutil.disk_usage(self.session_dir).free/(1024**3),2)}
+            probe.write_text(json.dumps(payload,indent=2),encoding="utf-8")
+            verified = json.loads(probe.read_text(encoding="utf-8")) == payload
+            sync_ok = abs(self.clock_offset_ms) < 100
+            passed = not failed and verified and payload["diskFreeGb"] >= 10 and sync_ok
+            problem = ", ".join(failed) if failed else "clock synchronization" if not sync_ok else "local storage"
+            self.preflight_result = {"status":"pass" if passed else "fail","detail":"All required streams, synchronization, and local storage passed" if passed else "Check: "+problem,"completedAt":payload["completedAt"]}
 
     def write_marker(self, command: dict) -> None:
         step = command.get("step") or {}
@@ -113,10 +192,13 @@ class MeridianAgent:
         self.write_marker(command)
         if command.get("command") == "finalize":
             raise RuntimeError("This Meridian session has already ended")
-        self.configure()
-        for sensor in self.sensors:
-            sensor.start()
-        print(f"Recording locally in {self.session_dir}")
+        self.inventory = discover_device_inventory()
+        self.configure(command.get("deviceConfig"),int(command.get("configRevision",0)))
+        self.start_sensors()
+        self.preview = PreviewServer(self.preview_frame,self.token[-16:],self.args.preview_port)
+        self.preview.start()
+        self.apply_command(command)
+        print(f"Monitoring locally in {self.session_dir}")
 
     def run(self) -> int:
         self.start()
@@ -128,6 +210,7 @@ class MeridianAgent:
                     command = self.request("heartbeat",agent=self.agent_payload(),sensors=reports)
                     self.last_command = command
                     self.write_marker(command)
+                    self.apply_command(command,reports)
                     network_errors = 0
                     healthy = sum(report["status"] == "recording" for report in reports)
                     print(f"\r{healthy}/{len(reports)} sensors recording | step {int(command.get('stepIndex',0))+1} | revision {command.get('revision')}",end="",flush=True)
@@ -142,7 +225,10 @@ class MeridianAgent:
         finally:
             print("\nFinalizing local recordings")
             for sensor in self.sensors:
+                sensor.stop_recording()
                 sensor.stop()
+            if self.preview:
+                self.preview.stop()
             artifacts = [artifact.payload() for sensor in self.sensors if (artifact := sensor.artifact())]
             manifest = {"sessionCode":self.code,"finalizedAt":iso_now(),"recordings":artifacts}
             (self.session_dir / "manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
@@ -175,6 +261,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--ecg",default="none",help="ECG newline serial port")
     result.add_argument("--ecg-baud",type=int,default=115200)
     result.add_argument("--thermal",default="none",help="Thermal camera index/path")
+    result.add_argument("--preview-port",type=int,default=8765,help="Loopback-only camera preview port")
     result.add_argument("--simulate-all",action="store_true",help="Use deterministic simulated streams for integration testing")
     return result
 

@@ -35,17 +35,19 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-## Start a recording
+## Hardware-first workflow
 
-Create or restore a session in the instructor portal. Copy the subject code and the separate acquisition token shown there. Then run:
+Create or restore a session in the instructor portal. Copy the subject code and the separate acquisition token shown there. Start the agent once with the short command below. Device selection, hardware refresh, required-stream selection, the 10-second test, and recording start are then controlled from Meridian Setup.
 
 ```text
 python -m meridian_agent --code 0009AB7K --token mac_REPLACE_ME
 ```
 
+For a local Meridian server, include `--server http://localhost:3000`. The optional loopback camera preview is available only to the browser on the same Windows computer as the agent. Raw camera frames and sensor samples are never uploaded through the portal.
+
 On Linux, serial ports normally look like `/dev/ttyUSB0` or `/dev/ttyACM0`.
 
-The agent auto-detects the camera and CMS50E, then probes unclaimed serial ports for the EMG header, GSR JSON shape, and CSI CSV shape before opening any recorder. Explicit ports can still be provided when a lab has fixed device assignments:
+The agent enumerates Windows cameras, microphone inputs, and serial devices for the Setup selectors. It auto-detects the camera and CMS50E, then probes unclaimed serial ports for the EMG header, GSR JSON shape, and CSI CSV shape before opening any recorder. Explicit command-line ports remain available as fallback defaults for a lab with fixed assignments:
 
 ```text
 python -m meridian_agent --code 0009AB7K --token mac_REPLACE_ME --csi COM5 --emg COM6 --gsr COM7 --ecg COM8

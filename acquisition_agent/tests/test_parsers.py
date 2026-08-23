@@ -1,8 +1,9 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from meridian_agent.sensors import CsiSensor, EmgSensor, GsrSensor, OximeterSensor
+from meridian_agent.sensors import CsiSensor, EmgSensor, GsrSensor, OximeterSensor, SimulatedSensor
 
 
 class ParserTests(unittest.TestCase):
@@ -37,6 +38,23 @@ class ParserTests(unittest.TestCase):
         sensor = GsrSensor("gsr","COM7",115200,self.root,0)
         parsed = sensor.parse('{"uS":2.34,"raw":1856,"stress":42,"zScore":0.87}')
         self.assertEqual(parsed,([2.34,1856,42.0,0.87],"2.34 uS"))
+
+    def test_probe_and_recording_states_are_distinct(self):
+        sensor = SimulatedSensor("oximeter",self.root,time.monotonic())
+        sensor.start()
+        time.sleep(0.2)
+        probe = sensor.report()
+        self.assertEqual(probe.status,"connected")
+        self.assertTrue(probe.dataDetected)
+        sensor.start_recording()
+        time.sleep(0.2)
+        recording = sensor.report()
+        self.assertEqual(recording.status,"recording")
+        sensor.stop_recording()
+        sensor.stop()
+        artifact = sensor.artifact()
+        self.assertIsNotNone(artifact)
+        self.assertGreater(artifact.sampleCount,0)
 
 
 if __name__ == "__main__":

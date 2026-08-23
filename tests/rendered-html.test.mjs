@@ -39,6 +39,9 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(subject, /Code shown by instructor/);
   assert.match(subject, /operatorConnected/);
   assert.match(subject, /Change session/);
+  assert.match(subject, /participantSessionRequest/);
+  assert.match(subject, /next\.revision > current\.revision/);
+  assert.match(subject, /\["complete","aborted"\]/);
   assert.match(instructor, /Recording health/);
   assert.match(instructor, /Subject code/);
   assert.match(instructor, /Acquisition token/);
@@ -50,6 +53,15 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(instructor, /Next task/);
   assert.match(instructor, /Live event log/);
   assert.match(instructor, /Session report/);
+  assert.match(instructor, /Connect, detect, validate/);
+  assert.match(instructor, /Hardware detected/);
+  assert.match(instructor, /Data detected/);
+  assert.match(instructor, /Quality acceptable/);
+  assert.match(instructor, /Test all selected devices/);
+  assert.match(instructor, /Start recording and protocol/);
+  assert.match(instructor, /Short rolling quality windows/);
+  assert.match(instructor, /Session quality report/);
+  for (const mode of ["setup","monitor","protocol","review"]) assert.match(instructor,new RegExp(`"${mode}"`));
   assert.match(protocol, /WILLIAMS6/);
   assert.match(protocol, /Guided body scan/);
   assert.match(hosting, /"d1": "DB"/);

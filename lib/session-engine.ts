@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
-import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
+import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
 const bindings = () => env as unknown as Bindings;
@@ -9,6 +9,8 @@ const uid = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-",
 const acquisitionToken = () => `mac_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 const OPERATOR_LEASE_MS = 12_000;
 export const ACQUISITION_LEASE_MS = 10_000;
+const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:500,thermal:9 };
+const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none" };
 
 export async function ensureSchema() {
   const db = bindings().DB;
@@ -42,11 +44,11 @@ function sessionCode(pid: number) {
 }
 
 function emptySensor(sensor: Pick<SensorChannel,"id"|"label"|"group">, createdAt: string): SensorChannel {
-  return { ...sensor, status:"unknown", latencyMs:null, detail:"Waiting for acquisition agent", rateHz:null, sampleCount:0, latestValue:"", device:"", recordingFile:"", bytesWritten:0, updatedAt:createdAt };
+  return { ...sensor, status:"unknown", latencyMs:null, detail:"Waiting for acquisition agent", rateHz:null, sampleCount:0, latestValue:"", device:"", recordingFile:"", bytesWritten:0,targetRateHz:TARGET_RATES[sensor.id]??null,hardwareDetected:false,dataDetected:false,quality:"waiting",droppedSamples:0,dropoutPct:0,metrics:{},series:[],validation:[],updatedAt:createdAt };
 }
 
 function emptyAcquisition(): AcquisitionAgent {
-  return { id:"", state:"waiting", host:"", platform:"", version:"", recordingRoot:"", lastSeenAt:null, connectedAt:null, finalizedAt:null };
+  return { id:"", state:"waiting", host:"", platform:"", version:"", recordingRoot:"", lastSeenAt:null, connectedAt:null, finalizedAt:null,inventory:{video:[],audio:[],serial:[]},diskFreeGb:null,estimatedHours:null,clockOffsetMs:null,openFileCount:0,droppedPct:0,previewUrls:{},configRevision:0 };
 }
 
 function hydrateSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
@@ -57,9 +59,18 @@ function hydrateSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
   });
   snapshot.acquisitionToken ||= `mac_${snapshot.id.replaceAll("-","").slice(-18)}${snapshot.code}`;
   snapshot.acquisition = { ...emptyAcquisition(), ...(snapshot.acquisition ?? {}) };
-  snapshot.recordings = Array.isArray(snapshot.recordings) ? snapshot.recordings : [];
+  snapshot.recordings = Array.isArray(snapshot.recordings) ? snapshot.recordings.map((recording) => ({
+    durationSec:0, averageRateHz:0, droppedSamples:0, dropoutPct:0, gapCount:0,
+    totalGapSec:0, longestGapSec:0, availabilityPct:0, ...recording,
+  })) : [];
   snapshot.requiredSensors = Array.isArray(snapshot.requiredSensors) ? snapshot.requiredSensors : ["face","oximeter","csi","emg"];
   snapshot.hardwareGateOverride = Boolean(snapshot.hardwareGateOverride);
+  snapshot.deviceConfig = { ...DEFAULT_DEVICE_CONFIG, ...(snapshot.deviceConfig ?? {}) };
+  snapshot.configRevision = Number.isFinite(snapshot.configRevision) ? snapshot.configRevision : 0;
+  snapshot.configurationLocked = snapshot.configurationLocked === undefined ? ["running","paused","complete","aborted"].includes(snapshot.status) : Boolean(snapshot.configurationLocked);
+  snapshot.recordingStartedAt = snapshot.recordingStartedAt ?? (["running","paused"].includes(snapshot.status) ? snapshot.createdAt : null);
+  snapshot.preflightTest = snapshot.preflightTest ?? {status:"idle",detail:"Not run",completedAt:null};
+  snapshot.subjectLastSeenAt = snapshot.subjectLastSeenAt ?? null;
   return snapshot;
 }
 
@@ -69,26 +80,32 @@ export async function createSession(participantId: number, operator: string) {
   const createdAt = now();
   const snapshot: SessionSnapshot = {
     id: uid("ses"), code: sessionCode(assignment.pid), revision: 1, participantId: assignment.pid,
-    operator: operator.trim() || "Operator", protocolVersion: PROTOCOL_VERSION, assignment, status:"running",
+    operator: operator.trim() || "Operator", protocolVersion: PROTOCOL_VERSION, assignment, status:"setup",
     stepIndex:0, attempt:1, stepStartedAt:createdAt, pausedAt:null, announcement:null, events:[], notes:[], ratings:[],
     sensors:SENSOR_CATALOG.map((sensor) => emptySensor(sensor,createdAt)),
-    bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt,
-    acquisitionToken:acquisitionToken(), acquisition:emptyAcquisition(), recordings:[], requiredSensors:["face","oximeter","csi","emg"], hardwareGateOverride:false, createdAt, updatedAt:createdAt,
+    bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt,subjectLastSeenAt:null,
+    acquisitionToken:acquisitionToken(), acquisition:emptyAcquisition(), recordings:[], requiredSensors:["face","audio","oximeter"], hardwareGateOverride:false,deviceConfig:{...DEFAULT_DEVICE_CONFIG},configRevision:1,configurationLocked:false,recordingStartedAt:null,preflightTest:{status:"idle",detail:"Not run",completedAt:null}, createdAt, updatedAt:createdAt,
   };
-  const event = appendEvent(snapshot,{ eventType:"session_start", label:"Session started", detail:`Participant ${assignment.pid}, Williams row ${assignment.row}`, source:"operator", metadata:{ assignment } });
-  appendEvent(snapshot,{ eventType:"step_start", label:"Step started", detail:shortLabel(buildPlan(assignment)[0]), source:"system" });
+  const event = appendEvent(snapshot,{ eventType:"session_prepared", label:"Session prepared", detail:`Participant ${assignment.pid}, Williams row ${assignment.row}`, source:"operator", metadata:{ assignment } });
   snapshot.revision = 2;
   const db = bindings().DB;
   await db.prepare(`INSERT INTO sessions (id, code, participant_id, operator, protocol_version, status, step_index, revision, assignment_json, snapshot_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(snapshot.id,snapshot.code,snapshot.participantId,snapshot.operator,snapshot.protocolVersion,snapshot.status,snapshot.stepIndex,snapshot.revision,JSON.stringify(assignment),JSON.stringify(snapshot),createdAt,createdAt).run();
   await persistEvent(snapshot.id,event);
-  await persistEvent(snapshot.id,snapshot.events[1]);
   return snapshot;
 }
 
 export async function getSession(code: string) {
   await ensureSchema();
   const row = await bindings().DB.prepare(`SELECT snapshot_json FROM sessions WHERE code = ? LIMIT 1`).bind(code.toUpperCase()).first<{snapshot_json:string}>();
+  return row ? hydrateSnapshot(JSON.parse(row.snapshot_json) as SessionSnapshot) : null;
+}
+
+export async function getLatestActiveSessionForParticipant(participantId: number) {
+  await ensureSchema();
+  if (!Number.isSafeInteger(participantId) || participantId < 1) return null;
+  const row = await bindings().DB.prepare(`SELECT snapshot_json FROM sessions WHERE participant_id = ? AND status IN ('setup','running','paused') ORDER BY created_at DESC LIMIT 1`)
+    .bind(participantId).first<{snapshot_json:string}>();
   return row ? hydrateSnapshot(JSON.parse(row.snapshot_json) as SessionSnapshot) : null;
 }
 
@@ -116,6 +133,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   }));
   return {
     code: snapshot.code,
+    participantId: snapshot.participantId,
     revision: snapshot.revision,
     status: snapshot.status,
     stepIndex: snapshot.stepIndex,
@@ -162,6 +180,14 @@ function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"o
   appendEvent(snapshot,{ eventType:"step_start", label:"Step started", detail:shortLabel(plan[snapshot.stepIndex]), source:"system" });
 }
 
+function requiredSensorsReady(snapshot: SessionSnapshot) {
+  const online = Boolean(snapshot.acquisition.lastSeenAt && Date.now()-Date.parse(snapshot.acquisition.lastSeenAt)<=ACQUISITION_LEASE_MS);
+  return online && snapshot.requiredSensors.every((id)=>{
+    const sensor=snapshot.sensors.find((item)=>item.id===id);
+    return Boolean(sensor?.dataDetected && sensor.quality==="good" && Date.now()-Date.parse(sensor.updatedAt)<=ACQUISITION_LEASE_MS);
+  });
+}
+
 type ActionPayload = Record<string, unknown>;
 export async function mutateSession(code: string, action: string, payload: ActionPayload) {
   await ensureSchema();
@@ -184,7 +210,8 @@ export async function mutateSession(code: string, action: string, payload: Actio
       }
       current.operatorLastSeenAt = now();
     }
-    if (action === "navigate" && current.status !== "aborted") {
+    if (action === "subjectHeartbeat") current.subjectLastSeenAt=now();
+    if (action === "navigate" && !["setup","aborted"].includes(current.status)) {
       const direction = Number(payload.direction) < 0 ? -1 : 1;
       const targetIndex = Math.max(0,Math.min(plan.length - 1,current.stepIndex + direction));
       if (targetIndex !== current.stepIndex) {
@@ -212,13 +239,40 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "sensor") { const sensor=current.sensors.find((item)=>item.id===payload.id); if(sensor){ sensor.status=String(payload.status) as SensorStatus; sensor.detail=String(payload.detail ?? sensor.detail); sensor.updatedAt=now(); appendEvent(current,{eventType:"sensor_status",label:`${sensor.label}: ${sensor.status}`,severity:["missing","error"].includes(sensor.status)?"error":sensor.status==="delayed"?"warn":"info",source:"sensor",metadata:{sensorId:sensor.id,status:sensor.status}}); } }
     if (action === "acquisitionHeartbeat") applyAcquisitionHeartbeat(current,payload);
     if (action === "acquisitionFinalize") applyAcquisitionFinalize(current,payload);
-    if (action === "requiredSensors") {
+    if (action === "deviceConfig") {
+      if (current.configurationLocked) throw new Error("Device configuration is locked while recording.");
+      const incoming = payload.devices && typeof payload.devices === "object" ? payload.devices as Record<string,unknown> : {};
+      current.deviceConfig = { ...current.deviceConfig };
+      for (const sensor of SENSOR_CATALOG.slice(0,8)) current.deviceConfig[sensor.id]=clean(incoming[sensor.id]??current.deviceConfig[sensor.id]??"none",180)||"none";
+      current.configRevision += 1;
+      current.preflightTest={status:"idle",detail:"Run preflight after changing hardware",completedAt:null};
+      appendEvent(current,{eventType:"device_configuration",label:"Device assignments updated",detail:`Configuration ${current.configRevision}`,source:"operator"});
+    }
+    if (action === "refreshDevices" && current.status === "setup" && !current.configurationLocked) {
+      current.configRevision += 1;
+      current.preflightTest={status:"idle",detail:"Run preflight after refreshing hardware",completedAt:null};
+      appendEvent(current,{eventType:"device_refresh",label:"Hardware discovery requested",source:"operator"});
+    }
+    if (action === "startPreflight" && current.status === "setup") {
+      current.preflightTest={status:"running",detail:"Validating selected devices for 10 seconds",completedAt:null};
+      appendEvent(current,{eventType:"preflight_started",label:"Preflight test started",source:"operator"});
+    }
+    if (action === "startSession" && current.status === "setup") {
+      if (!current.hardwareGateOverride && (!requiredSensorsReady(current) || current.preflightTest.status!=="pass")) throw new Error("Complete a successful preflight before starting the session.");
+      current.status="running";
+      current.configurationLocked=true;
+      current.recordingStartedAt=now();
+      current.stepStartedAt=current.recordingStartedAt;
+      appendEvent(current,{eventType:"session_start",label:"Recording started",detail:`Participant ${current.participantId}`,source:"operator"});
+      appendEvent(current,{eventType:"step_start",label:"Step started",detail:shortLabel(plan[current.stepIndex]),source:"system"});
+    }
+    if (action === "requiredSensors" && !current.configurationLocked) {
       const ids = Array.isArray(payload.ids) ? payload.ids.map(String).filter((id)=>SENSOR_CATALOG.some((sensor)=>sensor.id===id)) : [];
       current.requiredSensors = [...new Set(ids)];
       current.hardwareGateOverride = false;
       appendEvent(current,{eventType:"required_sensors_updated",label:"Required sensors updated",detail:current.requiredSensors.join(", ")||"None",source:"operator"});
     }
-    if (action === "hardwareGateOverride") {
+    if (action === "hardwareGateOverride" && !current.configurationLocked) {
       current.hardwareGateOverride = Boolean(payload.enabled);
       appendEvent(current,{eventType:"hardware_gate_override",label:current.hardwareGateOverride?"Hardware readiness override enabled":"Hardware readiness override cleared",severity:current.hardwareGateOverride?"warn":"info",source:"operator"});
     }
@@ -246,7 +300,11 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
   snapshot.acquisition = {
     id:clean(payload.agentId,80), state:"online", host:clean(payload.host,120), platform:clean(payload.platform,120),
     version:clean(payload.version,32), recordingRoot:clean(payload.recordingRoot,300), lastSeenAt:seenAt,
-    connectedAt:previous.connectedAt ?? seenAt, finalizedAt:null,
+    connectedAt:previous.connectedAt ?? seenAt, finalizedAt:null,inventory:sanitizeInventory(payload.inventory),
+    diskFreeGb:finiteOrNull(payload.diskFreeGb,0,1_000_000),estimatedHours:finiteOrNull(payload.estimatedHours,0,100_000),
+    clockOffsetMs:finiteOrNull(payload.clockOffsetMs,-60_000,60_000),openFileCount:finite(payload.openFileCount,0,100),
+    droppedPct:finiteOrNull(payload.droppedPct,0,100)??0,previewUrls:sanitizePreviewUrls(payload.previewUrls),
+    configRevision:finite(payload.configRevision,0,1_000_000),
   };
   if (wasOffline) appendEvent(snapshot,{eventType:"acquisition_connected",label:"Acquisition agent connected",detail:snapshot.acquisition.host,source:"sensor"});
 
@@ -267,12 +325,31 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
     sensor.device = clean(report.device,180);
     sensor.recordingFile = clean(report.recordingFile,260);
     sensor.bytesWritten = finite(report.bytesWritten,0,Number.MAX_SAFE_INTEGER);
+    sensor.targetRateHz = finiteOrNull(report.targetRateHz,0,100_000) ?? sensor.targetRateHz;
+    sensor.hardwareDetected = Boolean(report.hardwareDetected);
+    sensor.dataDetected = Boolean(report.dataDetected);
+    sensor.quality = validSensorQuality(report.quality);
+    sensor.droppedSamples = finite(report.droppedSamples,0,Number.MAX_SAFE_INTEGER);
+    sensor.dropoutPct = finiteOrNull(report.dropoutPct,0,100)??0;
+    sensor.metrics = sanitizeMetrics(report.metrics);
+    sensor.series = Array.isArray(report.series) ? report.series.slice(-160).map((value)=>finiteOrNull(value,-1_000_000_000,1_000_000_000)).filter((value):value is number=>value!==null) : [];
+    sensor.validation = Array.isArray(report.validation) ? report.validation.slice(0,8).map((value)=>clean(value,100)) : [];
     sensor.updatedAt = seenAt;
     if (previousStatus !== status) appendEvent(snapshot,{
       eventType:"sensor_status", label:`${sensor.label}: ${status}`, detail:sensor.detail,
       severity:["missing","error"].includes(status)?"error":status==="delayed"?"warn":"info", source:"sensor",
       metadata:{sensorId:sensor.id,status,rateHz:sensor.rateHz,sampleCount:sensor.sampleCount},
     });
+  }
+  if (payload.preflightTest && typeof payload.preflightTest === "object") {
+    const test=payload.preflightTest as Record<string,unknown>;
+    const status=["idle","running","pass","fail"].includes(String(test.status)) ? String(test.status) as SessionSnapshot["preflightTest"]["status"] : "idle";
+    const completedAt=clean(test.completedAt,40)||null;
+    if (!(snapshot.preflightTest.status==="running"&&status==="idle")) {
+      const changed=status!==snapshot.preflightTest.status || completedAt!==snapshot.preflightTest.completedAt;
+      snapshot.preflightTest={status,detail:clean(test.detail,220),completedAt};
+      if(changed&&["pass","fail"].includes(status)) appendEvent(snapshot,{eventType:"preflight_completed",label:`Preflight ${status}`,detail:snapshot.preflightTest.detail,severity:status==="fail"?"error":"info",source:"sensor"});
+    }
   }
 }
 
@@ -285,7 +362,7 @@ function applyAcquisitionFinalize(snapshot: SessionSnapshot, payload: ActionPayl
     const sensorId = clean(item.sensorId,40);
     if (!SENSOR_CATALOG.some((sensor)=>sensor.id===sensorId)) return [];
     const quality = ["pending","pass","warning","fail"].includes(String(item.quality)) ? String(item.quality) as RecordingArtifact["quality"] : "pending";
-    return [{sensorId,relativePath:clean(item.relativePath,260),format:clean(item.format,40),sampleCount:finite(item.sampleCount,0,Number.MAX_SAFE_INTEGER),bytes:finite(item.bytes,0,Number.MAX_SAFE_INTEGER),sha256:clean(item.sha256,64),startedAt:clean(item.startedAt,40),endedAt:clean(item.endedAt,40)||endedAt,quality}];
+    return [{sensorId,relativePath:clean(item.relativePath,260),format:clean(item.format,40),sampleCount:finite(item.sampleCount,0,Number.MAX_SAFE_INTEGER),bytes:finite(item.bytes,0,Number.MAX_SAFE_INTEGER),sha256:clean(item.sha256,64),startedAt:clean(item.startedAt,40),endedAt:clean(item.endedAt,40)||endedAt,quality,durationSec:finiteOrNull(item.durationSec,0,1_000_000)??0,averageRateHz:finiteOrNull(item.averageRateHz,0,100_000)??0,droppedSamples:finite(item.droppedSamples,0,Number.MAX_SAFE_INTEGER),dropoutPct:finiteOrNull(item.dropoutPct,0,100)??0,gapCount:finite(item.gapCount,0,Number.MAX_SAFE_INTEGER),totalGapSec:finiteOrNull(item.totalGapSec,0,1_000_000)??0,longestGapSec:finiteOrNull(item.longestGapSec,0,1_000_000)??0,availabilityPct:finiteOrNull(item.availabilityPct,0,100)??0}];
   });
   snapshot.acquisition.state = "finalized";
   snapshot.acquisition.lastSeenAt = endedAt;
@@ -297,12 +374,17 @@ function clean(value: unknown, max: number) { return Array.from(String(value ?? 
 function finite(value: unknown, min: number, max: number) { const number=Number(value); return Number.isFinite(number)?Math.max(min,Math.min(max,Math.round(number))):min; }
 function finiteOrNull(value: unknown, min: number, max: number) { const number=Number(value); return Number.isFinite(number)?Math.max(min,Math.min(max,Math.round(number*100)/100)):null; }
 function validSensorStatus(value: unknown): SensorStatus { const status=String(value) as SensorStatus; return ["connected","recording","delayed","missing","error","unknown"].includes(status)?status:"unknown"; }
+function validSensorQuality(value: unknown): SensorQuality { const quality=String(value) as SensorQuality; return ["disabled","waiting","good","degraded","bad"].includes(quality)?quality:"waiting"; }
+function sanitizeMetrics(value: unknown) { const result:Record<string,number|string|boolean>={}; if(!value||typeof value!=="object")return result; for(const [key,raw] of Object.entries(value as Record<string,unknown>).slice(0,24)){const safeKey=clean(key,40);if(typeof raw==="number"&&Number.isFinite(raw))result[safeKey]=Math.round(raw*1000)/1000;else if(typeof raw==="boolean")result[safeKey]=raw;else if(typeof raw==="string")result[safeKey]=clean(raw,100)}return result; }
+function sanitizeInventory(value: unknown):DeviceInventory { const result:DeviceInventory={video:[],audio:[],serial:[]};if(!value||typeof value!=="object")return result;for(const kind of ["video","audio","serial"] as const){const items=(value as Record<string,unknown>)[kind];if(!Array.isArray(items))continue;result[kind]=items.slice(0,24).flatMap((raw)=>{if(!raw||typeof raw!=="object")return[];const item=raw as Record<string,unknown>;return[{id:clean(item.id,180),label:clean(item.label,220),kind,description:clean(item.description,220)}]})}return result; }
+function sanitizePreviewUrls(value: unknown){const result:Record<string,string>={};if(!value||typeof value!=="object")return result;for(const id of ["face","thermal"]){const url=clean((value as Record<string,unknown>)[id],300);if(/^http:\/\/(127\.0\.0\.1|localhost):\d+\/preview\//.test(url))result[id]=url}return result;}
 
 export function acquisitionCommand(snapshot: SessionSnapshot) {
   const step = buildPlan(snapshot.assignment)[snapshot.stepIndex] ?? null;
+  const command = ["complete","aborted"].includes(snapshot.status)?"finalize":snapshot.status==="setup"?(snapshot.preflightTest.status==="running"?"test":"probe"):"record";
   return {
     serverTime:now(), sessionCode:snapshot.code, participantId:snapshot.participantId,
-    command:["complete","aborted"].includes(snapshot.status)?"finalize":"record",
+    command,deviceConfig:snapshot.deviceConfig,configRevision:snapshot.configRevision,requiredSensors:snapshot.requiredSensors,
     sessionStatus:snapshot.status, revision:snapshot.revision, stepIndex:snapshot.stepIndex,
     step:step?{id:step.id,label:shortLabel(step),phase:step.phase,startedAt:snapshot.stepStartedAt,attempt:snapshot.attempt}:null,
   };

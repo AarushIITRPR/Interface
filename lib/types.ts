@@ -4,8 +4,24 @@ export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"]
 export type Emotion = (typeof EMOTIONS)[number];
 export type BufferKind = "stroop" | "nback" | "conversation";
 export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "end";
-export type SessionStatus = "running" | "paused" | "complete" | "aborted";
+export type SessionStatus = "setup" | "running" | "paused" | "complete" | "aborted";
 export type SensorStatus = "connected" | "recording" | "delayed" | "missing" | "error" | "unknown";
+export type SensorQuality = "disabled" | "waiting" | "good" | "degraded" | "bad";
+
+export type DeviceInventoryItem = {
+  id: string;
+  label: string;
+  kind: "video" | "audio" | "serial";
+  description: string;
+};
+
+export type DeviceInventory = {
+  video: DeviceInventoryItem[];
+  audio: DeviceInventoryItem[];
+  serial: DeviceInventoryItem[];
+};
+
+export type DeviceConfig = Record<string,string>;
 
 export type Assignment = {
   pid: number;
@@ -67,6 +83,15 @@ export type SensorChannel = {
   device: string;
   recordingFile: string;
   bytesWritten: number;
+  targetRateHz: number | null;
+  hardwareDetected: boolean;
+  dataDetected: boolean;
+  quality: SensorQuality;
+  droppedSamples: number;
+  dropoutPct: number;
+  metrics: Record<string, number | string | boolean>;
+  series: number[];
+  validation: string[];
   updatedAt: string;
 };
 
@@ -80,6 +105,14 @@ export type AcquisitionAgent = {
   lastSeenAt: string | null;
   connectedAt: string | null;
   finalizedAt: string | null;
+  inventory: DeviceInventory;
+  diskFreeGb: number | null;
+  estimatedHours: number | null;
+  clockOffsetMs: number | null;
+  openFileCount: number;
+  droppedPct: number;
+  previewUrls: Record<string,string>;
+  configRevision: number;
 };
 
 export type RecordingArtifact = {
@@ -92,6 +125,14 @@ export type RecordingArtifact = {
   startedAt: string;
   endedAt: string;
   quality: "pending" | "pass" | "warning" | "fail";
+  durationSec: number;
+  averageRateHz: number;
+  droppedSamples: number;
+  dropoutPct: number;
+  gapCount: number;
+  totalGapSec: number;
+  longestGapSec: number;
+  availabilityPct: number;
 };
 
 export type MediaConfig = {
@@ -124,11 +165,17 @@ export type SessionSnapshot = {
   media: MediaConfig;
   nbackLevel: 1 | 2 | 3;
   operatorLastSeenAt: string | null;
+  subjectLastSeenAt: string | null;
   acquisitionToken: string;
   acquisition: AcquisitionAgent;
   recordings: RecordingArtifact[];
   requiredSensors: string[];
   hardwareGateOverride: boolean;
+  deviceConfig: DeviceConfig;
+  configRevision: number;
+  configurationLocked: boolean;
+  recordingStartedAt: string | null;
+  preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null };
   createdAt: string;
   updatedAt: string;
 };
@@ -141,6 +188,7 @@ export type SubjectStep = Pick<ProtocolStep,
 
 export type SubjectSnapshot = {
   code: string;
+  participantId: number;
   revision: number;
   status: SessionStatus;
   stepIndex: number;

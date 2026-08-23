@@ -26,7 +26,10 @@ export async function POST(request: Request) {
       const agent = body.agent ?? {};
       current = await mutateSession(code,"acquisitionHeartbeat",{
         agentId:agent.id,host:agent.host,platform:agent.platform,version:agent.version,
-        recordingRoot:agent.recordingRoot,sensors:Array.isArray(body.sensors)?body.sensors:[],
+        recordingRoot:agent.recordingRoot,inventory:agent.inventory,diskFreeGb:agent.diskFreeGb,
+        estimatedHours:agent.estimatedHours,clockOffsetMs:agent.clockOffsetMs,openFileCount:agent.openFileCount,
+        droppedPct:agent.droppedPct,previewUrls:agent.previewUrls,configRevision:agent.configRevision,
+        preflightTest:agent.preflightTest,sensors:Array.isArray(body.sensors)?body.sensors:[],
       }) ?? session;
     } else if (body.action === "finalize") {
       current = await mutateSession(code,"acquisitionFinalize",{recordings:Array.isArray(body.recordings)?body.recordings:[]}) ?? session;

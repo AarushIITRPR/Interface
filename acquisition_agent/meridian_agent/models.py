@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass
@@ -15,6 +15,15 @@ class SensorReport:
     recordingFile: str = ""
     bytesWritten: int = 0
     latencyMs: float | None = None
+    targetRateHz: float | None = None
+    hardwareDetected: bool = False
+    dataDetected: bool = False
+    quality: str = "waiting"
+    droppedSamples: int = 0
+    dropoutPct: float = 0.0
+    metrics: dict = field(default_factory=dict)
+    series: list[float] = field(default_factory=list)
+    validation: list[str] = field(default_factory=list)
 
     def payload(self) -> dict:
         return asdict(self)
@@ -31,7 +40,14 @@ class RecordingArtifact:
     startedAt: str
     endedAt: str
     quality: str
+    durationSec: float = 0.0
+    averageRateHz: float = 0.0
+    droppedSamples: int = 0
+    dropoutPct: float = 0.0
+    gapCount: int = 0
+    totalGapSec: float = 0.0
+    longestGapSec: float = 0.0
+    availabilityPct: float = 0.0
 
     def payload(self) -> dict:
         return asdict(self)
-

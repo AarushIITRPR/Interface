@@ -12,52 +12,115 @@ async function sessionRequest(code: string, action?: string, payload?: Record<st
   return data.session!;
 }
 
+async function participantSessionRequest(participantId: number) {
+  const response = await fetch(`/api/sessions?participantId=${participantId}&view=subject`,{cache:"no-store"});
+  const data = await response.json() as {session?:SubjectSnapshot;error?:string};
+  if (!response.ok) throw new Error(data.error || "Unable to connect.");
+  return data.session!;
+}
+
 export function SubjectPortal() {
   const [code,setCode] = useState("");
   const [draft,setDraft] = useState("");
   const [snapshot,setSnapshot] = useState<SubjectSnapshot|null>(null);
   const [error,setError] = useState("");
+  const [connecting,setConnecting] = useState(false);
+  const activeCode = useRef("");
+
+  const acceptSnapshot = useCallback((next:SubjectSnapshot) => {
+    if (next.code !== activeCode.current) return;
+    setSnapshot(current => !current || current.code !== next.code || next.revision > current.revision ? next : current);
+  },[]);
+
+  const connectSnapshot = useCallback((next:SubjectSnapshot) => {
+    activeCode.current=next.code;
+    window.localStorage.setItem("meridian.subject.code",next.code);
+    window.history.replaceState(null,"",`/subject?session=${encodeURIComponent(next.code)}`);
+    setCode(next.code);
+    setDraft(next.code);
+    setSnapshot(next);
+    setError("");
+  },[]);
+
+  const selectCode = useCallback((value:string) => {
+    const normalized=value.trim().toUpperCase();
+    activeCode.current=normalized;
+    window.localStorage.setItem("meridian.subject.code",normalized);
+    window.history.replaceState(null,"",`/subject?session=${encodeURIComponent(normalized)}`);
+    setCode(normalized);
+    setDraft(normalized);
+    setSnapshot(null);
+    setError("");
+  },[]);
 
   useEffect(() => {
     const query = new URLSearchParams(window.location.search).get("session")?.toUpperCase();
     const saved = window.localStorage.getItem("meridian.subject.code")?.toUpperCase();
     const initial = query || saved || "";
-    if (initial) window.setTimeout(() => { setCode(initial); setDraft(initial); }, 0);
-  },[]);
+    if (!initial) return;
+    if (/^\d+$/.test(initial)) {
+      participantSessionRequest(Number(initial)).then(connectSnapshot).catch(()=>window.setTimeout(()=>{setDraft(initial);setError("No active session for this participant.")},0));
+    } else {
+      window.setTimeout(()=>selectCode(initial),0);
+    }
+  },[connectSnapshot,selectCode]);
 
   const refresh = useCallback(async () => {
     if (!code) return;
-    try { const next=await sessionRequest(code); setSnapshot(next); setError(""); }
+    const requestedCode=code;
+    try { const next=await sessionRequest(requestedCode); if(activeCode.current===requestedCode){acceptSnapshot(next);setError("");} }
     catch (err) {
+      if(activeCode.current!==requestedCode)return;
       const message=err instanceof Error ? err.message : "Unable to connect.";
       setError(message === "Session not found." ? "Check the instructor code." : message);
       if(message === "Session not found.") {
         window.localStorage.removeItem("meridian.subject.code");
+        activeCode.current="";
         setSnapshot(null);
         setDraft("");
         setCode("");
       }
     }
-  },[code]);
+  },[acceptSnapshot,code]);
 
   useEffect(() => { if(!code)return; const first=window.setTimeout(refresh,0); const id=window.setInterval(refresh,850); return()=>{clearTimeout(first);clearInterval(id)}; },[code,refresh]);
-  const act = useCallback(async (action:string,payload:Record<string,unknown>={}) => { if(!code)return; const next=await sessionRequest(code,action,payload); setSnapshot(next); },[code]);
-  const changeSession = useCallback(() => { window.localStorage.removeItem("meridian.subject.code");window.history.replaceState(null,"","/subject");setSnapshot(null);setDraft("");setError("");setCode(""); },[]);
+  const act = useCallback(async (action:string,payload:Record<string,unknown>={}) => { if(!code)return;const requestedCode=code;const next=await sessionRequest(requestedCode,action,payload);if(activeCode.current===requestedCode)acceptSnapshot(next); },[acceptSnapshot,code]);
+  useEffect(()=>{if(!code||snapshot?.status==="complete"||snapshot?.status==="aborted")return;const requestedCode=code;const beat=()=>sessionRequest(requestedCode,"subjectHeartbeat").then(next=>{if(activeCode.current===requestedCode)acceptSnapshot(next)}).catch(()=>undefined);const first=window.setTimeout(beat,0);const id=window.setInterval(beat,5000);return()=>{clearTimeout(first);clearInterval(id)}},[acceptSnapshot,code,snapshot?.status]);
+  useEffect(()=>{
+    if(!snapshot||!["complete","aborted"].includes(snapshot.status))return;
+    let cancelled=false;
+    const follow=()=>participantSessionRequest(snapshot.participantId).then(next=>{if(!cancelled&&next.code!==snapshot.code)connectSnapshot(next)}).catch(()=>undefined);
+    const first=window.setTimeout(follow,0);const id=window.setInterval(follow,1200);
+    return()=>{cancelled=true;clearTimeout(first);clearInterval(id)};
+  },[connectSnapshot,snapshot]);
+  const changeSession = useCallback(() => { window.localStorage.removeItem("meridian.subject.code");window.history.replaceState(null,"","/subject");activeCode.current="";setSnapshot(null);setDraft("");setError("");setCode(""); },[]);
+
+  const submit = async () => {
+    const value=draft.trim().toUpperCase();if(!value)return;
+    setConnecting(true);setError("");
+    try {
+      if(/^\d+$/.test(value))connectSnapshot(await participantSessionRequest(Number(value)));
+      else selectCode(value);
+    } catch(err) { setError(err instanceof Error?err.message:"Unable to connect."); }
+    finally { setConnecting(false); }
+  };
 
   if (!code) return (
     <main className="subject-shell paper">
-      <form className="connect-form" onSubmit={(event)=>{event.preventDefault();const value=draft.trim().toUpperCase();if(!value)return;setError("");window.localStorage.setItem("meridian.subject.code",value);setCode(value);}}>
+      <form className="connect-form" onSubmit={(event)=>{event.preventDefault();void submit()}}>
         <label htmlFor="session-code">Code shown by instructor</label>
         <input id="session-code" value={draft} onChange={(event)=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} placeholder="0009AB7K" />
         {error ? <p className="form-error" role="alert">{error}</p> : null}
-        <button type="submit" className="paper-button">Connect</button>
+        <button type="submit" className="paper-button" disabled={connecting}>{connecting?"Connecting":"Connect"}</button>
       </form>
     </main>
   );
   if (!snapshot) return <main className="subject-shell paper"><p className="subject-wait">{error || "Please wait."}</p></main>;
 
   const step = snapshot.step;
-  if (!step || snapshot.status === "complete" || snapshot.status === "aborted" || step.type === "end") return <main className="subject-shell paper"><p className="completion">Thank you.</p></main>;
+  if (snapshot.status === "aborted") return <main className="subject-shell paper"><section className="subject-center"><h1>Please wait.</h1><button className="paper-button" onClick={changeSession}>Change session</button></section></main>;
+  if (!step || snapshot.status === "complete" || step.type === "end") return <main className="subject-shell paper"><section className="subject-center"><h1>Thank you.</h1><button className="paper-button" onClick={changeSession}>Change session</button></section></main>;
+  if (snapshot.status === "setup") return <main className="subject-shell paper"><section className="subject-center"><h1>Please wait.</h1><button className="paper-button" onClick={changeSession}>Change session</button></section></main>;
   if (!snapshot.operatorConnected) return <main className="subject-shell paper"><section className="subject-center"><h1>Please wait.</h1><button className="paper-button" onClick={changeSession}>Change session</button></section></main>;
   if (!snapshot.acquisitionReady) return <main className="subject-shell paper"><section className="subject-center"><h1>Please wait.</h1><button className="paper-button" onClick={changeSession}>Change session</button></section></main>;
 

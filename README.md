@@ -32,6 +32,8 @@ Stimuli use the six-row Williams-style sequence. Stroop, N-back, and conversatio
 - Cloudflare R2 stores future media files separately from session records.
 - Every response, task completion, operator intervention, sensor state change, note, pause, resume, repeat, and timing transition produces a structured event.
 - Session mutations use optimistic revision checks to reduce conflicting writes.
+- Both portals reject stale polling responses so a slower heartbeat cannot roll the UI back to an older task revision.
+- A subject tab attached to an ended session automatically follows the newest active session for the same participant. Participant IDs can also be entered directly on the subject connection screen.
 - The instructor can recover a saved session by code without restarting the protocol.
 
 ## Local development
@@ -56,10 +58,10 @@ The Sites runtime provides local D1 and R2 bindings from `.openai/hosting.json`.
 
 The `acquisition_agent` directory contains the local hardware service adapted from the supplied Dataset Sync, CSI HR C5, and EMG Checker projects. It records camera, microphone, CMS50E oximeter, ESP32 WiFi CSI, ESP32 EMG, ESP32 GSR, configured ECG serial, and thermal camera streams on the computer connected to the subject.
 
-The agent receives session and task changes from Meridian, writes common-clock markers, keeps raw high-rate data local, and submits low-bandwidth health reports. The instructor sees device state, sample rate, sample count, latest values, disconnects, recording paths, and finalized file manifests. The subject remains on the waiting screen until the selected required sensors are receiving samples.
+The agent receives hardware assignments, session changes, and task markers from Meridian. It writes raw high-rate data locally and submits only low-bandwidth metrics, downsampled rolling windows, and loopback camera previews. In Setup, the instructor selects devices and verifies hardware detection, protocol-valid data, signal quality, storage, synchronization, and a 10-second test. Configuration locks when recording begins. Monitor prioritizes the subject camera, expandable signals, actionable warnings, and an always-visible recording-health strip. Review reports rate, loss, gaps, availability, file size, and capture coverage for each finalized stream. The subject remains on the waiting screen until the instructor completes preflight and starts the protocol.
 
 See `acquisition_agent/README.md` for installation, device configuration, Linux and Windows notes, and simulated verification.
 
 ## Media integration
 
-Use the Configuration section in the instructor portal to upload or assign clips and audio. The subject portal resolves media through the session snapshot and logs onset, offset, completion, and playback failure events.
+Use the protocol media configuration in Setup to upload or assign clips and audio. The subject portal resolves media through the session snapshot and logs onset, offset, completion, and playback failure events.
