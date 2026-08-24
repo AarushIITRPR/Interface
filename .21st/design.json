@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "project": { "name": "meridian-multimodal-platform", "productType": "multimodal research operations instrument", "stack": ["react", "tailwind-v4", "vinext"] },
+  "sources": {
+    "tokens": ["app/instructor/editorial-operator-console.css", "app/globals.css"],
+    "components": ["app/instructor/editorial-operator-console.tsx", "app/subject/subject-portal.tsx"],
+    "assets": [],
+    "instructions": [".21st/DESIGN.md", "design-system/meridian/MASTER.md"]
+  },
+  "design": {
+    "colorMode": "light",
+    "colors": { "paper": "#f1ece2", "paperLight": "#f9f5ee", "ink": "#1c2936", "muted": "#68727c", "terracotta": "#ad503c", "ready": "#1d7f60" },
+    "typography": { "display": "Georgia", "operational": "Arial, Helvetica, sans-serif", "direction": "institutional editorial contrast with compact operational labels" },
+    "spacing": { "base": 8, "section": "44-68px" },
+    "radius": { "controls": "0px", "surfaces": "0px" },
+    "shadows": { "modal": "12px 12px 0 #ad503c" },
+    "motion": { "purpose": "brief state continuity only", "duration": "180ms" },
+    "density": "restrained"
+  },
+  "components": { "installed": [], "preferredPrimitives": ["native button", "native details", "native dialog semantics"], "patterns": ["editorial workspace shell", "split subject stage", "progressive diagnostics"] },
+  "constraints": {
+    "must": ["Match the approved archive composition and information hierarchy", "Retain real Meridian session, protocol, sensor, intervention, and export behavior", "Keep acquisition internals inside Workspace settings", "Show the subject one current task at a time", "Use visible focus and respect reduced motion", "Use no em dashes in interface copy"],
+    "avoid": ["Engineering telemetry in the primary workflow", "Rounded SaaS cards, pills, gradients, glass effects, and decorative shadows", "Fake sensor values or hardcoded session progress", "Adding visible information merely because the backend exposes it"]
+  },
+  "decisions": [
+    { "date": "2026-08-24", "scope": "instructor and subject portals", "decision": "Adopt the supplied Meridian redesign archive as the authoritative visual and information architecture, then bind it to Meridian's real state.", "reason": "The supplied direction matches the requested restraint, hierarchy, subject focus, and operational clarity." },
+    { "date": "2026-08-24", "scope": "instructor navigation", "decision": "Use the left sidebar as the sole workspace navigation and remove the participant switcher from it.", "reason": "The horizontal tabs duplicated the sidebar, and the participant control looked like a destination despite only resetting the session entry flow." },
+    { "date": "2026-08-24", "scope": "study overview", "decision": "Use the Overview for genuine live sensor previews, rolling signals, modality readings, and connection, transmission, and quality health. Keep the session ledger in Recording review only.", "reason": "The Overview exists to help the operator confirm that subject data is connected, arriving, and usable without copying the Dataset Sync interface or exposing unrelated engineering detail." }
+  ]
+}
