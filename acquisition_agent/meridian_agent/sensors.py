@@ -7,6 +7,7 @@ import math
 import os
 import platform
 import queue
+import random
 import threading
 import time
 import wave
@@ -14,11 +15,16 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from .models import RecordingArtifact, SensorReport
 
 
-TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":500.0,"thermal":9.0}
+TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0}
+
+FRONTIERX_SCALE_PER_COUNT = 0.0000038146972
+FRONTIERX_SAMPLE_RATE_HZ = 125.0
+FRONTIERX_SERVER_COUNTS = {"frontierxapp.com":5,"frontierxs.com":5,"frontierxd.in":1}
 
 
 def iso_now() -> str:
@@ -413,6 +419,157 @@ class GenericSerialSensor(SerialLineSensor):
     header = ["host_epoch_ns", "monotonic_s", "raw_line"]
 
 
+def parse_frontierx_source(source: str) -> tuple[str,str]:
+    """Return the Frontier X user id and API domain from a safe source value."""
+    value = (source or "").strip()
+    if value.lower().startswith("frontierx:"):
+        value = value.split(":",1)[1]
+        if "@" in value:
+            user_id,domain = value.split("@",1)
+            domain = domain.lower().strip()
+            if user_id.isdigit() and domain in FRONTIERX_SERVER_COUNTS:
+                return user_id,domain
+            raise ValueError("Invalid Frontier X source")
+    if value.startswith(("http://","https://")):
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower()
+        matching = next((domain for domain in FRONTIERX_SERVER_COUNTS if host == f"liveecg.{domain}"),None)
+        parts = [part for part in parsed.path.split("/") if part]
+        if parsed.scheme != "https" or not matching or not parts or not parts[0].isdigit():
+            raise ValueError("Use a valid HTTPS Frontier X live ECG share link")
+        return parts[0],matching
+    if value.isdigit():
+        return value,"frontierxapp.com"
+    raise ValueError("Use a Frontier X live ECG share link or numeric user id")
+
+
+def is_frontierx_source(source: str) -> bool:
+    value = (source or "").strip().lower()
+    return value.startswith("frontierx:") or value.startswith("https://liveecg.") or value.isdigit()
+
+
+def frontierx_subscribe_payload(user_id: str, server_number: int) -> str:
+    return json.dumps({"action":"sendmessage","data":{"userid":str(user_id),"role":"USER","type":"STREAMING","server":f"server{server_number}"}},separators=(",",":"))
+
+
+class FrontierXEcgSensor(Sensor):
+    """Capture Frontier X live-share ECG packets through the vendor WebSocket."""
+
+    def __init__(self, source: str, session_dir: Path, origin_mono: float):
+        self.user_id,self.domain = parse_frontierx_source(source)
+        super().__init__("ecg",f"Frontier X API · user {self.user_id}",session_dir,origin_mono)
+        self.path = session_dir / "ecg" / "ecg.csv"
+        self.raw_path = session_dir / "ecg" / "ecg_packets.jsonl"
+        self.last_packet_no: int | None = None
+        self.session_timestamp: int | None = None
+        self.accepted_packets = 0
+        self.duplicate_packets = 0
+        self.missed_packets = 0
+
+    def accept_packet(self, packet: dict) -> dict | None:
+        """Validate and deduplicate one wire packet for recording and telemetry."""
+        data = packet.get("data")
+        if not isinstance(data,list) or not data:
+            return None
+        try:
+            counts = [float(value) for value in data]
+            packet_no = int(packet["packetNo"])
+            timestamp = int(packet["Timestamp"])
+        except (KeyError,TypeError,ValueError):
+            return None
+        if self.session_timestamp is not None and timestamp != self.session_timestamp:
+            self.last_packet_no = None
+        self.session_timestamp = timestamp
+        if self.last_packet_no is not None and packet_no <= self.last_packet_no:
+            self.duplicate_packets += 1
+            return None
+        missed = max(0,packet_no - self.last_packet_no - 1) if self.last_packet_no is not None else 0
+        self.last_packet_no = packet_no
+        self.accepted_packets += 1
+        self.missed_packets += missed
+        if missed and self._recording.is_set():
+            self._dropped_samples += missed * len(counts)
+        heart_rate = packet.get("heartrate")
+        try:
+            heart_rate = round(float(heart_rate))
+        except (TypeError,ValueError):
+            heart_rate = None
+        return {"packetNo":packet_no,"timestamp":timestamp,"counts":counts,"heartRate":heart_rate,"missed":missed}
+
+    def run(self) -> None:
+        try:
+            import websocket
+        except Exception as exc:
+            self.set_state("error",f"Frontier X WebSocket support unavailable: {type(exc).__name__}")
+            return
+
+        self.path.parent.mkdir(parents=True,exist_ok=True)
+        with self.path.open("a",newline="",buffering=1) as csv_handle,self.raw_path.open("a",encoding="utf-8",buffering=1) as raw_handle:
+            writer = csv.writer(csv_handle)
+            if self.path.stat().st_size == 0:
+                writer.writerow(["host_epoch_ns","monotonic_s","packet_no","session_start_ms","sample_time_ms","sample_index","raw_count","scaled_value","heart_rate"])
+            while not self._stop.is_set():
+                socket_client = None
+                server_number = random.randint(1,FRONTIERX_SERVER_COUNTS[self.domain])
+                try:
+                    self.set_state("unknown",f"Connecting to Frontier X server {server_number}")
+                    socket_url = f"wss://liveecgwsapi.{self.domain}/server{server_number}?Authorization=token"
+                    socket_client = websocket.create_connection(socket_url,timeout=10)
+                    socket_client.settimeout(1)
+                    socket_client.send(frontierx_subscribe_payload(self.user_id,server_number))
+                    self.set_state("connected","Frontier X live stream subscribed")
+                    while not self._stop.is_set():
+                        try:
+                            raw_message = socket_client.recv()
+                        except websocket.WebSocketTimeoutException:
+                            continue
+                        if not raw_message:
+                            raise ConnectionError("Frontier X stream closed")
+                        try:
+                            message = json.loads(raw_message)
+                        except (json.JSONDecodeError,TypeError):
+                            continue
+                        for packet in message if isinstance(message,list) else [message]:
+                            if not isinstance(packet,dict):
+                                continue
+                            message_type = packet.get("type")
+                            if message_type == "livecg-begin":
+                                self.last_packet_no = None
+                                self.set_state("connected","Frontier X device started streaming")
+                            elif message_type == "livecg-end":
+                                self.set_state("delayed","Frontier X device stopped streaming")
+                            accepted = self.accept_packet(packet)
+                            if accepted is None:
+                                continue
+                            counts = accepted["counts"]
+                            scaled = [value * FRONTIERX_SCALE_PER_COUNT for value in counts]
+                            host_epoch_ns = time.time_ns()
+                            monotonic_s = time.monotonic() - self.origin_mono
+                            base_ms = accepted["timestamp"] + accepted["packetNo"] * 1000
+                            if self._recording.is_set():
+                                raw_handle.write(json.dumps(packet,separators=(",",":")) + "\n")
+                                for index,(count,value) in enumerate(zip(counts,scaled)):
+                                    writer.writerow([host_epoch_ns,f"{monotonic_s + index / FRONTIERX_SAMPLE_RATE_HZ:.6f}",accepted["packetNo"],accepted["timestamp"],round(base_ms + index * 1000 / FRONTIERX_SAMPLE_RATE_HZ),index,count,value,accepted["heartRate"] if accepted["heartRate"] is not None else ""])
+                            with self._lock:
+                                self._series.extend(round(value,6) for value in scaled)
+                            latest = f"HR {accepted['heartRate']} bpm" if accepted["heartRate"] is not None else "ECG samples arriving"
+                            packet_total = self.accepted_packets + self.missed_packets
+                            packet_loss = round(100 * self.missed_packets / packet_total,3) if packet_total else 0.0
+                            metrics = {"heartRate":accepted["heartRate"] if accepted["heartRate"] is not None else "Unavailable","packetNo":accepted["packetNo"],"acceptedPackets":self.accepted_packets,"duplicatePackets":self.duplicate_packets,"missedPackets":self.missed_packets,"packetLossPct":packet_loss,"source":"Frontier X live API"}
+                            wire_bytes = len(raw_message) if isinstance(raw_message,bytes) else len(str(raw_message).encode("utf-8"))
+                            self.sample(latest,wire_bytes if self._recording.is_set() else 0,len(counts),FRONTIERX_SAMPLE_RATE_HZ,None,metrics,["Frontier X stream connected","ECG packet format validated","ECG samples arriving","Packet sequence monitored"])
+                except Exception as exc:
+                    if not self._stop.is_set():
+                        self.set_state("error",f"Frontier X stream: {type(exc).__name__}: {str(exc)[:90]}")
+                        self._stop.wait(3)
+                finally:
+                    if socket_client is not None:
+                        try:
+                            socket_client.close()
+                        except Exception:
+                            pass
+
+
 class OximeterSensor(Sensor):
     START = bytes([0x7D, 0x81, 0xA1, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80])
     STOP = bytes([0x7D, 0x81, 0xA2, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80])
@@ -685,14 +842,17 @@ def discover_serial_assignments(requested: dict[str,str], bauds: dict[str,int]) 
         from serial.tools import list_ports
     except Exception:
         return requested,[]
-    inventory = [{"device":port.device,"description":port.description,"vid":port.vid,"pid":port.pid,"serialNumber":port.serial_number} for port in list_ports.comports()]
+    try:
+        ports = list(list_ports.comports())
+    except Exception:
+        ports = []
+    inventory = [{"device":port.device,"description":port.description,"vid":port.vid,"pid":port.pid,"serialNumber":port.serial_number} for port in ports]
     result = dict(requested)
     claimed = {value for value in result.values() if value not in ("","auto","none","simulate")}
-    if result.get("oximeter") == "auto":
-        result["oximeter"] = auto_oximeter_port()
-        if result["oximeter"]:
-            claimed.add(result["oximeter"])
-    for sensor_id in ("emg","gsr","csi"):
+    # USB bridge VID/PID values identify the serial adapter, not the sensor.
+    # Assign every automatic serial modality only after its wire protocol has
+    # been observed, and never let two modalities claim the same COM port.
+    for sensor_id in ("oximeter","emg","gsr","csi"):
         if result.get(sensor_id) != "auto":
             continue
         result[sensor_id] = ""
@@ -700,7 +860,7 @@ def discover_serial_assignments(requested: dict[str,str], bauds: dict[str,int]) 
             port = item["device"]
             if port in claimed:
                 continue
-            if _probe_serial_protocol(serial,port,bauds[sensor_id],sensor_id):
+            if _probe_serial_protocol(serial,port,bauds.get(sensor_id,115200),sensor_id):
                 result[sensor_id] = port
                 claimed.add(port)
                 break
@@ -712,11 +872,41 @@ def _probe_serial_protocol(serial_module, port: str, baud: int, sensor_id: str) 
     try:
         handle = serial_module.Serial(port,baud,timeout=0.15,write_timeout=0.5)
         handle.reset_input_buffer()
+        if sensor_id == "oximeter":
+            handle.write(OximeterSensor.START)
+            handle.flush()
         if sensor_id == "emg":
             handle.write(b"?")
             handle.flush()
         deadline = time.monotonic()+1.4
+        binary = bytearray()
+        valid_frames = 0
+        previous_emg_sequence: int | None = None
         while time.monotonic()<deadline:
+            if sensor_id == "oximeter":
+                chunk = handle.read(256)
+                if not chunk:
+                    continue
+                binary.extend(chunk)
+                while len(binary) >= 9:
+                    start = binary.find(0x01)
+                    if start < 0:
+                        binary.clear()
+                        break
+                    if start:
+                        del binary[:start]
+                    if len(binary) < 9:
+                        break
+                    packet = bytes(binary[:9])
+                    parsed = OximeterSensor.parse_packet(packet)
+                    if parsed is not None:
+                        valid_frames += 1
+                        del binary[:9]
+                        if valid_frames >= 2:
+                            return True
+                        continue
+                    del binary[0]
+                continue
             line = handle.readline().decode("utf-8","replace").strip()
             if not line:
                 continue
@@ -726,16 +916,25 @@ def _probe_serial_protocol(serial_module, port: str, baud: int, sensor_id: str) 
                 parts=line.split(",")
                 if len(parts)==3:
                     try:
-                        [int(value) for value in parts]
-                        return True
+                        _,sequence,raw = [int(value) for value in parts]
+                        if 0 <= raw <= 65535 and (previous_emg_sequence is None or sequence >= previous_emg_sequence):
+                            valid_frames += 1
+                            previous_emg_sequence = sequence
+                            if valid_frames >= 2:
+                                return True
                     except ValueError:
                         pass
             if sensor_id == "gsr":
                 try:
                     payload=json.loads(line)
                     if "uS" in payload and "raw" in payload:
-                        return True
+                        float(payload["uS"]); int(payload["raw"])
+                        valid_frames += 1
+                        if valid_frames >= 2:
+                            return True
                 except (json.JSONDecodeError,TypeError):
+                    pass
+                except (ValueError,OverflowError):
                     pass
             if sensor_id == "csi":
                 raw_line=line[9:] if line.startswith("CSI_DATA,") else line
@@ -744,7 +943,9 @@ def _probe_serial_protocol(serial_module, port: str, baud: int, sensor_id: str) 
                     try:
                         rssi=float(parts[2])
                         if -140<=rssi<=20:
-                            return True
+                            valid_frames += 1
+                            if valid_frames >= 2:
+                                return True
                     except ValueError:
                         pass
     except Exception:
@@ -752,6 +953,8 @@ def _probe_serial_protocol(serial_module, port: str, baud: int, sensor_id: str) 
     finally:
         if handle is not None:
             try:
+                if sensor_id == "oximeter":
+                    handle.write(OximeterSensor.STOP)
                 handle.close()
             except Exception:
                 pass
@@ -776,4 +979,13 @@ def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin
         return EmgSensor(sensor_id,value,baud,session_dir,origin_mono)
     if sensor_id == "gsr":
         return GsrSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id == "ecg":
+        if value == "auto":
+            return UnavailableSensor(sensor_id,"Paste a Frontier X live ECG link in Recording setup",session_dir,origin_mono)
+        if is_frontierx_source(value):
+            try:
+                return FrontierXEcgSensor(value,session_dir,origin_mono)
+            except ValueError as exc:
+                return UnavailableSensor(sensor_id,str(exc),session_dir,origin_mono)
+        return GenericSerialSensor(sensor_id,value,baud,session_dir,origin_mono)
     return GenericSerialSensor(sensor_id,value,baud,session_dir,origin_mono)

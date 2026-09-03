@@ -258,7 +258,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--emg-baud",type=int,default=921600)
     result.add_argument("--gsr",default="auto",help="ESP32 GSR serial port, auto, or none")
     result.add_argument("--gsr-baud",type=int,default=115200)
-    result.add_argument("--ecg",default="none",help="ECG newline serial port")
+    result.add_argument("--ecg",default="none",help="Frontier X live ECG share link/user ID, or a legacy newline serial port")
     result.add_argument("--ecg-baud",type=int,default=115200)
     result.add_argument("--thermal",default="none",help="Thermal camera index/path")
     result.add_argument("--preview-port",type=int,default=8765,help="Loopback-only camera preview port")

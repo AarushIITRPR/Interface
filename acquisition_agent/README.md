@@ -10,7 +10,8 @@ The implementation adapts the supplied `dataset-sync`, `csi-hr-c5`, and `emg-che
 - ESP32 GSR JSON line recording
 - Cross-platform OpenCV camera recording using DirectShow on Windows and V4L2 on Linux
 - Optional microphone capture using the system audio input
-- Generic timestamped newline recording for an explicitly configured ECG serial device
+- Frontier X live-share ECG capture over the manufacturer WebSocket, including packet deduplication, gap detection, heart rate telemetry, timestamp reconstruction, and reconnect behavior
+- Generic timestamped newline recording remains available as a legacy ECG serial fallback
 
 ## Install
 
@@ -47,13 +48,21 @@ For a local Meridian server, include `--server http://localhost:3000`. The optio
 
 On Linux, serial ports normally look like `/dev/ttyUSB0` or `/dev/ttyACM0`.
 
-The agent enumerates Windows cameras, microphone inputs, and serial devices for the Setup selectors. It auto-detects the camera and CMS50E, then probes unclaimed serial ports for the EMG header, GSR JSON shape, and CSI CSV shape before opening any recorder. Explicit command-line ports remain available as fallback defaults for a lab with fixed assignments:
+The agent enumerates Windows cameras, microphone inputs, and serial devices for the Setup selectors. Serial Auto-detect validates the actual CMS50E packet stream, EMG header or packet sequence, GSR JSON shape, and CSI CSV shape. USB bridge identifiers are inventory metadata only because different sensors may use the same CP210x adapter. A COM port can be claimed by only one modality, and explicit assignments take priority. Explicit command-line ports remain available as fallback defaults for a lab with fixed assignments:
 
 ```text
 python -m meridian_agent --code 0009AB7K --token mac_REPLACE_ME --csi COM5 --emg COM6 --gsr COM7 --ecg COM8
 ```
 
 Use `none` for unavailable devices. On multi-device production rigs, explicit stable port assignments remain preferable because they reduce preflight time and prevent operating-system port renumbering.
+
+## Frontier X ECG
+
+ECG is the one network-fed modality. In **Recording setup**, enable ECG and paste the active Frontier X live ECG share link or its numeric user ID. Save the setup while the acquisition agent is connected. The agent subscribes to the Frontier X live-share WebSocket, validates the packet stream, and publishes its rolling waveform, device heart rate, 125 Hz sample rate, packet loss, and connection health through the same Meridian heartbeat used by the USB sensors.
+
+During recording, Meridian writes `ecg/ecg.csv` with both the local monotonic clock and reconstructed Frontier X sample timestamps. It also keeps deduplicated source packets in `ecg/ecg_packets.jsonl`. The raw waveform remains on the acquisition computer.
+
+The Frontier X integration follows the live-share protocol implemented in the supplied `Multimodal-Analysis-Dashboards` ECG capture. That endpoint is not a versioned public SDK, so a manufacturer webapp protocol change may require a corresponding adapter update.
 
 ## Verification without hardware
 

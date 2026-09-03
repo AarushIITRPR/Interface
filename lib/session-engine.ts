@@ -9,7 +9,7 @@ const uid = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-",
 const acquisitionToken = () => `mac_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 const OPERATOR_LEASE_MS = 12_000;
 export const ACQUISITION_LEASE_MS = 10_000;
-const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:500,thermal:9 };
+const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9 };
 const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none" };
 
 export async function ensureSchema() {

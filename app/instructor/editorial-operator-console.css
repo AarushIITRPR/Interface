@@ -232,6 +232,11 @@
 .live-subject .safety-stop { z-index: 110; right: 25px; bottom: 76px; min-height: 44px; border-radius: 0; background: var(--live-paper-light); }
 .live-subject-connect .live-entry-grid { padding-block: 60px; }
 
+.live-api-device { display: block; min-width: 0; }
+.live-api-device > span { display: block; margin-bottom: 4px; color: var(--live-muted); font-size: .58rem; font-weight: 700; }
+.live-api-device input { width: 100%; height: 36px; padding: 0 8px; border: 1px solid #9e9387; background: var(--live-paper-light); color: var(--live-ink); font-size: .65rem; }
+.live-api-device input::placeholder { color: #85817b; }
+
 @media (max-width: 900px) {
   .live-subject { height: auto; min-height: 100svh; overflow: visible; grid-template-rows: 64px 4px 1fr 58px; }
   .live-subject-stage { grid-template-columns: 1fr; }.live-subject-copy { min-height: 430px; border-right: 0; border-bottom: 1px solid var(--live-ink); }.live-subject-field { min-height: 500px; }.live-subject-task { min-height: 500px; }
