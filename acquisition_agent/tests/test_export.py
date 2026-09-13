@@ -1,0 +1,132 @@
+import csv
+import json
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from meridian_agent.export import HostClock, build_bundle, coverage, event_marker, step_windows
+
+BASE = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+
+
+def iso(seconds: float) -> str:
+    return datetime.fromtimestamp(BASE + seconds, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def ns(seconds: float) -> int:
+    return int(BASE) * 1_000_000_000 + round(seconds * 1e9)
+
+
+def event(sequence, kind, seconds, step_index=0, step_id="s00-setup", attempt=1, client=None, metadata=None):
+    return {"sequence": sequence, "eventType": kind, "serverTime": iso(seconds), "clientTime": client, "stepIndex": step_index,
+            "stepId": step_id, "attempt": attempt, "source": "system", "label": kind, "detail": "", "metadata": metadata or {}}
+
+
+PLAN = [
+    {"index": 0, "id": "s00-setup", "type": "setup", "label": "Sensor check", "phase": "Getting settled", "emotion": None, "durationSec": None, "advance": "operator"},
+    {"index": 1, "id": "s01-washout", "type": "washout", "label": "Neutral washout", "phase": "Part 1", "emotion": None, "durationSec": 20, "advance": "timer"},
+    {"index": 2, "id": "s02-clip-happy", "type": "clip", "label": "Clip: happy", "phase": "Part 1", "emotion": "happy", "durationSec": None, "advance": "media"},
+]
+
+
+def export_fixture():
+    return {
+        "sessionCode": "0001TEST", "participantId": 1, "status": "complete", "recordingStartedAt": iso(0),
+        "requiredSensors": ["face", "oximeter"], "plan": PLAN, "ratings": [], "notes": [], "bpReadings": [],
+        "events": [
+            event(1, "step_start", 0),
+            event(2, "step_start", 10, 1, "s01-washout"),
+            event(3, "session_paused", 15, 1, "s01-washout"),
+            event(4, "session_resumed", 20, 1, "s01-washout"),
+            event(5, "step_start", 35, 2, "s02-clip-happy"),
+            event(6, "media_onset", 36, 2, "s02-clip-happy", client=iso(36.25), metadata={"loadDelayMs": 180}),
+            event(7, "step_repeated", 40, 2, "s02-clip-happy", metadata={"attempt": 2}),
+            event(8, "media_onset", 41, 2, "s02-clip-happy", attempt=2, client=iso(41.5)),
+            event(9, "session_complete", 60, 2, "s02-clip-happy", attempt=2),
+        ],
+    }
+
+
+class ExportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_server_time_maps_to_host_clock_using_offset(self):
+        clock = HostClock(offset_ms=250.0, origin_mono=0.0, anchor_epoch_ns=ns(0), anchor_mono=100.0)
+        self.assertEqual(clock.server_to_host_ns(iso(10)), ns(10) - 250_000_000)
+        self.assertAlmostEqual(clock.host_to_monotonic_s(ns(10)), 110.0, places=6)
+        self.assertIsNone(clock.server_to_host_ns("not a time"))
+
+    def test_marker_prefers_display_time_for_stimuli(self):
+        clock = HostClock(0.0, 0.0, ns(0), 0.0)
+        marker = event_marker(event(6, "media_onset", 36, client=iso(36.25)), clock)
+        self.assertEqual(marker["timeSource"], "display")
+        self.assertEqual(marker["hostEpochNs"], ns(36.25))
+
+    def test_step_windows_track_pauses_repeats_and_onsets(self):
+        windows = step_windows(export_fixture(), HostClock(0.0, 0.0, ns(0), 0.0))
+        self.assertEqual([(w["step_id"], w["attempt"], w["end"]) for w in windows],
+                         [("s00-setup", 1, "next_step"), ("s01-washout", 1, "next_step"), ("s02-clip-happy", 1, "repeated"), ("s02-clip-happy", 2, "complete")])
+        washout = windows[1]
+        self.assertEqual(washout["pauses"], 1)
+        self.assertEqual((washout["end_ns"] - washout["start_ns"] - washout["pause_ns"]) / 1e9, 20.0)
+        self.assertEqual(windows[2]["stimulus_onset_ns"], ns(36.25))
+        self.assertEqual(windows[2]["stimulus_load_delay_ms"], 180)
+        self.assertEqual(windows[3]["stimulus_onset_ns"], ns(41.5))
+        self.assertEqual(windows[2]["stimulus_starts"], 1)
+
+    def test_coverage_counts_filled_seconds(self):
+        stamps = [ns(0.1), ns(1.5), ns(3.2)]
+        self.assertEqual(coverage(stamps, ns(0), ns(4)), {"rows": 3, "coveragePct": 75.0})
+
+    def test_bundle_writes_aligned_tables_and_flags_gaps(self):
+        (self.root / "oximeter").mkdir()
+        with (self.root / "oximeter" / "oximeter.csv").open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["host_epoch_ns", "monotonic_s", "spo2", "heart_rate", "signal_strength", "pleth"])
+            for tenth in range(0, 600):
+                seconds = tenth / 10
+                if 45 <= seconds < 55:
+                    continue  # ten-second dropout during the repeated clip
+                writer.writerow([ns(seconds), seconds, 98, 72, 80, 50])
+        (self.root / "face").mkdir()
+        (self.root / "face" / "face.avi").write_bytes(b"")
+        with (self.root / "face" / "face_frames.csv").open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["frame_index", "host_epoch_ns", "monotonic_s"])
+            for frame in range(0, 60 * 30):
+                writer.writerow([frame, ns(frame / 30), frame / 30])
+        artifacts = [{"sensorId": "oximeter", "relativePath": "oximeter/oximeter.csv"}, {"sensorId": "face", "relativePath": "face/face.avi"},
+                     {"sensorId": "audio", "relativePath": "audio/audio.wav"}]
+
+        report = build_bundle(export_fixture(), self.root, HostClock(0.0, 0.0, ns(0), 0.0), artifacts)
+
+        out = self.root / "export"
+        for name in ("events.tsv", "steps.tsv", "ratings.tsv", "tasks.tsv", "session.json", "qa_report.json", "qa_report.md"):
+            self.assertTrue((out / name).exists(), name)
+        steps = list(csv.DictReader((out / "steps.tsv").open(), delimiter="\t"))
+        self.assertEqual(steps[1]["active_duration_s"], "20.000")
+        self.assertEqual(steps[2]["stimulus_onset_s"], "36.250")
+        events = list(csv.DictReader((out / "events.tsv").open(), delimiter="\t"))
+        self.assertEqual(events[5]["time_source"], "display")
+        self.assertEqual(int(events[5]["host_epoch_ns"]), ns(36.25))
+
+        by_attempt = {(step["stepId"], step["attempt"]): step for step in report["steps"]}
+        repeated = by_attempt[("s02-clip-happy", 2)]
+        self.assertTrue(any("oximeter coverage" in issue for issue in repeated["issues"]))
+        self.assertEqual(repeated["streams"]["face"]["coveragePct"], 100.0)
+        self.assertIsNone(repeated["streams"]["audio"]["coveragePct"])
+        self.assertIn("attempt repeated", by_attempt[("s02-clip-happy", 1)]["issues"])
+        self.assertIn("paused 1x", by_attempt[("s01-washout", 1)]["issues"])
+        self.assertEqual(by_attempt[("s00-setup", 1)]["issues"], [])
+        session = json.loads((out / "session.json").read_text())
+        self.assertEqual(session["clock"]["recordingStartHostEpochNs"], ns(0))
+
+
+if __name__ == "__main__":
+    unittest.main()

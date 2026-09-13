@@ -16,6 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import __version__
+from .export import HostClock, auxiliary_files, build_bundle, event_marker
 from .preview import PreviewServer
 from .sensors import CameraSensor, Sensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor
 
@@ -66,8 +67,15 @@ class MeridianAgent:
         self.agent_id = str(uuid.uuid5(uuid.NAMESPACE_DNS,f"meridian:{self.host}:{uuid.getnode()}"))
         self.origin_mono = time.monotonic()
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        self.session_dir = unique_session_dir(Path(args.output).expanduser().resolve(),f"session_{self.code}_{stamp}")
+        if getattr(args,"export_to",None):
+            self.session_dir = Path(args.export_to).expanduser().resolve()
+            if not (self.session_dir / "manifest.json").exists():
+                raise RuntimeError(f"No manifest.json in {self.session_dir}")
+        else:
+            self.session_dir = unique_session_dir(Path(args.output).expanduser().resolve(),f"session_{self.code}_{stamp}")
         self.marker_path = self.session_dir / "session_markers.jsonl"
+        self.events_path = self.session_dir / "session_events.jsonl"
+        self.last_event_sequence = 0
         self.sensors: list[Sensor] = []
         self.stop_requested = False
         self.last_marker: tuple | None = None
@@ -208,6 +216,38 @@ class MeridianAgent:
             handle.write(json.dumps(record,separators=(",",":"))+"\n")
         self.last_marker = marker
 
+    def write_events(self, command: dict) -> None:
+        """Append protocol events stamped with when they happened, converted to this computer's clock."""
+        fresh = [event for event in command.get("recentEvents") or [] if int(event.get("sequence") or 0) > self.last_event_sequence]
+        if not fresh:
+            return
+        clock = HostClock.now(self.clock_offset_ms,self.origin_mono)
+        with self.events_path.open("a",encoding="utf-8") as handle:
+            for event in sorted(fresh,key=lambda item: int(item.get("sequence") or 0)):
+                handle.write(json.dumps(event_marker(event,clock),separators=(",",":"))+"\n")
+                self.last_event_sequence = int(event.get("sequence") or 0)
+
+    def export_bundle(self, artifacts: list[dict]) -> None:
+        data = self.request_export()
+        report = build_bundle(data,self.session_dir,HostClock.now(self.clock_offset_ms,self.origin_mono),artifacts)
+        print(f"Analysis bundle written to {self.session_dir / 'export'} ({report['stepsFlagged']} of {report['stepCount']} step attempts flagged)")
+
+    def request_export(self) -> dict:
+        payload = json.dumps({"code":self.code,"token":self.token,"action":"export"},separators=(",",":")).encode("utf-8")
+        request = Request(self.endpoint,data=payload,method="POST",headers={"content-type":"application/json","user-agent":f"meridian-agent/{__version__}"})
+        sent_at = time.time()
+        with urlopen(request,timeout=max(self.args.timeout,30)) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if "export" not in data:
+            raise RuntimeError(data.get("error","Meridian returned no export"))
+        self.clock_offset_ms = clock_offset_ms(data.get("command") or {},sent_at,time.time(),self.clock_offset_ms)
+        return data["export"]
+
+    def export_only(self) -> int:
+        manifest = json.loads((self.session_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.export_bundle(manifest.get("recordings",[]))
+        return 0
+
     def start(self) -> None:
         print(f"Connecting acquisition computer to Meridian session {self.code}")
         command = self.request("poll")
@@ -232,6 +272,7 @@ class MeridianAgent:
                     command = self.request("heartbeat",agent=self.agent_payload(),sensors=reports)
                     self.last_command = command
                     self.write_marker(command)
+                    self.write_events(command)
                     self.apply_command(command,reports)
                     network_errors = 0
                     healthy = sum(report["status"] == "recording" for report in reports)
@@ -252,14 +293,19 @@ class MeridianAgent:
             if self.preview:
                 self.preview.stop()
             artifacts = [artifact.payload() for sensor in self.sensors if (artifact := sensor.artifact())]
-            manifest = {"sessionCode":self.code,"finalizedAt":iso_now(),"recordings":artifacts}
+            manifest = {"sessionCode":self.code,"finalizedAt":iso_now(),"recordings":artifacts,"auxiliaryFiles":auxiliary_files(self.session_dir)}
             (self.session_dir / "manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
             try:
-                self.request("finalize",recordings=artifacts)
+                command = self.request("finalize",recordings=artifacts)
+                self.write_events(command)
                 print("Recording manifest synchronized with Meridian")
             except Exception as exc:
                 (self.session_dir / "pending_upload.json").write_text(json.dumps({"endpoint":self.endpoint,"payload":{"code":self.code,"action":"finalize","recordings":artifacts}},indent=2),encoding="utf-8")
                 print(f"Manifest could not be synchronized: {type(exc).__name__}. Raw files are safe locally.",file=sys.stderr)
+            try:
+                self.export_bundle(artifacts)
+            except Exception as exc:
+                print(f"Analysis bundle not written ({type(exc).__name__}: {exc}). Rerun later with --export-to {self.session_dir}",file=sys.stderr)
         return 0
 
 
@@ -269,7 +315,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--code",default=os.environ.get("MERIDIAN_SESSION",""),required="MERIDIAN_SESSION" not in os.environ)
     result.add_argument("--token",default=os.environ.get("MERIDIAN_ACQUISITION_TOKEN",""),required="MERIDIAN_ACQUISITION_TOKEN" not in os.environ)
     result.add_argument("--output",default="recordings")
-    result.add_argument("--interval",type=float,default=2.0)
+    result.add_argument("--interval",type=float,default=1.0,help="Seconds between heartbeats; also bounds how quickly recording starts after the protocol starts")
     result.add_argument("--timeout",type=float,default=10.0)
     result.add_argument("--camera",default="auto",help="Camera index/path, none, or simulate")
     result.add_argument("--audio",default="auto",help="Audio input index/name, none, or simulate")
@@ -285,6 +331,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--thermal",default="none",help="Thermal camera index/path")
     result.add_argument("--preview-port",type=int,default=8765,help="Loopback-only camera preview port")
     result.add_argument("--simulate-all",action="store_true",help="Use deterministic simulated streams for integration testing")
+    result.add_argument("--export-to",default="",help="Write the analysis bundle for an existing recording directory without recording")
     return result
 
 
@@ -296,6 +343,12 @@ def main() -> int:
     if not args.code or not args.token:
         print("Session code and acquisition token are required",file=sys.stderr)
         return 2
+    if args.export_to:
+        try:
+            return MeridianAgent(args).export_only()
+        except Exception as exc:
+            print(str(exc),file=sys.stderr)
+            return 1
     agent = MeridianAgent(args)
     def request_stop(signum, frame):
         del signum,frame
