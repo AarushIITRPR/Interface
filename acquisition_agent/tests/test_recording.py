@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from meridian_agent.agent import unique_session_dir
+from meridian_agent.agent import clock_offset_ms, unique_session_dir
 from meridian_agent.sensors import FrameRecorder, SimulatedSensor, audio_level_pct
 
 
@@ -88,6 +88,20 @@ class RecordingTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(first.is_dir() and second.is_dir())
         self.assertEqual(second.name, "session_0001ABCD_20260101_000000_2")
+
+    def test_clock_offset_excludes_server_processing_time(self):
+        command = {"serverReceivedAt": "2026-01-01T00:00:00.050Z", "serverTime": "2026-01-01T00:00:00.450Z"}
+        sent = _epoch("2026-01-01T00:00:00.000Z")
+        received = _epoch("2026-01-01T00:00:00.500Z")
+        self.assertAlmostEqual(clock_offset_ms(command, sent, received, 0.0), 0.0, delta=0.5)
+        skewed = clock_offset_ms(command, sent - 2.0, received - 2.0, 0.0)
+        self.assertAlmostEqual(skewed, 2000.0, delta=0.5)
+        self.assertEqual(clock_offset_ms({"serverTime": "not a time"}, sent, received, 12.5), 12.5)
+
+
+def _epoch(value):
+    from datetime import datetime
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 if __name__ == "__main__":

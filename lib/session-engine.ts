@@ -120,10 +120,8 @@ function hydrateSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
   });
   snapshot.acquisitionToken ||= `mac_${snapshot.id.replaceAll("-","").slice(-18)}${snapshot.code}`;
   snapshot.acquisition = { ...emptyAcquisition(), ...(snapshot.acquisition ?? {}) };
-  snapshot.recordings = Array.isArray(snapshot.recordings) ? snapshot.recordings.map((recording) => ({
-    durationSec:0, averageRateHz:0, droppedSamples:0, dropoutPct:0, gapCount:0,
-    totalGapSec:0, longestGapSec:0, availabilityPct:0, ...recording,
-  })) : [];
+  const recordingDefaults: Partial<RecordingArtifact> = { durationSec:0, averageRateHz:0, droppedSamples:0, dropoutPct:0, gapCount:0, totalGapSec:0, longestGapSec:0, availabilityPct:0 };
+  snapshot.recordings = Array.isArray(snapshot.recordings) ? snapshot.recordings.map((recording) => ({ ...recordingDefaults, ...recording })) : [];
   snapshot.requiredSensors = Array.isArray(snapshot.requiredSensors) ? snapshot.requiredSensors : ["face","oximeter","csi","emg"];
   snapshot.hardwareGateOverride = Boolean(snapshot.hardwareGateOverride);
   snapshot.deviceConfig = { ...DEFAULT_DEVICE_CONFIG, ...(snapshot.deviceConfig ?? {}) };
@@ -212,11 +210,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   if (current?.title === "Box breathing") mediaSrc = snapshot.media.boxBreathing;
 
   const operatorConnected = Boolean(snapshot.operatorLastSeenAt && Date.now() - Date.parse(snapshot.operatorLastSeenAt) <= OPERATOR_LEASE_MS);
-  const agentConnected = Boolean(snapshot.acquisition.lastSeenAt && Date.now() - Date.parse(snapshot.acquisition.lastSeenAt) <= ACQUISITION_LEASE_MS);
-  const acquisitionReady = snapshot.hardwareGateOverride || (agentConnected && snapshot.requiredSensors.every((id) => {
-    const sensor = snapshot.sensors.find((item)=>item.id===id);
-    return sensor?.status === "recording" && Date.now() - Date.parse(sensor.updatedAt) <= ACQUISITION_LEASE_MS;
-  }));
+  const acquisitionReady = snapshot.hardwareGateOverride || requiredSensorsReady(snapshot,{recording:true});
   return {
     serverTime: now(),
     code: snapshot.code,
@@ -263,11 +257,16 @@ function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"o
   appendEvent(snapshot,{ eventType:"step_start", label:"Step started", detail:shortLabel(plan[snapshot.stepIndex]), source:"system" });
 }
 
-function requiredSensorsReady(snapshot: SessionSnapshot) {
-  const online = Boolean(snapshot.acquisition.lastSeenAt && Date.now()-Date.parse(snapshot.acquisition.lastSeenAt)<=ACQUISITION_LEASE_MS);
-  return online && snapshot.requiredSensors.every((id)=>{
+/**
+ * One readiness rule for both portals: the agent is online and every required stream is fresh and delivering data.
+ * Before starting, streams must also be of good quality; once running, the subject display only needs them recording,
+ * so a brief quality dip does not interrupt the protocol.
+ */
+function requiredSensorsReady(snapshot: SessionSnapshot, options: { recording?: boolean } = {}) {
+  const fresh = (timestamp: string | null) => Boolean(timestamp && Date.now()-Date.parse(timestamp)<=ACQUISITION_LEASE_MS);
+  return fresh(snapshot.acquisition.lastSeenAt) && snapshot.requiredSensors.every((id)=>{
     const sensor=snapshot.sensors.find((item)=>item.id===id);
-    return Boolean(sensor?.dataDetected && sensor.quality==="good" && Date.now()-Date.parse(sensor.updatedAt)<=ACQUISITION_LEASE_MS);
+    return Boolean(sensor && fresh(sensor.updatedAt) && sensor.dataDetected && (options.recording ? sensor.status==="recording" : sensor.quality==="good"));
   });
 }
 

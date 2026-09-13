@@ -12,6 +12,7 @@ type AgentRequest = {
 };
 
 export async function POST(request: Request) {
+  const receivedAt = new Date().toISOString();
   try {
     const body = await request.json() as AgentRequest;
     const code = String(body.code ?? "").trim().toUpperCase().slice(0,16);
@@ -36,7 +37,7 @@ export async function POST(request: Request) {
     } else if (body.action !== "poll") {
       return Response.json({error:"Unsupported acquisition action."},{status:400});
     }
-    return Response.json({command:acquisitionCommand(current)},{headers:{"cache-control":"no-store"}});
+    return Response.json({command:{...acquisitionCommand(current),serverReceivedAt:receivedAt}},{headers:{"cache-control":"no-store"}});
   } catch (error) {
     return Response.json({error:error instanceof Error?error.message:"Unable to update acquisition state."},{status:500});
   }

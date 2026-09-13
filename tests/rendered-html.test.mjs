@@ -29,7 +29,7 @@ test("server renders the Meridian portal choice", async () => {
 test("keeps the experiences separate and copy free of em dashes", async () => {
   const [subject, instructor, protocol, hosting] = await Promise.all([
     readFile(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/instructor/instructor-console.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/instructor/editorial-operator-console.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/protocol.ts", import.meta.url), "utf8"),
     readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8"),
   ]);
@@ -44,24 +44,16 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(subject, /\["complete","aborted"\]/);
   assert.match(instructor, /Recording health/);
   assert.match(instructor, /Subject code/);
-  assert.match(instructor, /Acquisition token/);
-  assert.match(instructor, /Acquisition agent offline/);
-  assert.match(instructor, /Sensor CSV/);
-  assert.match(instructor, /Recording manifest/);
+  assert.match(instructor, /--token \{snapshot\.acquisitionToken\}/);
+  assert.match(instructor, /Recording setup/);
+  assert.match(instructor, /RUN PREFLIGHT/);
+  assert.match(instructor, /START SESSION/);
+  assert.match(instructor, /Session ledger/);
+  assert.match(instructor, /EXPORT MANIFEST/);
+  assert.match(instructor, /isNewerSnapshot/);
   assert.match(subject, /acquisitionReady/);
-  assert.match(instructor, /Previous task/);
-  assert.match(instructor, /Next task/);
-  assert.match(instructor, /Live event log/);
-  assert.match(instructor, /Session report/);
-  assert.match(instructor, /Connect, detect, validate/);
-  assert.match(instructor, /Hardware detected/);
-  assert.match(instructor, /Data detected/);
-  assert.match(instructor, /Quality acceptable/);
-  assert.match(instructor, /Test all selected devices/);
-  assert.match(instructor, /Start recording and protocol/);
-  assert.match(instructor, /Short rolling quality windows/);
-  assert.match(instructor, /Session quality report/);
-  for (const mode of ["setup","monitor","protocol","review"]) assert.match(instructor,new RegExp(`"${mode}"`));
+  assert.match(subject, /serverNow\(\)/);
+  for (const mode of ["overview","protocol","review"]) assert.match(instructor,new RegExp(`"${mode}"`));
   assert.match(protocol, /WILLIAMS6/);
   assert.match(protocol, /Guided body scan/);
   assert.match(hosting, /"d1": "DB"/);

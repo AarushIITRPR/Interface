@@ -37,6 +37,20 @@ def unique_session_dir(root: Path, name: str) -> Path:
     raise RuntimeError(f"Could not create a unique recording directory for {name}")
 
 
+def _parse_server_time(value) -> float:
+    return datetime.fromisoformat(str(value).replace("Z","+00:00")).timestamp()
+
+
+def clock_offset_ms(command: dict, sent_at: float, received_at: float, previous: float) -> float:
+    """NTP-style offset: server processing time between receive and reply is excluded from the estimate."""
+    try:
+        replied = _parse_server_time(command.get("serverTime",""))
+        received = _parse_server_time(command["serverReceivedAt"]) if command.get("serverReceivedAt") else replied
+    except (ValueError,TypeError):
+        return previous
+    return round((((received - sent_at) + (replied - received_at)) / 2) * 1000,2)
+
+
 class MeridianHttpError(RuntimeError):
     pass
 
@@ -84,11 +98,7 @@ class MeridianAgent:
         if "command" not in data:
             raise RuntimeError(data.get("error","Meridian returned no command"))
         command = data["command"]
-        try:
-            server_time = datetime.fromisoformat(str(command.get("serverTime","")).replace("Z","+00:00")).timestamp()
-            self.clock_offset_ms = round((server_time - ((sent_at + time.time()) / 2)) * 1000,2)
-        except (ValueError,TypeError):
-            pass
+        self.clock_offset_ms = clock_offset_ms(command,sent_at,time.time(),self.clock_offset_ms)
         return command
 
     def agent_payload(self) -> dict:
