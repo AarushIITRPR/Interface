@@ -1,4 +1,4 @@
-import { EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolStep } from "./types";
+import { DEFAULT_CLIP_SECONDS, EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolStep } from "./types";
 
 const WILLIAMS6 = [[1,2,6,3,5,4],[2,3,1,4,6,5],[3,4,2,5,1,6],[4,5,3,6,2,1],[5,6,4,1,3,2],[6,1,5,2,4,3]];
 const BUFFER_ORDERS: BufferKind[][] = [
@@ -27,7 +27,7 @@ export function buildPlan(a: Assignment): readonly ProtocolStep[] {
 function createPlan(a: Assignment): ProtocolStep[] {
   const steps: ProtocolStep[] = [];
   const add = (step: Omit<ProtocolStep,"id"|"index">) => steps.push({ ...step, id:`s${String(steps.length).padStart(2,"0")}-${step.type}${step.emo ? `-${step.emo}` : ""}`, index:steps.length });
-  const clip = (emo: Emotion, phase: string) => add({ type:"clip", title:`Emotion clip: ${emo}`, subjectPrompt:"Watch naturally.", operatorScript:"Watch the clip naturally and react however feels natural. There is no right or wrong response.", operatorNote:"Onset and offset are logged automatically.", phase, emo, advance:"media", estimatedSec:12 });
+  const clip = (emo: Emotion, phase: string) => add({ type:"clip", title:`Emotion clip: ${emo}`, subjectPrompt:"Watch naturally.", operatorScript:"Watch the clip naturally and react however feels natural. There is no right or wrong response.", operatorNote:"Onset and offset are logged automatically.", phase, emo, advance:"media", estimatedSec:DEFAULT_CLIP_SECONDS[emo] + 5 });
   const rating = (emo: Emotion, phase: string) => add({ type:"sam", title:`Self-report: ${emo}`, subjectPrompt:"Choose what fits best.", operatorScript:"Choose the response that best matches your experience. Go with your first instinct.", operatorNote:"Valence, arousal, and dominance are presented one at a time on a 1 to 10 scale.", phase, emo, advance:"task", estimatedSec:25 });
   const washout = (phase: string) => add({ type:"washout", title:"Neutral washout", subjectPrompt:"", operatorScript:"Rest your eyes on the cross and breathe normally.", operatorNote:"Neutral fixation period.", phase, durationSec:20, advance:"timer", estimatedSec:20 });
   const gate = (phase: string, title="Return-to-baseline gate") => add({ type:"gate", title, subjectPrompt:"Sit quietly and breathe normally.", operatorScript:"Sit quietly and breathe normally while we prepare the next activity.", operatorNote:"Advance after the return-to-baseline checks are complete.", phase, durationSec:40, advance:"gate", estimatedSec:45 });

@@ -208,6 +208,11 @@ export type SubjectSnapshot = {
   step: SubjectStep | null;
 };
 
+/** Measured durations of the registered clips in public/protocol-media, used for time estimates. */
+export const DEFAULT_CLIP_SECONDS: Record<Emotion, number> = {
+  happy: 93, sad: 148, anger: 151, fear: 95, surprise: 183, disgust: 151,
+};
+
 export const DEFAULT_MEDIA: MediaConfig = {
   emotions: {
     happy: "/protocol-media/happy.mp4",
