@@ -171,8 +171,11 @@ export function SubjectPortal() {
     if(!displayedStep||!code)return;
     const [stepId]=displayedStep.split("|");
     // Stamp when the step is actually on screen (next frame), for alignment and the photodiode check.
-    const frame=window.requestAnimationFrame(()=>{flashSyncPatch();void sessionRequest(code,"log",{expectedStepId:stepId,eventType:"step_displayed",metadata:{clientTime:serverIso()}}).catch(()=>undefined);});
-    return()=>window.cancelAnimationFrame(frame);
+    // Browsers skip animation frames for hidden pages, so a short timer guarantees the event is still logged.
+    let logged=false;
+    const show=()=>{if(logged)return;logged=true;flashSyncPatch();void sessionRequest(code,"log",{expectedStepId:stepId,eventType:"step_displayed",metadata:{clientTime:serverIso()}}).catch(()=>undefined);};
+    const frame=window.requestAnimationFrame(show);const fallback=window.setTimeout(show,100);
+    return()=>{window.cancelAnimationFrame(frame);clearTimeout(fallback);};
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[displayedStep]);
   useEffect(()=>{
