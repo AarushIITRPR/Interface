@@ -1,3 +1,5 @@
+import type { GateStatus, Physiology } from "./safety";
+
 export const PROTOCOL_VERSION = "v8";
 
 export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"] as const;
@@ -52,6 +54,8 @@ export type ProtocolStep = {
   bp?: boolean;
   bpLabel?: string;
   fixation?: boolean;
+  /** Physical steps that participant screening can skip. */
+  safetyKey?: "breath_hold" | "standing" | "exertion";
   advance: "operator" | "timer" | "media" | "task" | "gate" | "subject";
   estimatedSec: number;
 };
@@ -115,6 +119,8 @@ export type AcquisitionAgent = {
   droppedPct: number;
   previewUrls: Record<string,string>;
   configRevision: number;
+  /** Rolling heart rate and skin conductance used by the return-to-baseline gate. */
+  physiology?: Physiology;
 };
 
 export type RecordingArtifact = {
@@ -180,6 +186,10 @@ export type SessionSnapshot = {
   preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null };
   createdAt: string;
   updatedAt: string;
+  /** Safety screening answers recorded by the operator before the session starts. */
+  screening?: { answers: Record<string, boolean>; completedAt: string };
+  /** Return-to-baseline evaluation for the current gate step, computed on read. */
+  gate?: GateStatus | null;
   /** Stimulus preload progress reported by the subject display. */
   subjectMedia?: { loaded: number; total: number; failed: number; ready: boolean };
   /** Unique per saved revision; lets batched event inserts confirm their snapshot update won. */

@@ -318,14 +318,20 @@ def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: l
             "durationSec": None if window.get("duration_s") is None else round(window["duration_s"], 3),
             "activeDurationSec": None if active is None else round(active, 3), "plannedDurationSec": planned,
             "stimulusLoadDelayMs": window["stimulus_load_delay_ms"], "streams": streams, "issues": issues})
+    events = export.get("events", [])
+    skipped = [{"stepId": e.get("stepId"), "detail": e.get("detail")} for e in events if e.get("eventType") == "step_skipped"]
+    gates = [{"stepId": e.get("stepId"), "outcome": e.get("eventType"), "reason": e.get("detail")} for e in events if e.get("eventType") in ("gate_verified", "gate_override", "gate_unverified")]
     return {"sessionCode": export.get("sessionCode"), "participantId": export.get("participantId"), "status": export.get("status"),
-        "requiredSensors": sorted(required), "minCoveragePct": MIN_STEP_COVERAGE_PCT, "stepsFlagged": flagged, "stepCount": len(steps), "steps": steps}
+        "requiredSensors": sorted(required), "minCoveragePct": MIN_STEP_COVERAGE_PCT, "stepsFlagged": flagged, "stepCount": len(steps),
+        "skippedSteps": skipped, "gates": gates, "steps": steps}
 
 
 def qa_markdown(report: dict) -> str:
     lines = [f"# Session QA: {report['sessionCode']} (participant {report['participantId']})", "",
         f"Status: {report['status']}. {report['stepsFlagged']} of {report['stepCount']} step attempts flagged. "
         f"Required streams: {', '.join(report['requiredSensors']) or 'none'} (minimum {report['minCoveragePct']}% coverage per step).", "",
+        f"Skipped by screening: {', '.join(item['detail'] for item in report.get('skippedSteps', [])) or 'none'}.",
+        f"Return-to-baseline gates: {', '.join(item['outcome'].replace('gate_', '') for item in report.get('gates', [])) or 'none'}.", "",
         "| # | Step | Attempt | Active s | Planned s | Issues |", "|---|---|---|---|---|---|"]
     for step in report["steps"]:
         issues = "; ".join(step["issues"]) or "OK"

@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
+import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
 import { SAM_POINTS } from "./tasks";
-import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
+import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
 const bindings = () => env as unknown as Bindings;
@@ -57,11 +58,14 @@ function snapshotFromRow(row: SessionRow) {
   if (row.operator_last_seen_at) snapshot.operatorLastSeenAt = row.operator_last_seen_at;
   if (row.subject_last_seen_at) snapshot.subjectLastSeenAt = row.subject_last_seen_at;
   snapshot.serverTime = now();
-  return hydrateSnapshot(snapshot);
+  const hydrated = hydrateSnapshot(snapshot);
+  const step = buildPlan(hydrated.assignment)[hydrated.stepIndex];
+  hydrated.gate = step?.type === "gate" && ["running","paused"].includes(hydrated.status) ? evaluateGate(hydrated.acquisition.physiology, Date.now(), Date.parse(hydrated.stepStartedAt)) : null;
+  return hydrated;
 }
 
 /** Protocol snapshot as stored: telemetry and per-response fields are kept out of it. */
-const UNSTORED_FIELDS = new Set(["sensors","acquisition","operatorLastSeenAt","subjectLastSeenAt","serverTime"]);
+const UNSTORED_FIELDS = new Set(["sensors","acquisition","operatorLastSeenAt","subjectLastSeenAt","serverTime","gate"]);
 function storedSnapshot(snapshot: SessionSnapshot) {
   return JSON.stringify(Object.fromEntries(Object.entries(snapshot).filter(([key]) => !UNSTORED_FIELDS.has(key))));
 }
@@ -281,10 +285,27 @@ function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"o
     return;
   }
   snapshot.stepIndex += 1;
+  skipScreenedSteps(snapshot, plan, 1);
   snapshot.attempt = 1;
   snapshot.stepStartedAt = now();
   snapshot.announcement = null;
   appendEvent(snapshot,{ eventType:"step_start", label:"Step started", detail:shortLabel(plan[snapshot.stepIndex]), source:"system" });
+}
+
+function screeningSkipReasons(snapshot: SessionSnapshot, step: ProtocolStep | undefined) {
+  return step?.safetyKey ? skippedSafetySteps(snapshot.screening?.answers)[step.safetyKey] ?? null : null;
+}
+
+/** Moves past steps the participant's screening excluded, logging each one. */
+function skipScreenedSteps(snapshot: SessionSnapshot, plan: readonly ProtocolStep[], direction: 1 | -1) {
+  for (;;) {
+    const step = plan[snapshot.stepIndex];
+    const reasons = screeningSkipReasons(snapshot, step);
+    const nextIndex = snapshot.stepIndex + direction;
+    if (!reasons || nextIndex < 0 || nextIndex >= plan.length) return;
+    appendEvent(snapshot,{ eventType:"step_skipped", label:"Step skipped by screening", detail:`${shortLabel(step)}: ${reasons.join(", ")}`, severity:"warn", source:"system", metadata:{ safetyKey:step.safetyKey, reasons } });
+    snapshot.stepIndex = nextIndex;
+  }
 }
 
 /**
@@ -320,6 +341,14 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "advance" && running) {
       const fromSubject = payload.source === "subject";
       // Subjects may only finish steps they control; gates, timers, and operator checks stay with the operator.
+      if (!fromSubject && step?.type === "gate") {
+        const gate = evaluateGate(current.acquisition.physiology, Date.now(), Date.parse(current.stepStartedAt));
+        const override = payload.override === true;
+        if (gate.status === "not_ready" && !override) throw new Error("Physiology has not returned to baseline yet. Wait, or advance with an override.");
+        const eventType = gate.status === "ready" ? "gate_verified" : gate.status === "unavailable" ? "gate_unverified" : "gate_override";
+        const label = gate.status === "ready" ? "Return to baseline verified" : gate.status === "unavailable" ? "Return to baseline not measurable" : "Return-to-baseline gate overridden";
+        appendEvent(current,{ eventType, label, detail:String(payload.reason ?? ""), severity:eventType === "gate_override" ? "warn" : "info", source:"operator", metadata:{ gate } });
+      }
       if (!fromSubject || step?.advance === "media" || step?.advance === "subject") advance(current,String(payload.reason ?? ""),fromSubject ? "subject" : "operator");
     }
     if (action === "heartbeat") {
@@ -337,7 +366,8 @@ export async function mutateSession(code: string, action: string, payload: Actio
     }
     if (action === "navigate" && !["setup","aborted"].includes(current.status)) {
       const direction = Number(payload.direction) < 0 ? -1 : 1;
-      const targetIndex = Math.max(0,Math.min(plan.length - 1,current.stepIndex + direction));
+      let targetIndex = Math.max(0,Math.min(plan.length - 1,current.stepIndex + direction));
+      while (screeningSkipReasons(current,plan[targetIndex]) && targetIndex + direction >= 0 && targetIndex + direction < plan.length) targetIndex += direction;
       if (targetIndex !== current.stepIndex) {
         const previousLabel = step ? shortLabel(step) : "Unknown step";
         const target = plan[targetIndex];
@@ -386,7 +416,16 @@ export async function mutateSession(code: string, action: string, payload: Actio
       current.preflightTest={status:"running",detail:"Validating selected devices for 10 seconds",completedAt:null};
       appendEvent(current,{eventType:"preflight_started",label:"Preflight test started",source:"operator"});
     }
+    if (action === "screening" && current.status === "setup") {
+      const incoming = payload.answers && typeof payload.answers === "object" ? payload.answers as Record<string,unknown> : {};
+      const answers = Object.fromEntries(SCREENING_QUESTIONS.filter((item) => typeof incoming[item.id] === "boolean").map((item) => [item.id, incoming[item.id] as boolean]));
+      if (!screeningComplete(answers)) throw new Error("Answer every screening question.");
+      current.screening = { answers, completedAt:now() };
+      const skipped = skippedSafetySteps(answers);
+      appendEvent(current,{ eventType:"screening_recorded", label:"Safety screening recorded", detail:Object.keys(skipped).length ? `Skipping: ${Object.keys(skipped).join(", ")}` : "No steps skipped", source:"operator", metadata:{ answers, skipped } });
+    }
     if (action === "startSession" && current.status === "setup") {
+      if (!screeningComplete(current.screening?.answers)) throw new Error("Complete the safety screening before starting the session.");
       if (!current.hardwareGateOverride && (!requiredSensorsReady(current) || current.preflightTest.status!=="pass")) throw new Error("Complete a successful preflight before starting the session.");
       if (!current.hardwareGateOverride && !current.subjectMedia?.ready) throw new Error("Wait for the subject display to finish loading the study media.");
       current.status="running";
@@ -450,6 +489,7 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
     clockOffsetMs:finiteOrNull(payload.clockOffsetMs,-60_000,60_000),openFileCount:finite(payload.openFileCount,0,100),
     droppedPct:finiteOrNull(payload.droppedPct,0,100)??0,previewUrls:sanitizePreviewUrls(payload.previewUrls),
     configRevision:finite(payload.configRevision,0,1_000_000),
+    physiology:previous.physiology,
   };
   if (wasOffline) appendEvent(snapshot,{eventType:"acquisition_connected",label:"Acquisition agent connected",detail:snapshot.acquisition.host,source:"sensor"});
 
@@ -486,6 +526,7 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
       metadata:{sensorId:sensor.id,status,rateHz:sensor.rateHz,sampleCount:sensor.sampleCount},
     });
   }
+  recordPhysiology(snapshot);
   if (payload.preflightTest && typeof payload.preflightTest === "object") {
     const test=payload.preflightTest as Record<string,unknown>;
     const status=["idle","running","pass","fail"].includes(String(test.status)) ? String(test.status) as SessionSnapshot["preflightTest"]["status"] : "idle";
@@ -496,6 +537,21 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
       if(changed&&["pass","fail"].includes(status)) appendEvent(snapshot,{eventType:"preflight_completed",label:`Preflight ${status}`,detail:snapshot.preflightTest.detail,severity:status==="fail"?"error":"info",source:"sensor"});
     }
   }
+}
+
+/** Heart rate and skin conductance feed the resting baseline (during baseline steps) and the gate's recent window. */
+function recordPhysiology(snapshot: SessionSnapshot) {
+  const metric = (id: string, key: string, min: number, max: number) => {
+    const sensor = snapshot.sensors.find((item) => item.id === id);
+    const value = sensor?.metrics[key];
+    return sensor?.dataDetected && sensor.metrics.fingerDetected !== false && typeof value === "number" && value >= min && value <= max ? value : null;
+  };
+  const hr = metric("oximeter","heartRate",30,220) ?? metric("ecg","heartRate",30,220);
+  const gsr = metric("gsr","conductance",0.01,100);
+  if (hr === null && gsr === null) return;
+  const step = buildPlan(snapshot.assignment)[snapshot.stepIndex];
+  const collectBaseline = snapshot.status === "running" && step?.type === "baseline" && Date.now() - Date.parse(snapshot.stepStartedAt) >= GATE.baselineSettleSec * 1000;
+  snapshot.acquisition.physiology = updatePhysiology(snapshot.acquisition.physiology, { t:Date.now(), hr, gsr }, collectBaseline);
 }
 
 function applyAcquisitionFinalize(snapshot: SessionSnapshot, payload: ActionPayload) {
