@@ -14,7 +14,17 @@ export function assignFor(raw: number | string): Assignment {
   return { pid, row: row + 1, buf1: buffers[0], buf2: buffers[1], buf3: buffers[2], block1: [order[0],order[1]], block2: [order[2],order[3]], block3: [order[4],order[5]], fullOrder: order };
 }
 
-export function buildPlan(a: Assignment): ProtocolStep[] {
+// The plan depends only on the counterbalancing row, so there are at most six distinct plans to build.
+const planCache = new Map<string, readonly ProtocolStep[]>();
+
+export function buildPlan(a: Assignment): readonly ProtocolStep[] {
+  const key = JSON.stringify([a.block1,a.block2,a.block3,a.buf1,a.buf2,a.buf3]);
+  let plan = planCache.get(key);
+  if (!plan) { plan = Object.freeze(createPlan(a)); planCache.set(key, plan); }
+  return plan;
+}
+
+function createPlan(a: Assignment): ProtocolStep[] {
   const steps: ProtocolStep[] = [];
   const add = (step: Omit<ProtocolStep,"id"|"index">) => steps.push({ ...step, id:`s${String(steps.length).padStart(2,"0")}-${step.type}${step.emo ? `-${step.emo}` : ""}`, index:steps.length });
   const clip = (emo: Emotion, phase: string) => add({ type:"clip", title:`Emotion clip: ${emo}`, subjectPrompt:"Watch naturally.", operatorScript:"Watch the clip naturally and react however feels natural. There is no right or wrong response.", operatorNote:"Onset and offset are logged automatically.", phase, emo, advance:"media", estimatedSec:12 });
@@ -53,6 +63,6 @@ export function shortLabel(step: ProtocolStep) {
   return step.title;
 }
 
-export function estimateRemaining(plan: ProtocolStep[], index: number) {
+export function estimateRemaining(plan: readonly ProtocolStep[], index: number) {
   return plan.slice(index).reduce((sum, step) => sum + step.estimatedSec, 0);
 }

@@ -9,11 +9,20 @@ const uid = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-",
 const acquisitionToken = () => `mac_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 const OPERATOR_LEASE_MS = 12_000;
 const AUTO_ADVANCE_TOLERANCE_MS = 1_500;
+const SAVE_ATTEMPTS = 6;
 export const ACQUISITION_LEASE_MS = 10_000;
 const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9 };
 const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none" };
 
-export async function ensureSchema() {
+let schemaReady: Promise<void> | null = null;
+
+/** Creates tables once per worker instance instead of on every request. */
+export function ensureSchema() {
+  schemaReady ??= createSchema().catch((error) => { schemaReady = null; throw error; });
+  return schemaReady;
+}
+
+async function createSchema() {
   const db = bindings().DB;
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, participant_id INTEGER NOT NULL, operator TEXT NOT NULL, protocol_version TEXT NOT NULL, status TEXT NOT NULL, step_index INTEGER NOT NULL, revision INTEGER NOT NULL, assignment_json TEXT NOT NULL, snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`),
@@ -22,7 +31,58 @@ export async function ensureSchema() {
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_events_session_sequence ON events(session_id, sequence)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS media_assets (id TEXT PRIMARY KEY, object_key TEXT NOT NULL, filename TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, created_at TEXT NOT NULL)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_media_created ON media_assets(created_at DESC)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS session_telemetry (code TEXT PRIMARY KEY, sensors_json TEXT, acquisition_json TEXT, operator_last_seen_at TEXT, subject_last_seen_at TEXT, updated_at TEXT NOT NULL)`),
   ]);
+}
+
+/*
+ * Live telemetry (sensor readings, agent status, presence) changes every second, while protocol state changes a few
+ * hundred times per session. Telemetry lives in `session_telemetry`, written per source without revision checks, so
+ * heartbeats neither rewrite the protocol snapshot nor conflict with operator actions.
+ */
+type TelemetrySource = "operator" | "subject" | "agent";
+const TELEMETRY_SOURCES: Record<string,TelemetrySource> = {
+  heartbeat:"operator", subjectHeartbeat:"subject", acquisitionHeartbeat:"agent", acquisitionFinalize:"agent", sensor:"agent",
+};
+const HEARTBEAT_ACTIONS = new Set(["heartbeat","subjectHeartbeat","acquisitionHeartbeat"]);
+
+type SessionRow = { snapshot_json:string; sensors_json:string|null; acquisition_json:string|null; operator_last_seen_at:string|null; subject_last_seen_at:string|null };
+const SESSION_SELECT = `SELECT s.snapshot_json, t.sensors_json, t.acquisition_json, t.operator_last_seen_at, t.subject_last_seen_at FROM sessions s LEFT JOIN session_telemetry t ON t.code = s.code`;
+
+function snapshotFromRow(row: SessionRow) {
+  const snapshot = JSON.parse(row.snapshot_json) as SessionSnapshot;
+  if (row.sensors_json) snapshot.sensors = JSON.parse(row.sensors_json) as SensorChannel[];
+  if (row.acquisition_json) snapshot.acquisition = JSON.parse(row.acquisition_json) as AcquisitionAgent;
+  if (row.operator_last_seen_at) snapshot.operatorLastSeenAt = row.operator_last_seen_at;
+  if (row.subject_last_seen_at) snapshot.subjectLastSeenAt = row.subject_last_seen_at;
+  snapshot.serverTime = now();
+  return hydrateSnapshot(snapshot);
+}
+
+/** Protocol snapshot as stored: telemetry and per-response fields are kept out of it. */
+const UNSTORED_FIELDS = new Set(["sensors","acquisition","operatorLastSeenAt","subjectLastSeenAt","serverTime"]);
+function storedSnapshot(snapshot: SessionSnapshot) {
+  return JSON.stringify(Object.fromEntries(Object.entries(snapshot).filter(([key]) => !UNSTORED_FIELDS.has(key))));
+}
+
+function telemetryStatement(snapshot: SessionSnapshot, source: TelemetrySource) {
+  const db = bindings().DB;
+  const updatedAt = now();
+  if (source === "operator") return db.prepare(`INSERT INTO session_telemetry (code, operator_last_seen_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET operator_last_seen_at=excluded.operator_last_seen_at, updated_at=excluded.updated_at`).bind(snapshot.code,snapshot.operatorLastSeenAt,updatedAt);
+  if (source === "subject") return db.prepare(`INSERT INTO session_telemetry (code, subject_last_seen_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET subject_last_seen_at=excluded.subject_last_seen_at, updated_at=excluded.updated_at`).bind(snapshot.code,snapshot.subjectLastSeenAt,updatedAt);
+  return db.prepare(`INSERT INTO session_telemetry (code, sensors_json, acquisition_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(code) DO UPDATE SET sensors_json=excluded.sensors_json, acquisition_json=excluded.acquisition_json, updated_at=excluded.updated_at`).bind(snapshot.code,JSON.stringify(snapshot.sensors),JSON.stringify(snapshot.acquisition),updatedAt);
+}
+
+function eventStatement(sessionId: string, event: ExperimentEvent, guard?: { code:string; writeId:string }) {
+  const db = bindings().DB;
+  const values = [event.id,sessionId,event.sequence,event.stepId,event.eventType,event.severity,event.source,JSON.stringify(event),event.createdAt];
+  if (!guard) return db.prepare(`INSERT OR IGNORE INTO events (id, session_id, sequence, step_id, event_type, severity, source, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(...values);
+  // Only lands if this attempt's snapshot update won the revision check in the same batch.
+  return db.prepare(`INSERT OR IGNORE INTO events (id, session_id, sequence, step_id, event_type, severity, source, payload_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM sessions WHERE code = ? AND json_extract(snapshot_json, '$.writeId') = ?)`).bind(...values,guard.code,guard.writeId);
+}
+
+function protocolSignature(snapshot: SessionSnapshot) {
+  return JSON.stringify([snapshot.status,snapshot.stepIndex,snapshot.stepStartedAt,snapshot.preflightTest,snapshot.events.length]);
 }
 
 function appendEvent(snapshot: SessionSnapshot, input: Partial<ExperimentEvent> & Pick<ExperimentEvent,"eventType"|"label"|"source">) {
@@ -102,31 +162,37 @@ export async function createSession(participantId: number, operator: string) {
   };
   const event = appendEvent(snapshot,{ eventType:"session_prepared", label:"Session prepared", detail:`Participant ${assignment.pid}, Williams row ${assignment.row}`, source:"operator", metadata:{ assignment } });
   snapshot.revision = 2;
+  snapshot.writeId = uid("w");
   const db = bindings().DB;
   for (let attempt = 0; attempt < 5; attempt++) {
     const taken = await db.prepare(`SELECT 1 FROM sessions WHERE code = ? LIMIT 1`).bind(snapshot.code).first();
     if (!taken) break;
     snapshot.code = sessionCode(assignment.pid);
   }
-  await db.prepare(`INSERT INTO sessions (id, code, participant_id, operator, protocol_version, status, step_index, revision, assignment_json, snapshot_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(snapshot.id,snapshot.code,snapshot.participantId,snapshot.operator,snapshot.protocolVersion,snapshot.status,snapshot.stepIndex,snapshot.revision,JSON.stringify(assignment),JSON.stringify(snapshot),createdAt,createdAt).run();
-  await persistEvent(snapshot.id,event);
+  await db.batch([
+    db.prepare(`INSERT INTO sessions (id, code, participant_id, operator, protocol_version, status, step_index, revision, assignment_json, snapshot_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(snapshot.id,snapshot.code,snapshot.participantId,snapshot.operator,snapshot.protocolVersion,snapshot.status,snapshot.stepIndex,snapshot.revision,JSON.stringify(assignment),storedSnapshot(snapshot),createdAt,createdAt),
+    eventStatement(snapshot.id,event),
+    telemetryStatement(snapshot,"operator"),
+    telemetryStatement(snapshot,"agent"),
+  ]);
+  snapshot.serverTime = now();
   return snapshot;
 }
 
 export async function getSession(code: string) {
   await ensureSchema();
-  const row = await bindings().DB.prepare(`SELECT snapshot_json FROM sessions WHERE code = ? LIMIT 1`).bind(code.toUpperCase()).first<{snapshot_json:string}>();
-  return row ? hydrateSnapshot(JSON.parse(row.snapshot_json) as SessionSnapshot) : null;
+  const row = await bindings().DB.prepare(`${SESSION_SELECT} WHERE s.code = ? LIMIT 1`).bind(code.toUpperCase()).first<SessionRow>();
+  return row ? snapshotFromRow(row) : null;
 }
 
 /** Joining by participant number is limited to sessions still in setup, so a guessed number cannot attach to a study in progress. */
 export async function getLatestSetupSessionForParticipant(participantId: number) {
   await ensureSchema();
   if (!Number.isSafeInteger(participantId) || participantId < 1) return null;
-  const row = await bindings().DB.prepare(`SELECT snapshot_json FROM sessions WHERE participant_id = ? AND status = 'setup' ORDER BY created_at DESC LIMIT 1`)
-    .bind(participantId).first<{snapshot_json:string}>();
-  return row ? hydrateSnapshot(JSON.parse(row.snapshot_json) as SessionSnapshot) : null;
+  const row = await bindings().DB.prepare(`${SESSION_SELECT} WHERE s.participant_id = ? AND s.status = 'setup' ORDER BY s.created_at DESC LIMIT 1`)
+    .bind(participantId).first<SessionRow>();
+  return row ? snapshotFromRow(row) : null;
 }
 
 export async function listSessions() {
@@ -180,10 +246,6 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   };
 }
 
-async function persistEvent(sessionId: string, event: ExperimentEvent) {
-  await bindings().DB.prepare(`INSERT OR IGNORE INTO events (id, session_id, sequence, step_id, event_type, severity, source, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(event.id,sessionId,event.sequence,event.stepId,event.eventType,event.severity,event.source,JSON.stringify(event),event.createdAt).run();
-}
 
 function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"operator"|"system") {
   const plan = buildPlan(snapshot.assignment);
@@ -212,11 +274,14 @@ function requiredSensorsReady(snapshot: SessionSnapshot) {
 type ActionPayload = Record<string, unknown>;
 export async function mutateSession(code: string, action: string, payload: ActionPayload) {
   await ensureSchema();
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt++) {
+    // Jittered backoff so simultaneous writers stop colliding on the same revision.
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 25 + Math.random() * 50));
     const current = await getSession(code);
     if (!current) return null;
     const beforeRevision = current.revision;
     const beforeCount = current.events.length;
+    const beforeSignature = protocolSignature(current);
     const plan = buildPlan(current.assignment);
     const step = plan[current.stepIndex];
     const expectedStepId = String(payload.expectedStepId ?? "");
@@ -308,11 +373,25 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "complete") { current.status="complete"; current.stepIndex=plan.length-1; current.stepStartedAt=now(); appendEvent(current,{eventType:"session_complete",label:"Session completed by operator",source:"operator"}); }
     if (action === "abort") { current.status="aborted"; appendEvent(current,{eventType:"session_aborted",label:"Session aborted",severity:"warn",source:"operator"}); }
 
+    const db = bindings().DB;
+    const telemetrySource = TELEMETRY_SOURCES[action];
+    if (HEARTBEAT_ACTIONS.has(action) && protocolSignature(current) === beforeSignature) {
+      await telemetryStatement(current,telemetrySource).run();
+      return current;
+    }
+
     current.revision = beforeRevision + 1;
     current.updatedAt = now();
-    const result = await bindings().DB.prepare(`UPDATE sessions SET status=?, step_index=?, revision=?, snapshot_json=?, updated_at=? WHERE code=? AND revision=?`)
-      .bind(current.status,current.stepIndex,current.revision,JSON.stringify(current),current.updatedAt,current.code,beforeRevision).run();
-    if (result.meta.changes === 1) { for(const event of current.events.slice(beforeCount)) await persistEvent(current.id,event); return current; }
+    current.writeId = uid("w");
+    const guard = { code:current.code, writeId:current.writeId };
+    const statements = [
+      db.prepare(`UPDATE sessions SET status=?, step_index=?, revision=?, snapshot_json=?, updated_at=? WHERE code=? AND revision=?`)
+        .bind(current.status,current.stepIndex,current.revision,storedSnapshot(current),current.updatedAt,current.code,beforeRevision),
+      ...current.events.slice(beforeCount).map((event) => eventStatement(current.id,event,guard)),
+    ];
+    if (telemetrySource) statements.push(telemetryStatement(current,telemetrySource));
+    const [result] = await db.batch(statements);
+    if (result.meta.changes === 1) return current;
   }
   throw new Error("The session changed while saving. Please try again.");
 }

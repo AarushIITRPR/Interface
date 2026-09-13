@@ -83,7 +83,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
 
   const accept = useCallback((next: SessionSnapshot) => {
     if (next.code !== activeCode.current) return;
-    setSnapshot((current) => !current || current.code !== next.code || next.revision > current.revision ? next : current);
+    setSnapshot((current) => !current || current.code !== next.code || isNewerSnapshot(next, current) ? next : current);
   }, []);
 
   const openSession = useCallback((next: SessionSnapshot) => {
@@ -273,7 +273,7 @@ function EditorialSessionEntry({ operatorName, onOpen }: { operatorName: string;
 }
 
 function Overview({ snapshot, step, plan, running, health, readyCount, required, agentOnline, subjectOnline, now, act, onSettings }: {
-  snapshot: SessionSnapshot; step: ProtocolStep; plan: ProtocolStep[]; running: boolean; health: number; readyCount: number; required: SensorChannel[]; agentOnline: boolean; subjectOnline: boolean; now: number; act: Act; onSettings: () => void;
+  snapshot: SessionSnapshot; step: ProtocolStep; plan: readonly ProtocolStep[]; running: boolean; health: number; readyCount: number; required: SensorChannel[]; agentOnline: boolean; subjectOnline: boolean; now: number; act: Act; onSettings: () => void;
 }) {
   const [message, setMessage] = useState("");
   const progress = Math.round(((snapshot.stepIndex + 0.35) / plan.length) * 100);
@@ -321,7 +321,7 @@ function Overview({ snapshot, step, plan, running, health, readyCount, required,
   );
 }
 
-function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateTo }: { snapshot: SessionSnapshot; step: ProtocolStep; plan: ProtocolStep[]; running: boolean; subjectOnline: boolean; act: Act; navigateTo: (index: number) => Promise<void> }) {
+function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateTo }: { snapshot: SessionSnapshot; step: ProtocolStep; plan: readonly ProtocolStep[]; running: boolean; subjectOnline: boolean; act: Act; navigateTo: (index: number) => Promise<void> }) {
   const [checks, setChecks] = useState([false, false, false]);
   const [sys, setSys] = useState("");
   const [dia, setDia] = useState("");
@@ -526,3 +526,8 @@ function formatRate(value: number) { return value >= 1000 ? `${(value / 1000).to
 function formatBytes(value: number) { if (!value) return "0 MB"; if (value < 1048576) return `${(value / 1024).toFixed(1)} KB`; if (value < 1073741824) return `${(value / 1048576).toFixed(1)} MB`; return `${(value / 1073741824).toFixed(2)} GB`; }
 function safeSnapshot(snapshot: SessionSnapshot) { const { acquisitionToken: omitted, ...safe } = snapshot; void omitted; return safe; }
 function download(name: string, content: string, type: string) { const url = URL.createObjectURL(new Blob([content], { type })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url); }
+/** Newer protocol revision wins; within one revision, the later server read carries fresher telemetry. */
+function isNewerSnapshot(next: SessionSnapshot, current: SessionSnapshot) {
+  if (next.revision !== current.revision) return next.revision > current.revision;
+  return Date.parse(next.serverTime ?? "") >= Date.parse(current.serverTime ?? "");
+}

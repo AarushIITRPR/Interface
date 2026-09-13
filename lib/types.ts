@@ -178,6 +178,10 @@ export type SessionSnapshot = {
   preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null };
   createdAt: string;
   updatedAt: string;
+  /** Unique per saved revision; lets batched event inserts confirm their snapshot update won. */
+  writeId?: string;
+  /** Server clock when this snapshot was read; used to order responses that share a revision. */
+  serverTime?: string;
 };
 
 export type SubjectStep = Pick<ProtocolStep,

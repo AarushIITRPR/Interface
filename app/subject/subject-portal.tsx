@@ -50,7 +50,7 @@ export function SubjectPortal() {
 
   const acceptSnapshot = useCallback((next:SubjectSnapshot) => {
     if (next.code !== activeCode.current) return;
-    setSnapshot(current => !current || current.code !== next.code || next.revision > current.revision ? next : current);
+    setSnapshot(current => !current || current.code !== next.code || next.revision > current.revision || (next.revision === current.revision && Date.parse(next.serverTime) >= Date.parse(current.serverTime)) ? next : current);
   },[]);
 
   const connectSnapshot = useCallback((next:SubjectSnapshot) => {
