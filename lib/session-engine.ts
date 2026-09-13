@@ -82,7 +82,35 @@ function eventStatement(sessionId: string, event: ExperimentEvent, guard?: { cod
 }
 
 function protocolSignature(snapshot: SessionSnapshot) {
-  return JSON.stringify([snapshot.status,snapshot.stepIndex,snapshot.stepStartedAt,snapshot.preflightTest,snapshot.events.length]);
+  return JSON.stringify([snapshot.status,snapshot.stepIndex,snapshot.stepStartedAt,snapshot.preflightTest,snapshot.events.length,snapshot.subjectMedia]);
+}
+
+const SENSOR_START_GRACE_MS = 15_000;
+const LOST_SENSOR_STATUSES = new Set(["missing","error","unknown","connected"]);
+
+/**
+ * While the protocol runs, losing the operator or a required stream pauses the session on the server and logs why,
+ * instead of letting the subject display silently hide (and later restart) the current stimulus.
+ */
+function enforceLeases(snapshot: SessionSnapshot) {
+  if (snapshot.status !== "running") return;
+  const at = Date.now();
+  const operatorLost = !snapshot.operatorLastSeenAt || at - Date.parse(snapshot.operatorLastSeenAt) > OPERATOR_LEASE_MS;
+  let lostSensors: string[] = [];
+  const recordingFor = snapshot.recordingStartedAt ? at - Date.parse(snapshot.recordingStartedAt) : 0;
+  if (!snapshot.hardwareGateOverride && recordingFor > SENSOR_START_GRACE_MS) {
+    const agentOnline = Boolean(snapshot.acquisition.lastSeenAt && at - Date.parse(snapshot.acquisition.lastSeenAt) <= ACQUISITION_LEASE_MS);
+    lostSensors = agentOnline ? snapshot.requiredSensors.filter((id) => {
+      const sensor = snapshot.sensors.find((item) => item.id === id);
+      return !sensor || at - Date.parse(sensor.updatedAt) > ACQUISITION_LEASE_MS || LOST_SENSOR_STATUSES.has(sensor.status);
+    }) : ["acquisition agent"];
+  }
+  if (!operatorLost && lostSensors.length === 0) return;
+  const reason = operatorLost ? "Operator console disconnected" : `Recording lost: ${lostSensors.join(", ")}`;
+  snapshot.status = "paused";
+  snapshot.pausedAt = now();
+  snapshot.announcement = { id:uid("ann"), text:"Please wait a moment.", kind:"pause", createdAt:snapshot.pausedAt };
+  appendEvent(snapshot,{ eventType:operatorLost ? "operator_lost" : "sensor_lost", label:"Session paused automatically", detail:reason, severity:"warn", source:"system", metadata:{ lostSensors } });
 }
 
 function appendEvent(snapshot: SessionSnapshot, input: Partial<ExperimentEvent> & Pick<ExperimentEvent,"eventType"|"label"|"source">) {
@@ -213,6 +241,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   const acquisitionReady = snapshot.hardwareGateOverride || requiredSensorsReady(snapshot,{recording:true});
   return {
     serverTime: now(),
+    mediaManifest: [...new Set([...Object.values(snapshot.media.emotions),snapshot.media.washout,snapshot.media.boxBreathing,snapshot.media.bodyScan,snapshot.media.fixation].filter(Boolean))],
     code: snapshot.code,
     participantId: snapshot.participantId,
     revision: snapshot.revision,
@@ -300,7 +329,11 @@ export async function mutateSession(code: string, action: string, payload: Actio
       }
       current.operatorLastSeenAt = now();
     }
-    if (action === "subjectHeartbeat") current.subjectLastSeenAt=now();
+    if (action === "subjectHeartbeat") {
+      current.subjectLastSeenAt=now();
+      const media = payload.media as { loaded:number; total:number; failed:number } | undefined;
+      if (media && media.total > 0) current.subjectMedia = { ...media, ready: media.loaded >= media.total && media.failed === 0 };
+    }
     if (action === "navigate" && !["setup","aborted"].includes(current.status)) {
       const direction = Number(payload.direction) < 0 ? -1 : 1;
       const targetIndex = Math.max(0,Math.min(plan.length - 1,current.stepIndex + direction));
@@ -349,6 +382,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
     }
     if (action === "startSession" && current.status === "setup") {
       if (!current.hardwareGateOverride && (!requiredSensorsReady(current) || current.preflightTest.status!=="pass")) throw new Error("Complete a successful preflight before starting the session.");
+      if (!current.hardwareGateOverride && !current.subjectMedia?.ready) throw new Error("Wait for the subject display to finish loading the study media.");
       current.status="running";
       current.configurationLocked=true;
       current.recordingStartedAt=now();
@@ -372,6 +406,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "complete") { current.status="complete"; current.stepIndex=plan.length-1; current.stepStartedAt=now(); appendEvent(current,{eventType:"session_complete",label:"Session completed by operator",source:"operator"}); }
     if (action === "abort") { current.status="aborted"; appendEvent(current,{eventType:"session_aborted",label:"Session aborted",severity:"warn",source:"operator"}); }
 
+    if (HEARTBEAT_ACTIONS.has(action)) enforceLeases(current);
     const db = bindings().DB;
     const telemetrySource = TELEMETRY_SOURCES[action];
     if (HEARTBEAT_ACTIONS.has(action) && protocolSignature(current) === beforeSignature) {
@@ -491,5 +526,25 @@ export function acquisitionCommand(snapshot: SessionSnapshot) {
     command,deviceConfig:snapshot.deviceConfig,configRevision:snapshot.configRevision,requiredSensors:snapshot.requiredSensors,
     sessionStatus:snapshot.status, revision:snapshot.revision, stepIndex:snapshot.stepIndex,
     step:step?{id:step.id,label:shortLabel(step),phase:step.phase,startedAt:snapshot.stepStartedAt,attempt:snapshot.attempt}:null,
+    // Recent ledger entries let the agent write event markers stamped with when they happened, not when it polled.
+    recentEvents:snapshot.events.slice(-50).map(agentEvent),
+  };
+}
+
+function agentEvent(event: ExperimentEvent) {
+  const clientTime = typeof event.metadata?.clientTime === "string" ? event.metadata.clientTime : null;
+  return { id:event.id, sequence:event.sequence, eventType:event.eventType, label:event.label, detail:event.detail, severity:event.severity, source:event.source, stepId:event.stepId, stepIndex:event.stepIndex, attempt:event.attempt, serverTime:event.createdAt, clientTime, metadata:event.metadata ?? {} };
+}
+
+/** Everything the acquisition computer needs to write an analysis-ready bundle next to the raw recordings. */
+export function acquisitionExport(snapshot: SessionSnapshot) {
+  const plan = buildPlan(snapshot.assignment);
+  return {
+    exportedAt:now(), sessionCode:snapshot.code, participantId:snapshot.participantId, operator:snapshot.operator,
+    protocolVersion:snapshot.protocolVersion, status:snapshot.status, assignment:snapshot.assignment,
+    createdAt:snapshot.createdAt, recordingStartedAt:snapshot.recordingStartedAt, requiredSensors:snapshot.requiredSensors,
+    deviceConfig:snapshot.deviceConfig, media:snapshot.media, hardwareGateOverride:snapshot.hardwareGateOverride,
+    plan:plan.map((step) => ({ id:step.id, index:step.index, type:step.type, title:step.title, label:shortLabel(step), phase:step.phase, emotion:step.emo ?? null, durationSec:step.durationSec ?? null, advance:step.advance })),
+    events:snapshot.events.map(agentEvent), ratings:snapshot.ratings, notes:snapshot.notes, bpReadings:snapshot.bpReadings,
   };
 }

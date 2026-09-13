@@ -1,11 +1,11 @@
-import { acquisitionCommand, getSession, mutateSession } from "@/lib/session-engine";
+import { acquisitionCommand, acquisitionExport, getSession, mutateSession } from "@/lib/session-engine";
 
 export const dynamic = "force-dynamic";
 
 type AgentRequest = {
   code?: string;
   token?: string;
-  action?: "poll" | "heartbeat" | "finalize";
+  action?: "poll" | "heartbeat" | "finalize" | "export";
   agent?: Record<string,unknown>;
   sensors?: unknown[];
   recordings?: unknown[];
@@ -34,6 +34,8 @@ export async function POST(request: Request) {
       }) ?? session;
     } else if (body.action === "finalize") {
       current = await mutateSession(code,"acquisitionFinalize",{recordings:Array.isArray(body.recordings)?body.recordings:[]}) ?? session;
+    } else if (body.action === "export") {
+      return Response.json({command:{...acquisitionCommand(current),serverReceivedAt:receivedAt},export:acquisitionExport(current)},{headers:{"cache-control":"no-store"}});
     } else if (body.action !== "poll") {
       return Response.json({error:"Unsupported acquisition action."},{status:400});
     }

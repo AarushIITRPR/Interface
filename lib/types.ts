@@ -178,6 +178,8 @@ export type SessionSnapshot = {
   preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null };
   createdAt: string;
   updatedAt: string;
+  /** Stimulus preload progress reported by the subject display. */
+  subjectMedia?: { loaded: number; total: number; failed: number; ready: boolean };
   /** Unique per saved revision; lets batched event inserts confirm their snapshot update won. */
   writeId?: string;
   /** Server clock when this snapshot was read; used to order responses that share a revision. */
@@ -192,6 +194,8 @@ export type SubjectStep = Pick<ProtocolStep,
 
 export type SubjectSnapshot = {
   serverTime: string;
+  /** Every stimulus the session can play, so the display can load them all before the protocol starts. */
+  mediaManifest: string[];
   code: string;
   participantId: number;
   revision: number;

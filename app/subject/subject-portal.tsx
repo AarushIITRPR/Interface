@@ -9,16 +9,56 @@ import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
 // Step timers use the server clock so a subject computer with a skewed clock cannot shorten or stretch timed steps.
 let serverOffsetMs = 0;
-let serverOffsetSamples = 0;
+const clockSamples: Array<{ roundTrip: number; offset: number }> = [];
 const serverNow = () => Date.now() + serverOffsetMs;
+const serverIso = () => new Date(serverNow()).toISOString();
 
-function trackServerClock(serverTime: string | undefined, sentAt: number, receivedAt: number) {
-  const server = Date.parse(serverTime ?? "");
-  const roundTrip = receivedAt - sentAt;
-  if (!Number.isFinite(server) || roundTrip > 1000) return;
-  const sample = server - (sentAt + receivedAt) / 2;
-  serverOffsetMs = serverOffsetSamples === 0 ? sample : serverOffsetMs * 0.7 + sample * 0.3;
-  serverOffsetSamples += 1;
+// Stimuli are downloaded in full before the protocol starts and played from memory, so playback never waits on the
+// network and onset timing does not depend on buffering.
+const preloadedMedia = new Map<string,string>();
+const mediaUrl = (src: string) => preloadedMedia.get(src) ?? src;
+type MediaProgress = { loaded: number; total: number; failed: number };
+
+function useMediaPreload(manifest: string[] | undefined, onProgress: (progress: MediaProgress) => void) {
+  const key = (manifest ?? []).join("|");
+  useEffect(() => {
+    const urls = key ? key.split("|") : [];
+    if (!urls.length) return;
+    let cancelled = false;
+    let retryId = 0;
+    const failed = new Set<string>();
+    const report = () => { if (!cancelled) onProgress({ loaded: urls.filter((url) => preloadedMedia.has(url)).length, total: urls.length, failed: failed.size }); };
+    const load = async () => {
+      failed.clear();
+      await Promise.all(urls.filter((url) => !preloadedMedia.has(url)).map(async (url) => {
+        try {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(String(response.status));
+          const blob = await response.blob();
+          if (!preloadedMedia.has(url)) preloadedMedia.set(url, URL.createObjectURL(blob));
+        } catch {
+          failed.add(url);
+        } finally {
+          report();
+        }
+      }));
+      report();
+      if (failed.size && !cancelled) retryId = window.setTimeout(() => void load(), 10_000);
+    };
+    void load();
+    return () => { cancelled = true; clearTimeout(retryId); };
+  }, [key, onProgress]);
+}
+
+function trackServerClock(stamps: { serverReceivedAt?: string; serverRepliedAt?: string }, sentAt: number, receivedAt: number) {
+  const serverReceived = Date.parse(stamps.serverReceivedAt ?? "");
+  const serverReplied = Date.parse(stamps.serverRepliedAt ?? "");
+  if (!Number.isFinite(serverReceived) || !Number.isFinite(serverReplied)) return;
+  // NTP-style estimate; the sample with the shortest network round trip among recent ones is the most trustworthy.
+  const roundTrip = (receivedAt - sentAt) - (serverReplied - serverReceived);
+  clockSamples.push({ roundTrip, offset: ((serverReceived - sentAt) + (serverReplied - receivedAt)) / 2 });
+  if (clockSamples.length > 12) clockSamples.shift();
+  serverOffsetMs = clockSamples.reduce((best, sample) => sample.roundTrip < best.roundTrip ? sample : best).offset;
 }
 
 async function sessionRequest(code: string, action?: string, payload?: Record<string,unknown>) {
@@ -26,9 +66,9 @@ async function sessionRequest(code: string, action?: string, payload?: Record<st
   const response = action
     ? await fetch("/api/sessions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code,action,payload,view:"subject"})})
     : await fetch(`/api/sessions?code=${encodeURIComponent(code)}&view=subject`,{cache:"no-store"});
-  const data = await response.json() as {session?:SubjectSnapshot;error?:string};
+  const data = await response.json() as {session?:SubjectSnapshot;error?:string;serverReceivedAt?:string;serverRepliedAt?:string};
   if (!response.ok) throw new Error(data.error || "Unable to connect.");
-  trackServerClock(data.session?.serverTime,sentAt,Date.now());
+  trackServerClock(data,sentAt,Date.now());
   return data.session!;
 }
 
@@ -47,6 +87,9 @@ export function SubjectPortal() {
   const [connecting,setConnecting] = useState(false);
   const [audioEnabled,setAudioEnabled] = useState(true);
   const activeCode = useRef("");
+  const mediaProgress = useRef<MediaProgress|null>(null);
+  const [mediaProgressVersion,setMediaProgressVersion] = useState(0);
+  const onMediaProgress = useCallback((progress:MediaProgress) => { mediaProgress.current = progress; setMediaProgressVersion((value) => value + 1); },[]);
 
   const acceptSnapshot = useCallback((next:SubjectSnapshot) => {
     if (next.code !== activeCode.current) return;
@@ -106,7 +149,8 @@ export function SubjectPortal() {
 
   useEffect(() => { if(!code)return; const first=window.setTimeout(refresh,0); const id=window.setInterval(refresh,850); return()=>{clearTimeout(first);clearInterval(id)}; },[code,refresh]);
   const act = useCallback(async (action:string,payload:Record<string,unknown>={}) => { if(!code)return;const requestedCode=code;const next=await sessionRequest(requestedCode,action,payload);if(activeCode.current===requestedCode)acceptSnapshot(next); },[acceptSnapshot,code]);
-  useEffect(()=>{if(!code||snapshot?.status==="complete"||snapshot?.status==="aborted")return;const requestedCode=code;const beat=()=>sessionRequest(requestedCode,"subjectHeartbeat").then(next=>{if(activeCode.current===requestedCode)acceptSnapshot(next)}).catch(()=>undefined);const first=window.setTimeout(beat,0);const id=window.setInterval(beat,5000);return()=>{clearTimeout(first);clearInterval(id)}},[acceptSnapshot,code,snapshot?.status]);
+  useEffect(()=>{if(!code||snapshot?.status==="complete"||snapshot?.status==="aborted")return;const requestedCode=code;const beat=()=>sessionRequest(requestedCode,"subjectHeartbeat",{media:mediaProgress.current}).then(next=>{if(activeCode.current===requestedCode)acceptSnapshot(next)}).catch(()=>undefined);const first=window.setTimeout(beat,0);const id=window.setInterval(beat,5000);return()=>{clearTimeout(first);clearInterval(id)}},[acceptSnapshot,code,snapshot?.status,mediaProgressVersion]);
+  useMediaPreload(snapshot?.mediaManifest,onMediaProgress);
   useEffect(()=>{
     if(!snapshot||!["complete","aborted"].includes(snapshot.status))return;
     let cancelled=false;
@@ -133,7 +177,9 @@ export function SubjectPortal() {
   const progress = snapshot.stepCount ? Math.round(((snapshot.stepIndex + .35) / snapshot.stepCount) * 100) : 0;
   if (snapshot.status === "aborted") return <SubjectFrame code={snapshot.code} progress={progress} label="Session ended" title={<>Please wait.<br /><i>The session has ended.</i></>} description="The instructor will tell you what to do next." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
   if (!step || snapshot.status === "complete" || step.type === "end") return <SubjectFrame code={snapshot.code} progress={100} label="Session complete" title={<>Thank you.<br /><i>Please wait.</i></>} description="Your responses have been recorded. The instructor will guide you from here." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField complete /></SubjectFrame>;
-  if (snapshot.status === "setup" || !snapshot.operatorConnected || !snapshot.acquisitionReady) return <SubjectFrame code={snapshot.code} progress={progress} label="Study preparation" title={<>Please wait.<br /><i>We will begin shortly.</i></>} description="There is nothing you need to do yet." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
+  // Operator or recording loss while running is handled by a server-side pause, shown as an overlay below, so the
+  // current stimulus stays mounted and resumes where it stopped.
+  if (snapshot.status === "setup") return <SubjectFrame code={snapshot.code} progress={progress} label="Study preparation" title={<>Please wait.<br /><i>We will begin shortly.</i></>} description="There is nothing you need to do yet." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
 
   const presentation = subjectPresentation(step);
   return <SubjectFrame code={snapshot.code} progress={progress} label={presentation.label} title={presentation.title} description={step.subjectPrompt || presentation.description} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}>
@@ -168,7 +214,7 @@ function subjectPresentation(step:SubjectStep) {
 
 function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(action:string,payload?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean}) {
   if (step.type === "setup") return <CenteredInstruction text={step.subjectPrompt} />;
-  if (step.type === "clip") return <ClipScreen step={step} src={snapshot.mediaSrc} act={act} audioEnabled={audioEnabled} />;
+  if (step.type === "clip") return <ClipScreen step={step} src={snapshot.mediaSrc} act={act} audioEnabled={audioEnabled} paused={snapshot.status !== "running"} />;
   if (step.type === "sam") return <RatingScreen step={step} act={act} />;
   if (step.type === "washout") return <WashoutScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "stroop") return <StroopTask step={step} act={act} paused={snapshot.status !== "running"} />;
@@ -205,7 +251,7 @@ function TimedScreen({step,snapshot,act,mode,src,audioEnabled}:{step:SubjectStep
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
   const remaining=useRemaining(step,snapshot,done);
   if(mode==="bodyscan") return <section className="body-scan">
-    {src ? <ProtocolVideo className="body-scan-video" src={src} audioEnabled={audioEnabled} loop /> : null}
+    {src ? <ProtocolVideo className="body-scan-video" src={src} audioEnabled={audioEnabled} loop paused={snapshot.status !== "running"} /> : null}
     <div className="body-scan-content"><div className="breathing-orb"/><time>{clock(remaining)}</time></div>
   </section>;
   return <section className="subject-center timed-screen">
@@ -225,17 +271,33 @@ function WashoutScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSna
   return <section className="washout-screen"><div className="washout-cross"/><time>{Math.ceil(remaining)}</time></section>;
 }
 
-function ClipScreen({step,src,act,audioEnabled}:{step:SubjectStep;src:string;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean}) {
+function ClipScreen({step,src,act,audioEnabled,paused}:{step:SubjectStep;src:string;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean;paused:boolean}) {
   const [playing,setPlaying]=useState(false); const [ended,setEnded]=useState(false); const errorLogged=useRef(false);
-  const finish=()=>{if(ended)return;setEnded(true);act("log",{eventType:"media_offset"}).catch(()=>undefined);};
-  useEffect(()=>{if(!playing||src||ended)return;const id=window.setTimeout(finish,12000);return()=>clearTimeout(id);});
+  const video=useRef<HTMLVideoElement>(null); const beganAt=useRef(0); const onsetLogged=useRef(false);
+  const log=(eventType:string,metadata:Record<string,unknown>={})=>act("log",{expectedStepId:step.id,eventType,metadata:{clientTime:serverIso(),...metadata}}).catch(()=>undefined);
+  const finish=()=>{if(ended)return;setEnded(true);void log("media_offset",{mediaTimeSec:video.current?.currentTime,durationSec:video.current?.duration});};
+  const begin=()=>{beganAt.current=performance.now();setPlaying(true);if(!src){onsetLogged.current=true;void log("media_onset");}};
+  // Onset is the first frame actually playing, not the button press.
+  const onPlaying=()=>{if(onsetLogged.current)return;onsetLogged.current=true;void log("media_onset",{loadDelayMs:performance.now()-beganAt.current,mediaTimeSec:video.current?.currentTime});};
+  useEffect(()=>{if(!playing||src||ended||paused)return;const id=window.setTimeout(finish,12000);return()=>clearTimeout(id);});
   useEffect(()=>{if(!ended)return;const send=()=>act("advance",{expectedStepId:step.id,source:"subject"}).catch(()=>undefined);send();const id=window.setInterval(send,1500);return()=>clearInterval(id);},[act,ended,step.id]);
-  const mediaError=()=>{if(errorLogged.current)return;errorLogged.current=true;act("log",{eventType:"media_error",label:"Media failed to load",severity:"error",source:"system"}).catch(()=>undefined);};
-  if(!playing) return <section className="subject-center clip-ready"><h1>{step.subjectPrompt}</h1><button className="light-button" onClick={()=>{setPlaying(true);act("log",{eventType:"media_onset"})}}>Begin</button></section>;
+  const wasPaused=useRef(paused);
+  useEffect(()=>{
+    // Act only on real session pause transitions, not on re-renders or remounts.
+    if(wasPaused.current===paused)return;
+    wasPaused.current=paused;
+    const element=video.current;
+    if(!element||!onsetLogged.current||ended)return;
+    if(paused){element.pause();void log("media_paused",{mediaTimeSec:element.currentTime});}
+    else{void element.play().catch(()=>undefined);void log("media_resumed",{mediaTimeSec:element.currentTime});}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[paused]);
+  const mediaError=()=>{if(errorLogged.current)return;errorLogged.current=true;act("log",{expectedStepId:step.id,eventType:"media_error",metadata:{clientTime:serverIso()}}).catch(()=>undefined);};
+  if(!playing) return <section className="subject-center clip-ready"><h1>{step.subjectPrompt}</h1><button className="light-button" disabled={paused} onClick={begin}>Begin</button></section>;
   if(src) return (
     // Captions are intentionally not injected because they would alter the registered research stimulus.
     // eslint-disable-next-line jsx-a11y/media-has-caption
-    <video className="stimulus-video" src={src} autoPlay playsInline muted={!audioEnabled} onEnded={finish} onError={mediaError}/>
+    <video ref={video} className="stimulus-video" src={mediaUrl(src)} autoPlay playsInline muted={!audioEnabled} onPlaying={onPlaying} onEnded={finish} onError={mediaError}/>
   );
   return <section className="placeholder-film" aria-label="Video stimulus"><div/><div/><div/></section>;
 }
@@ -294,16 +356,18 @@ function NBackTask({step,level,act,paused}:{step:SubjectStep;level:number;act:(a
 function BreathingScreen({step,snapshot,act,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;src:string;audioEnabled:boolean}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);const remaining=useRemaining(step,snapshot,done);const phase=Math.floor((((step.durationSec??0)-remaining)/4)%4);const label=["In","Hold","Out","Hold"][phase];
   return <section className={`subject-center breathing-screen ${src?"with-media":""}`}>
-    {src ? <ProtocolVideo className="breathing-video" src={src} audioEnabled={audioEnabled} loop /> : null}
+    {src ? <ProtocolVideo className="breathing-video" src={src} audioEnabled={audioEnabled} loop paused={snapshot.status !== "running"} /> : null}
     <div className="breathing-content"><h1>{step.subjectPrompt}</h1><div className={`breathing-circle phase-${phase}`}><span>{label}</span></div><small>{Math.ceil(remaining)}</small></div>
   </section>;
 }
 
-function ProtocolVideo({src,audioEnabled,className,loop=false}:{src:string;audioEnabled:boolean;className:string;loop?:boolean}) {
+function ProtocolVideo({src,audioEnabled,className,loop=false,paused=false}:{src:string;audioEnabled:boolean;className:string;loop?:boolean;paused?:boolean}) {
+  const video=useRef<HTMLVideoElement>(null);
+  useEffect(()=>{const element=video.current;if(!element)return;if(paused)element.pause();else void element.play().catch(()=>undefined);},[paused]);
   return (
     // These registered protocol stimuli intentionally omit injected captions because captions would alter the research material.
     // eslint-disable-next-line jsx-a11y/media-has-caption
-    <video className={className} src={src} autoPlay playsInline loop={loop} muted={!audioEnabled} preload="auto" />
+    <video ref={video} className={className} src={mediaUrl(src)} autoPlay playsInline loop={loop} muted={!audioEnabled} preload="auto" />
   );
 }
 function BreathHoldScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {

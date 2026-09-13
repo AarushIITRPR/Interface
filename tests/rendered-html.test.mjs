@@ -37,7 +37,8 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(subject, /removeItem\("meridian\.subject\.code"\)/);
   assert.match(subject, /role="alert"/);
   assert.match(subject, /Code shown by instructor/);
-  assert.match(subject, /operatorConnected/);
+  assert.match(subject, /useMediaPreload/);
+  assert.match(subject, /onPlaying=\{onPlaying\}/);
   assert.match(subject, /Change session/);
   assert.match(subject, /participantSessionRequest/);
   assert.match(subject, /next\.revision > current\.revision/);
@@ -51,7 +52,6 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(instructor, /Session ledger/);
   assert.match(instructor, /EXPORT MANIFEST/);
   assert.match(instructor, /isNewerSnapshot/);
-  assert.match(subject, /acquisitionReady/);
   assert.match(subject, /serverNow\(\)/);
   for (const mode of ["overview","protocol","review"]) assert.match(instructor,new RegExp(`"${mode}"`));
   assert.match(protocol, /WILLIAMS6/);

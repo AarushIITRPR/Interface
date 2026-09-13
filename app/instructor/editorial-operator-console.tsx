@@ -80,6 +80,8 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
   const [error, setError] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const activeCode = useRef("");
+  const snapshotStatus = useRef<string | null>(null);
+  useEffect(() => { snapshotStatus.current = snapshot?.status ?? null; }, [snapshot?.status]);
 
   const accept = useCallback((next: SessionSnapshot) => {
     if (next.code !== activeCode.current) return;
@@ -120,9 +122,25 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
   useEffect(() => {
     if (!code) return;
     const first = window.setTimeout(heartbeat, 0);
-    const timer = window.setInterval(heartbeat, 5000);
-    return () => { window.clearTimeout(first); window.clearInterval(timer); };
+    // Browsers throttle main-thread timers in background tabs, which would auto-pause the protocol. Worker timers are
+    // not throttled the same way, so presence keeps flowing while the operator looks at another window.
+    const stop = startTicker(5000, () => void heartbeat());
+    return () => { window.clearTimeout(first); stop(); };
   }, [code, heartbeat]);
+
+  const hiddenSince = useRef<number | null>(null);
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) { hiddenSince.current = Date.now(); return; }
+      const away = hiddenSince.current ? Date.now() - hiddenSince.current : 0;
+      hiddenSince.current = null;
+      if (away > 10_000 && snapshotStatus.current && ["running", "paused"].includes(snapshotStatus.current)) {
+        setNotice(`This tab was in the background for ${Math.round(away / 1000)} s. Keep the instructor console visible during the protocol.`);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
 
   const act = useCallback<Act>(async (action, payload = {}) => {
     if (!code) return null;
@@ -277,7 +295,7 @@ function Overview({ snapshot, step, plan, running, health, readyCount, required,
 }) {
   const [message, setMessage] = useState("");
   const progress = Math.round(((snapshot.stepIndex + 0.35) / plan.length) * 100);
-  const setupReady = agentOnline && readyCount === required.length && snapshot.preflightTest.status === "pass";
+  const setupReady = snapshot.hardwareGateOverride || (agentOnline && readyCount === required.length && snapshot.preflightTest.status === "pass" && Boolean(snapshot.subjectMedia?.ready));
   const requiredIds = new Set(required.map((sensor) => sensor.id));
   const optionalActive = snapshot.sensors.filter((sensor) => !requiredIds.has(sensor.id) && (sensor.hardwareDetected || sensor.dataDetected || Boolean(sensor.device && sensor.device !== "none") || Boolean(snapshot.acquisition.previewUrls[sensor.id])));
   const monitored = [...required, ...optionalActive];
@@ -370,7 +388,7 @@ function SettingsDialog({ snapshot, now, act, onClose }: { snapshot: SessionSnap
   const online = isAgentOnline(snapshot, now);
   const setupSensors = snapshot.sensors.filter((sensor) => SETUP_SENSORS.includes(sensor.id));
   const save = async () => { await act("deviceConfig", { devices }); await act("requiredSensors", { ids: required }); };
-  return <motion.div className="live-modal-overlay" role="presentation" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><section className="live-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><div><WorkspaceLabel>Workspace settings</WorkspaceLabel><h2 id="settings-title">Recording setup</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close workspace settings"><X size={19} /></button></header><div className="live-settings-body"><section><h3>Acquisition computer</h3><div className="live-setting-status"><i className={online ? "good" : "bad"} /><span><strong>{online ? "Connected" : "Not connected"}</strong><small>{online ? snapshot.acquisition.host : "Start the local acquisition agent"}</small></span></div><dl><div><dt>Subject code</dt><dd>{snapshot.code}</dd></div><div><dt>Preflight</dt><dd>{snapshot.preflightTest.status}</dd></div><div><dt>Disk</dt><dd>{snapshot.acquisition.diskFreeGb == null ? "Not measured" : `${snapshot.acquisition.diskFreeGb.toFixed(1)} GB free`}</dd></div></dl><div className="live-settings-actions"><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("refreshDevices")}><RefreshCw size={14} /> REFRESH DEVICES</button><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("startPreflight")}>RUN PREFLIGHT</button>{snapshot.status === "setup" ? <button className="primary" disabled={snapshot.preflightTest.status !== "pass"} onClick={() => void act("startSession")}>START SESSION</button> : null}</div><details><summary>Technical connection</summary><code>python -m meridian_agent --server {window.location.origin} --code {snapshot.code} --token {snapshot.acquisitionToken}</code></details></section><section><h3>Recording devices</h3><div className="live-device-settings">{setupSensors.map((sensor) => { const kind = sensor.group === "video" ? "video" : sensor.group === "audio" ? "audio" : "serial"; const options = snapshot.acquisition.inventory[kind]; const isRequired = required.includes(sensor.id); const selected = devices[sensor.id] || "none"; return <article key={sensor.id}><label className="live-required-toggle"><input aria-label={`Require ${sensor.label}`} type="checkbox" checked={isRequired} disabled={snapshot.configurationLocked} onChange={(event) => setRequired((items) => event.target.checked ? [...new Set([...items, sensor.id])] : items.filter((id) => id !== sensor.id))} /><span><strong>{sensor.label}</strong><small>{sensor.latestValue || sensor.detail}</small></span></label>{sensor.id === "ecg" ? <label className="live-api-device"><span>Frontier X live link</span><input aria-label="Frontier X live ECG link" value={selected === "none" || selected === "auto" ? "" : selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, ecg: event.target.value || "none" }))} placeholder="Paste live ECG share link or user ID" /></label> : <select aria-label={`${sensor.label} device`} value={selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, [sensor.id]: event.target.value }))}><option value="none">Not assigned</option><option value="auto">Auto-detect</option>{options.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>}</article>; })}</div><button className="live-save-settings" disabled={snapshot.configurationLocked} onClick={() => void save()}>SAVE RECORDING SETUP</button></section></div><footer><button className="danger" onClick={() => { if (window.confirm(snapshot.status === "setup" ? "Discard this session?" : "End and finalize this session?")) void act(snapshot.status === "setup" ? "abort" : "complete"); }}>{snapshot.status === "setup" ? "DISCARD SESSION" : "END SESSION"}</button><span>Settings stay outside the normal operator workflow.</span></footer></section></motion.div>;
+  return <motion.div className="live-modal-overlay" role="presentation" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><section className="live-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><div><WorkspaceLabel>Workspace settings</WorkspaceLabel><h2 id="settings-title">Recording setup</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close workspace settings"><X size={19} /></button></header><div className="live-settings-body"><section><h3>Acquisition computer</h3><div className="live-setting-status"><i className={online ? "good" : "bad"} /><span><strong>{online ? "Connected" : "Not connected"}</strong><small>{online ? snapshot.acquisition.host : "Start the local acquisition agent"}</small></span></div><dl><div><dt>Subject code</dt><dd>{snapshot.code}</dd></div><div><dt>Preflight</dt><dd>{snapshot.preflightTest.status}</dd></div><div><dt>Subject media</dt><dd>{subjectMediaLabel(snapshot)}</dd></div><div><dt>Disk</dt><dd>{snapshot.acquisition.diskFreeGb == null ? "Not measured" : `${snapshot.acquisition.diskFreeGb.toFixed(1)} GB free`}</dd></div></dl><div className="live-settings-actions"><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("refreshDevices")}><RefreshCw size={14} /> REFRESH DEVICES</button><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("startPreflight")}>RUN PREFLIGHT</button>{snapshot.status === "setup" ? <button className="primary" disabled={!snapshot.hardwareGateOverride && (snapshot.preflightTest.status !== "pass" || !snapshot.subjectMedia?.ready)} onClick={() => void act("startSession")}>START SESSION</button> : null}</div><details><summary>Technical connection</summary><code>python -m meridian_agent --server {window.location.origin} --code {snapshot.code} --token {snapshot.acquisitionToken}</code></details></section><section><h3>Recording devices</h3><div className="live-device-settings">{setupSensors.map((sensor) => { const kind = sensor.group === "video" ? "video" : sensor.group === "audio" ? "audio" : "serial"; const options = snapshot.acquisition.inventory[kind]; const isRequired = required.includes(sensor.id); const selected = devices[sensor.id] || "none"; return <article key={sensor.id}><label className="live-required-toggle"><input aria-label={`Require ${sensor.label}`} type="checkbox" checked={isRequired} disabled={snapshot.configurationLocked} onChange={(event) => setRequired((items) => event.target.checked ? [...new Set([...items, sensor.id])] : items.filter((id) => id !== sensor.id))} /><span><strong>{sensor.label}</strong><small>{sensor.latestValue || sensor.detail}</small></span></label>{sensor.id === "ecg" ? <label className="live-api-device"><span>Frontier X live link</span><input aria-label="Frontier X live ECG link" value={selected === "none" || selected === "auto" ? "" : selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, ecg: event.target.value || "none" }))} placeholder="Paste live ECG share link or user ID" /></label> : <select aria-label={`${sensor.label} device`} value={selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, [sensor.id]: event.target.value }))}><option value="none">Not assigned</option><option value="auto">Auto-detect</option>{options.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>}</article>; })}</div><button className="live-save-settings" disabled={snapshot.configurationLocked} onClick={() => void save()}>SAVE RECORDING SETUP</button></section></div><footer><button className="danger" onClick={() => { if (window.confirm(snapshot.status === "setup" ? "Discard this session?" : "End and finalize this session?")) void act(snapshot.status === "setup" ? "abort" : "complete"); }}>{snapshot.status === "setup" ? "DISCARD SESSION" : "END SESSION"}</button><span>Settings stay outside the normal operator workflow.</span></footer></section></motion.div>;
 }
 
 function LedgerDialog({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose: () => void }) {
@@ -530,4 +548,23 @@ function download(name: string, content: string, type: string) { const url = URL
 function isNewerSnapshot(next: SessionSnapshot, current: SessionSnapshot) {
   if (next.revision !== current.revision) return next.revision > current.revision;
   return Date.parse(next.serverTime ?? "") >= Date.parse(current.serverTime ?? "");
+}
+
+function subjectMediaLabel(snapshot: SessionSnapshot) {
+  const media = snapshot.subjectMedia;
+  if (!media) return "Subject display not connected";
+  if (media.ready) return `Loaded ${media.total} of ${media.total}`;
+  return `Loading ${media.loaded} of ${media.total}${media.failed ? `, ${media.failed} failed` : ""}`;
+}
+
+function startTicker(intervalMs: number, tick: () => void) {
+  try {
+    const source = URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${intervalMs});`], { type: "text/javascript" }));
+    const worker = new Worker(source);
+    worker.onmessage = tick;
+    return () => { worker.terminate(); URL.revokeObjectURL(source); };
+  } catch {
+    const timer = window.setInterval(tick, intervalMs);
+    return () => window.clearInterval(timer);
+  }
 }
