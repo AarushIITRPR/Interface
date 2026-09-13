@@ -44,7 +44,7 @@ type HistoryItem = {
 };
 
 const CANNED_MESSAGES = ["Please wait a moment.", "Keep still.", "You can continue.", "Please look at the screen."];
-const SETUP_SENSORS = ["face", "audio", "oximeter", "csi", "emg", "gsr", "ecg", "thermal"];
+const SETUP_SENSORS = ["face", "audio", "oximeter", "csi", "emg", "gsr", "ecg", "thermal", "photodiode"];
 
 async function api(body: Record<string, unknown>) {
   const response = await fetch("/api/sessions", {

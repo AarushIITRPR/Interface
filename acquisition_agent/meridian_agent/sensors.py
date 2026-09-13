@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from .models import RecordingArtifact, SensorReport
 
 
-TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0}
+TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0,"photodiode":1000.0}
 
 FRONTIERX_SCALE_PER_COUNT = 0.0000038146972
 FRONTIERX_SAMPLE_RATE_HZ = 125.0
@@ -227,7 +227,7 @@ class UnavailableSensor(Sensor):
 
 
 class SimulatedSensor(Sensor):
-    RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":50.0,"ecg":500.0,"thermal":9.0}
+    RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":50.0,"ecg":500.0,"thermal":9.0,"photodiode":1000.0}
 
     def __init__(self, sensor_id: str, session_dir: Path, origin_mono: float):
         super().__init__(sensor_id,"simulator",session_dir,origin_mono)
@@ -369,6 +369,30 @@ class EmgSensor(SerialLineSensor):
         self._metrics["lastSequence"] = sequence
         centered = raw - 2048
         return float(centered),{"raw":raw,"rms":round(abs(centered)/2048,3),"clippingPct":100.0 if raw in (0,4095) else 0.0},["Hardware detected","EMG packet format valid","Samples arriving"]
+
+
+class PhotodiodeSensor(SerialLineSensor):
+    """Light sensor on the subject screen's sync patch, read by an ESP32 as `t_us,raw` or `t_us,seq,raw` lines."""
+
+    header = ["host_epoch_ns", "monotonic_s", "device_t_us", "raw"]
+
+    def parse(self, line: str) -> tuple[list[object], str] | None:
+        if line.startswith("#"):
+            return None
+        parts = line.split(",")
+        if len(parts) not in (2, 3):
+            return None
+        try:
+            device_t, raw = int(parts[0]), int(parts[-1])
+        except ValueError:
+            return None
+        return [device_t, raw], f"Level {raw}"
+
+    def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
+        raw = int(values[1])
+        low = min(raw, int(self._metrics.get("minLevel", raw)))
+        high = max(raw, int(self._metrics.get("maxLevel", raw)))
+        return float(raw),{"level":raw,"minLevel":low,"maxLevel":high},["Hardware detected","Photodiode line format valid","Samples arriving"]
 
 
 class CsiSensor(SerialLineSensor):
@@ -1065,6 +1089,10 @@ def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin
         return EmgSensor(sensor_id,value,baud,session_dir,origin_mono)
     if sensor_id == "gsr":
         return GsrSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id == "photodiode":
+        if value == "auto":
+            return UnavailableSensor(sensor_id,"Select the photodiode serial port in Recording setup",session_dir,origin_mono)
+        return PhotodiodeSensor(sensor_id,value,baud,session_dir,origin_mono)
     if sensor_id == "ecg":
         if value == "auto":
             return UnavailableSensor(sensor_id,"Paste a Frontier X live ECG link in Recording setup",session_dir,origin_mono)

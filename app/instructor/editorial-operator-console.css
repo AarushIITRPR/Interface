@@ -250,3 +250,4 @@
 .live-gate-override { display: grid !important; gap: 6px; margin-top: 10px; }.live-gate-override input { width: 100%; min-height: 36px; padding: 6px 8px; border: 1px solid #a99d90; background: transparent; font: inherit; }
 .live-screening fieldset { margin: 0 0 10px; padding: 0; border: 0; }.live-screening legend { margin-bottom: 4px; font-size: .86rem; }.live-screening label { display: inline-flex; gap: 6px; align-items: center; margin-right: 18px; font-size: .84rem; }
 .live-screening p { font-size: .84rem; }.live-screening p.good { color: #3d6b45; }.live-screening p.attention { color: #9a4f2f; }.live-screening button { margin-top: 6px; }
+.sync-patch { position: fixed; right: 0; bottom: 0; z-index: 300; width: 56px; height: 56px; background: #000; pointer-events: none; }

@@ -75,7 +75,7 @@ function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): R
 
 const MEDIA_EVENT_LABELS: Record<string,string> = {
   media_onset:"Video started", media_offset:"Video completed", media_error:"Media failed to load",
-  media_paused:"Video paused", media_resumed:"Video resumed",
+  media_paused:"Video paused", media_resumed:"Video resumed", step_displayed:"Step shown on display",
 };
 
 /** Browser-side timing for stimulus events: clientTime is already corrected to the server clock by the subject display. */

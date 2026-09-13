@@ -13,8 +13,10 @@ const OPERATOR_LEASE_MS = 12_000;
 const AUTO_ADVANCE_TOLERANCE_MS = 1_500;
 const SAVE_ATTEMPTS = 6;
 export const ACQUISITION_LEASE_MS = 10_000;
-const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9 };
-const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none" };
+const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9,photodiode:1000 };
+const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none",photodiode:"none" };
+/** Streams the acquisition agent can record; the rest of SENSOR_CATALOG is reserved for future devices. */
+const AGENT_SENSOR_IDS = Object.keys(DEFAULT_DEVICE_CONFIG);
 
 let schemaReady: Promise<void> | null = null;
 
@@ -246,6 +248,8 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   const acquisitionReady = snapshot.hardwareGateOverride || requiredSensorsReady(snapshot,{recording:true});
   return {
     serverTime: now(),
+    // A photodiode on the screen corner needs the sync patch; without one the patch stays hidden from the subject.
+    syncPatch: Boolean(snapshot.deviceConfig.photodiode && snapshot.deviceConfig.photodiode !== "none"),
     mediaManifest: [...new Set([...Object.values(snapshot.media.emotions),snapshot.media.washout,snapshot.media.boxBreathing,snapshot.media.bodyScan,snapshot.media.fixation].filter(Boolean))],
     code: snapshot.code,
     participantId: snapshot.participantId,
@@ -402,7 +406,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
       if (current.configurationLocked) throw new Error("Device configuration is locked while recording.");
       const incoming = payload.devices && typeof payload.devices === "object" ? payload.devices as Record<string,unknown> : {};
       current.deviceConfig = { ...current.deviceConfig };
-      for (const sensor of SENSOR_CATALOG.slice(0,8)) current.deviceConfig[sensor.id]=clean(incoming[sensor.id]??current.deviceConfig[sensor.id]??"none",180)||"none";
+      for (const id of AGENT_SENSOR_IDS) current.deviceConfig[id]=clean(incoming[id]??current.deviceConfig[id]??"none",180)||"none";
       current.configRevision += 1;
       current.preflightTest={status:"idle",detail:"Run preflight after changing hardware",completedAt:null};
       appendEvent(current,{eventType:"device_configuration",label:"Device assignments updated",detail:`Configuration ${current.configRevision}`,source:"operator"});

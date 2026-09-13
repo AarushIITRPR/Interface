@@ -18,6 +18,20 @@ const serverIso = () => new Date(serverNow()).toISOString();
 // network and onset timing does not depend on buffering.
 const preloadedMedia = new Map<string,string>();
 const mediaUrl = (src: string) => preloadedMedia.get(src) ?? src;
+
+// Photodiode sync patch: a small screen corner that flashes white when a stimulus starts or ends and when a step
+// appears. The flash is set directly on the element so it lands on the next frame without waiting for React.
+let syncPatchElement: HTMLDivElement | null = null;
+const SYNC_FLASH_MS = 200;
+function flashSyncPatch() {
+  const element = syncPatchElement;
+  if (!element) return;
+  element.style.background = "#fff";
+  window.setTimeout(() => { element.style.background = "#000"; }, SYNC_FLASH_MS);
+}
+function SyncPatch() {
+  return <div className="sync-patch" aria-hidden="true" ref={(element) => { syncPatchElement = element; }} />;
+}
 type MediaProgress = { loaded: number; total: number; failed: number };
 
 function useMediaPreload(manifest: string[] | undefined, onProgress: (progress: MediaProgress) => void) {
@@ -152,6 +166,15 @@ export function SubjectPortal() {
   const act = useCallback(async (action:string,payload:Record<string,unknown>={}) => { if(!code)return;const requestedCode=code;const next=await sessionRequest(requestedCode,action,payload);if(activeCode.current===requestedCode)acceptSnapshot(next); },[acceptSnapshot,code]);
   useEffect(()=>{if(!code||snapshot?.status==="complete"||snapshot?.status==="aborted")return;const requestedCode=code;const beat=()=>sessionRequest(requestedCode,"subjectHeartbeat",{media:mediaProgress.current}).then(next=>{if(activeCode.current===requestedCode)acceptSnapshot(next)}).catch(()=>undefined);const first=window.setTimeout(beat,0);const id=window.setInterval(beat,5000);return()=>{clearTimeout(first);clearInterval(id)}},[acceptSnapshot,code,snapshot?.status,mediaProgressVersion]);
   useMediaPreload(snapshot?.mediaManifest,onMediaProgress);
+  const displayedStep = snapshot?.status === "running" && snapshot.step ? `${snapshot.step.id}|${snapshot.attempt}` : "";
+  useEffect(()=>{
+    if(!displayedStep||!code)return;
+    const [stepId]=displayedStep.split("|");
+    // Stamp when the step is actually on screen (next frame), for alignment and the photodiode check.
+    const frame=window.requestAnimationFrame(()=>{flashSyncPatch();void sessionRequest(code,"log",{expectedStepId:stepId,eventType:"step_displayed",metadata:{clientTime:serverIso()}}).catch(()=>undefined);});
+    return()=>window.cancelAnimationFrame(frame);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[displayedStep]);
   useEffect(()=>{
     if(!snapshot||!["complete","aborted"].includes(snapshot.status))return;
     let cancelled=false;
@@ -187,6 +210,7 @@ export function SubjectPortal() {
     {snapshot.status === "paused" ? <div className="subject-overlay"><p>{snapshot.announcement?.text || "Please wait a moment."}</p><button className="paper-button" onClick={changeSession}>Change session</button></div> : null}
     {snapshot.status !== "paused" && snapshot.announcement ? <div className="subject-overlay announcement" role="alert"><p>{snapshot.announcement.text}</p><button className="paper-button" onClick={()=>act("ack")}>Understood</button></div> : null}
     {step.safety && snapshot.status === "running" ? <button className="safety-stop" onClick={()=>act("pause",{reason:"Subject requested a stop",source:"subject"})}>I need to stop</button> : null}
+    {snapshot.syncPatch ? <SyncPatch /> : null}
     <div className={`live-subject-task task-${step.type}`}><StepView key={`${step.id}-${snapshot.attempt}`} step={step} snapshot={snapshot} act={act} audioEnabled={audioEnabled} /></div>
   </SubjectFrame>;
 }
@@ -276,10 +300,10 @@ function ClipScreen({step,src,act,audioEnabled,paused}:{step:SubjectStep;src:str
   const [playing,setPlaying]=useState(false); const [ended,setEnded]=useState(false); const errorLogged=useRef(false);
   const video=useRef<HTMLVideoElement>(null); const beganAt=useRef(0); const onsetLogged=useRef(false);
   const log=(eventType:string,metadata:Record<string,unknown>={})=>act("log",{expectedStepId:step.id,eventType,metadata:{clientTime:serverIso(),...metadata}}).catch(()=>undefined);
-  const finish=()=>{if(ended)return;setEnded(true);void log("media_offset",{mediaTimeSec:video.current?.currentTime,durationSec:video.current?.duration});};
+  const finish=()=>{if(ended)return;setEnded(true);flashSyncPatch();void log("media_offset",{mediaTimeSec:video.current?.currentTime,durationSec:video.current?.duration});};
   const begin=()=>{beganAt.current=performance.now();setPlaying(true);if(!src){onsetLogged.current=true;void log("media_onset");}};
   // Onset is the first frame actually playing, not the button press.
-  const onPlaying=()=>{if(onsetLogged.current)return;onsetLogged.current=true;void log("media_onset",{loadDelayMs:performance.now()-beganAt.current,mediaTimeSec:video.current?.currentTime});};
+  const onPlaying=()=>{if(onsetLogged.current)return;onsetLogged.current=true;flashSyncPatch();void log("media_onset",{loadDelayMs:performance.now()-beganAt.current,mediaTimeSec:video.current?.currentTime});};
   useEffect(()=>{if(!playing||src||ended||paused)return;const id=window.setTimeout(finish,12000);return()=>clearTimeout(id);});
   useEffect(()=>{if(!ended)return;const send=()=>act("advance",{expectedStepId:step.id,source:"subject"}).catch(()=>undefined);send();const id=window.setInterval(send,1500);return()=>clearInterval(id);},[act,ended,step.id]);
   const wasPaused=useRef(paused);

@@ -173,6 +173,62 @@ def stream_files(session_dir: Path, artifacts: list[dict]) -> dict[str, Path]:
     return files
 
 
+SYNC_EVENTS = {"media_onset", "media_offset", "step_displayed"}
+SYNC_MATCH_WINDOW_NS = 500_000_000
+SYNC_REFRACTORY_NS = 100_000_000
+
+
+def photodiode_edges(path: Path) -> list[int]:
+    """Host times where the sync patch turned bright: rising crossings of the midpoint between dark and bright levels."""
+    rows: list[tuple[int, int]] = []
+    with path.open(newline="", encoding="utf-8", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            try:
+                rows.append((int(row["host_epoch_ns"]), int(row["raw"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+    if len(rows) < 10:
+        return []
+    levels = sorted(level for _, level in rows)
+    dark = levels[len(levels) // 10]
+    bright = levels[min(len(levels) - 1, (len(levels) * 99) // 100)]
+    if bright - dark < 20:
+        return []
+    high = dark + 0.6 * (bright - dark)
+    low = dark + 0.4 * (bright - dark)
+    edges: list[int] = []
+    lit = False
+    for stamp, level in sorted(rows):
+        if not lit and level >= high:
+            lit = True
+            if not edges or stamp - edges[-1] >= SYNC_REFRACTORY_NS:
+                edges.append(stamp)
+        elif lit and level <= low:
+            lit = False
+    return edges
+
+
+def sync_check(markers: list[dict], edges: list[int]) -> dict:
+    """Match display-timed events to photodiode flashes; latency is flash minus logged event time."""
+    import bisect
+    rows = []
+    for marker in markers:
+        if marker["eventType"] not in SYNC_EVENTS or marker["timeSource"] != "display" or marker["hostEpochNs"] is None:
+            continue
+        stamp = marker["hostEpochNs"]
+        index = bisect.bisect_left(edges, stamp - SYNC_MATCH_WINDOW_NS)
+        candidates = [edge for edge in edges[index:index + 3] if abs(edge - stamp) <= SYNC_MATCH_WINDOW_NS]
+        edge = min(candidates, key=lambda value: abs(value - stamp)) if candidates else None
+        rows.append({"sequence": marker["sequence"], "eventType": marker["eventType"], "stepId": marker["stepId"], "eventHostEpochNs": stamp,
+                     "flashHostEpochNs": edge, "latencyMs": None if edge is None else round((edge - stamp) / 1e6, 1)})
+    latencies = sorted(abs(row["latencyMs"]) for row in rows if row["latencyMs"] is not None)
+    summary = {"events": len(rows), "matched": len(latencies), "flashes": len(edges)}
+    if latencies:
+        summary.update({"medianAbsLatencyMs": latencies[len(latencies) // 2], "p95AbsLatencyMs": latencies[min(len(latencies) - 1, (len(latencies) * 95) // 100)], "maxAbsLatencyMs": latencies[-1]})
+    return {"summary": summary, "rows": rows}
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -242,6 +298,12 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     write_trial_tables(out, task_events)
 
     report = qa_report(export, session_dir, windows, artifacts)
+    photodiode = next((session_dir / artifact["relativePath"] for artifact in artifacts if artifact["sensorId"] == "photodiode" and artifact["relativePath"].endswith(".csv")), None)
+    if photodiode and photodiode.exists():
+        sync = sync_check(markers, photodiode_edges(photodiode))
+        report["syncCheck"] = sync["summary"]
+        _write_tsv(out / "sync_check.tsv", ["sequence", "event_type", "step_id", "event_host_epoch_ns", "flash_host_epoch_ns", "latency_ms"],
+            [[row["sequence"], row["eventType"], row["stepId"], row["eventHostEpochNs"], row["flashHostEpochNs"], row["latencyMs"]] for row in sync["rows"]])
     session = {key: export.get(key) for key in ("sessionCode", "participantId", "operator", "protocolVersion", "status", "assignment", "createdAt", "recordingStartedAt", "requiredSensors", "deviceConfig", "media", "hardwareGateOverride", "exportedAt")}
     session["clock"] = {
         "description": "onset_s is seconds since recording start on the acquisition host clock; host_epoch_ns matches the host_epoch_ns column in every sensor CSV",
@@ -326,12 +388,22 @@ def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: l
         "skippedSteps": skipped, "gates": gates, "steps": steps}
 
 
+def sync_line(sync: dict | None) -> str:
+    if not sync:
+        return "Photodiode sync check: no photodiode recording."
+    if not sync.get("matched"):
+        return f"Photodiode sync check: {sync['events']} display events, {sync['flashes']} flashes, none matched."
+    return (f"Photodiode sync check: {sync['matched']} of {sync['events']} display events matched; |flash - event| median "
+            f"{sync['medianAbsLatencyMs']} ms, p95 {sync['p95AbsLatencyMs']} ms, max {sync['maxAbsLatencyMs']} ms.")
+
+
 def qa_markdown(report: dict) -> str:
     lines = [f"# Session QA: {report['sessionCode']} (participant {report['participantId']})", "",
         f"Status: {report['status']}. {report['stepsFlagged']} of {report['stepCount']} step attempts flagged. "
         f"Required streams: {', '.join(report['requiredSensors']) or 'none'} (minimum {report['minCoveragePct']}% coverage per step).", "",
         f"Skipped by screening: {', '.join(item['detail'] for item in report.get('skippedSteps', [])) or 'none'}.",
-        f"Return-to-baseline gates: {', '.join(item['outcome'].replace('gate_', '') for item in report.get('gates', [])) or 'none'}.", "",
+        f"Return-to-baseline gates: {', '.join(item['outcome'].replace('gate_', '') for item in report.get('gates', [])) or 'none'}.",
+        sync_line(report.get("syncCheck")), "",
         "| # | Step | Attempt | Active s | Planned s | Issues |", "|---|---|---|---|---|---|"]
     for step in report["steps"]:
         issues = "; ".join(step["issues"]) or "OK"

@@ -22,7 +22,7 @@ from .sensors import CameraSensor, Sensor, discover_device_inventory, discover_s
 
 
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
-SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal")
+SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode")
 
 
 def unique_session_dir(root: Path, name: str) -> Path:
@@ -143,9 +143,10 @@ class MeridianAgent:
             "gsr":self.args.gsr,
             "ecg":self.args.ecg,
             "thermal":self.args.thermal,
+            "photodiode":self.args.photodiode,
         }
         values = {sensor_id:("simulate" if self.args.simulate_all else str((requested or {}).get(sensor_id,defaults[sensor_id]))) for sensor_id in SENSOR_IDS}
-        bauds = {"csi":self.args.csi_baud,"emg":self.args.emg_baud,"gsr":self.args.gsr_baud,"ecg":self.args.ecg_baud}
+        bauds = {"csi":self.args.csi_baud,"emg":self.args.emg_baud,"gsr":self.args.gsr_baud,"ecg":self.args.ecg_baud,"photodiode":self.args.photodiode_baud}
         values,inventory = discover_serial_assignments(values,bauds)
         self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono) for sensor_id in SENSOR_IDS]
         self.device_config = values
@@ -329,6 +330,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--ecg",default="none",help="Frontier X live ECG share link/user ID, or a legacy newline serial port")
     result.add_argument("--ecg-baud",type=int,default=115200)
     result.add_argument("--thermal",default="none",help="Thermal camera index/path")
+    result.add_argument("--photodiode",default="none",help="Photodiode (screen sync patch) serial port, or none")
+    result.add_argument("--photodiode-baud",type=int,default=921600)
     result.add_argument("--preview-port",type=int,default=8765,help="Loopback-only camera preview port")
     result.add_argument("--simulate-all",action="store_true",help="Use deterministic simulated streams for integration testing")
     result.add_argument("--export-to",default="",help="Write the analysis bundle for an existing recording directory without recording")
@@ -338,7 +341,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     if args.simulate_all:
-        for name in ("camera","audio","oximeter","csi","emg","gsr","ecg","thermal"):
+        for name in ("camera","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode"):
             setattr(args,name,"simulate")
     if not args.code or not args.token:
         print("Session code and acquisition token are required",file=sys.stderr)

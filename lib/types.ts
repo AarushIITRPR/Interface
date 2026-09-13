@@ -208,6 +208,8 @@ export type SubjectSnapshot = {
   serverTime: string;
   /** Every stimulus the session can play, so the display can load them all before the protocol starts. */
   mediaManifest: string[];
+  /** Show the photodiode sync patch, which flashes when stimuli start and steps appear. */
+  syncPatch: boolean;
   code: string;
   participantId: number;
   revision: number;

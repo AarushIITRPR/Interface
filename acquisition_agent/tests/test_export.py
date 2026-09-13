@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from meridian_agent.export import HostClock, build_bundle, coverage, event_marker, step_windows
+from meridian_agent.export import HostClock, build_bundle, coverage, event_marker, photodiode_edges, step_windows, sync_check
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
 
@@ -132,6 +132,28 @@ class ExportTests(unittest.TestCase):
         self.assertNotIn("trialData", (out / "tasks.tsv").read_text())
         session = json.loads((out / "session.json").read_text())
         self.assertEqual(session["clock"]["recordingStartHostEpochNs"], ns(0))
+
+    def test_photodiode_edges_and_sync_latency(self):
+        path = self.root / "photodiode.csv"
+        with path.open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["host_epoch_ns", "monotonic_s", "device_t_us", "raw"])
+            flashes = [10.030, 20.018]
+            for ms in range(0, 30_000, 2):
+                seconds = ms / 1000
+                lit = any(start <= seconds < start + 0.2 for start in flashes)
+                writer.writerow([ns(seconds), seconds, ms * 1000, 3900 if lit else 120 + ms % 7])
+        edges = photodiode_edges(path)
+        self.assertEqual(len(edges), 2)
+        self.assertAlmostEqual((edges[0] - ns(10.030)) / 1e6, 0, delta=2)
+        clock = HostClock(0.0, 0.0, ns(0), 0.0)
+        markers = [event_marker(event(1, "media_onset", 10.2, client=iso(10.0)), clock), event_marker(event(2, "media_offset", 20.1, client=iso(20.0)), clock),
+                   event_marker(event(3, "step_start", 5), clock)]
+        result = sync_check(markers, edges)
+        self.assertEqual(result["summary"]["events"], 2)
+        self.assertEqual(result["summary"]["matched"], 2)
+        self.assertAlmostEqual(result["rows"][0]["latencyMs"], 30, delta=2)
+        self.assertAlmostEqual(result["summary"]["maxAbsLatencyMs"], 30, delta=2)
 
 
 if __name__ == "__main__":
