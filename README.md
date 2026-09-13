@@ -8,7 +8,7 @@ Meridian is a dual-portal research instrument for controlled multimodal human-su
 - `/instructor` provides participant assignment, preflight readiness, live protocol progress, recording health, interventions, notes, recovery, configuration, and exports.
 - `/api/sessions` is the authoritative session state and event mutation API.
 - `/api/acquisition` is the token-authenticated command and telemetry channel for the local recording agent.
-- `/api/media` stores future video, audio, image, and animated stimuli in object storage.
+- `/api/media` stores uploaded video, audio, image, and animated stimuli in object storage.
 
 ## Protocol integrity
 
@@ -64,4 +64,6 @@ See `acquisition_agent/README.md` for installation, device configuration, Linux 
 
 ## Media integration
 
-Use the protocol media configuration in Setup to upload or assign clips and audio. The subject portal resolves media through the session snapshot and logs onset, offset, completion, and playback failure events.
+The registered protocol media is stored in `public/protocol-media`. New and restored sessions receive the six emotion clips, the guided body-scan video, and the relaxing nature video used behind the box-breathing pacer by default. The neutral washout remains an unlabelled grey fixation screen so it does not introduce another affective stimulus.
+
+The subject portal resolves media through the session snapshot and logs emotion-clip onset, offset, completion, and playback failure events. Instructor-supplied media can still replace any default through the existing session media configuration.

@@ -157,12 +157,12 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
   if (step.type === "washout") return <WashoutScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "stroop") return <StroopTask step={step} act={act} />;
   if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} act={act} />;
-  if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" />;
+  if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
-  if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} />;
+  if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
   if (step.type === "sweep" && step.variant === "breath_hold") return <BreathHoldScreen step={step} act={act} />;
-  if (step.type === "bodyscan") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="bodyscan" />;
-  if (step.durationSec) return <TimedScreen step={step} snapshot={snapshot} act={act} mode={step.fixation ? "fixation" : "timer"} />;
+  if (step.type === "bodyscan") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="bodyscan" src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
+  if (step.durationSec) return <TimedScreen step={step} snapshot={snapshot} act={act} mode={step.fixation ? "fixation" : "timer"} src="" audioEnabled={audioEnabled} />;
   return <CenteredInstruction text={step.subjectPrompt || "Please wait."} />;
 }
 
@@ -184,10 +184,13 @@ function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>void
   return remaining;
 }
 
-function TimedScreen({step,snapshot,act,mode}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;mode:"timer"|"fixation"|"conversation"|"bodyscan"}) {
+function TimedScreen({step,snapshot,act,mode,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;mode:"timer"|"fixation"|"conversation"|"bodyscan";src:string;audioEnabled:boolean}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
   const remaining=useRemaining(step,snapshot,done);
-  if(mode==="bodyscan") return <section className="body-scan"><div className="breathing-orb"/><time>{clock(remaining)}</time></section>;
+  if(mode==="bodyscan") return <section className="body-scan">
+    {src ? <ProtocolVideo className="body-scan-video" src={src} audioEnabled={audioEnabled} loop /> : null}
+    <div className="body-scan-content"><div className="breathing-orb"/><time>{clock(remaining)}</time></div>
+  </section>;
   return <section className="subject-center timed-screen">
     {mode==="fixation" ? <div className="fixation" aria-label="Focus on the cross"/> : <h1>{step.subjectPrompt}</h1>}
     {mode==="conversation" ? <time>{clock(remaining)}</time> : mode!=="fixation" ? <time>{Math.ceil(remaining)}</time> : <small>{Math.ceil(remaining)}</small>}
@@ -219,15 +222,15 @@ function ClipScreen({step,src,act,audioEnabled}:{step:SubjectStep;src:string;act
 }
 
 const DIMS = [
-  {key:"valence",prompt:"How did the experience feel?",lo:"Unpleasant",hi:"Pleasant"},
-  {key:"arousal",prompt:"How active did you feel?",lo:"Calm",hi:"Energized"},
-  {key:"dominance",prompt:"How in control did you feel?",lo:"Less",hi:"More"},
+  {key:"valence",prompt:"Valence (pleasure)",lo:"Unpleasant",hi:"Pleasant"},
+  {key:"arousal",prompt:"Arousal (activation)",lo:"Calm",hi:"Excited"},
+  {key:"dominance",prompt:"Dominance (control)",lo:"Controlled",hi:"In control"},
 ] as const;
 function RatingScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const [stage,setStage]=useState(0); const values=useRef([5,5,5]); const dim=DIMS[stage];
   const choose=(value:number)=>{values.current[stage]=value;if(stage<2)window.setTimeout(()=>setStage(stage+1),180);else act("rating",{expectedStepId:step.id,valence:values.current[0],arousal:values.current[1],dominance:value});};
-  useEffect(()=>{const key=(event:KeyboardEvent)=>{const value=Number(event.key);if(value>=1&&value<=9)choose(value)};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key)});
-  return <section className="rating-screen subject-enter"><p className="rating-count">{stage+1} / 3</p><h1>{dim.prompt}</h1><div className="rating-options" role="radiogroup" aria-label={dim.prompt}>{Array.from({length:9},(_,index)=>index+1).map(value=><button key={value} role="radio" aria-checked="false" aria-label={`Option ${value}`} onClick={()=>choose(value)}><span style={{transform:`scale(${0.72+value*0.04})`}}/></button>)}</div><div className="rating-anchors"><span>{dim.lo}</span><span>{dim.hi}</span></div></section>;
+  useEffect(()=>{const key=(event:KeyboardEvent)=>{const value=event.key==="0"?10:Number(event.key);if(value>=1&&value<=10)choose(value)};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key)});
+  return <section className="rating-screen subject-enter"><p className="rating-count">{stage+1} / 3</p><h1>{dim.prompt}</h1><div className="rating-options" role="radiogroup" aria-label={`${dim.prompt}, ${dim.lo} to ${dim.hi}`}>{Array.from({length:10},(_,index)=>index+1).map(value=><button key={value} role="radio" aria-checked="false" aria-label={`${value} of 10${value===1?`, ${dim.lo}`:value===10?`, ${dim.hi}`:""}`} onClick={()=>choose(value)}>{value}</button>)}</div><div className="rating-anchors"><span>{dim.lo}</span><span>{dim.hi}</span></div></section>;
 }
 
 const COLOURS = [{name:"Red",hex:"#b83232"},{name:"Blue",hex:"#245fa9"},{name:"Green",hex:"#34743b"},{name:"Yellow",hex:"#d3a522"},{name:"Purple",hex:"#76509a"},{name:"Orange",hex:"#c66728"}];
@@ -248,9 +251,20 @@ function NBackTask({step,level,act}:{step:SubjectStep;level:number;act:(a:string
   return <section className="task-screen"><div className="nback-grid">{Array.from({length:9},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" onClick={press}>Match</button></section>;
 }
 
-function BreathingScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
+function BreathingScreen({step,snapshot,act,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;src:string;audioEnabled:boolean}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);const remaining=useRemaining(step,snapshot,done);const phase=Math.floor((((step.durationSec??0)-remaining)/4)%4);const label=["In","Hold","Out","Hold"][phase];
-  return <section className="subject-center breathing-screen"><h1>{step.subjectPrompt}</h1><div className={`breathing-circle phase-${phase}`}><span>{label}</span></div><small>{Math.ceil(remaining)}</small></section>;
+  return <section className={`subject-center breathing-screen ${src?"with-media":""}`}>
+    {src ? <ProtocolVideo className="breathing-video" src={src} audioEnabled={audioEnabled} loop /> : null}
+    <div className="breathing-content"><h1>{step.subjectPrompt}</h1><div className={`breathing-circle phase-${phase}`}><span>{label}</span></div><small>{Math.ceil(remaining)}</small></div>
+  </section>;
+}
+
+function ProtocolVideo({src,audioEnabled,className,loop=false}:{src:string;audioEnabled:boolean;className:string;loop?:boolean}) {
+  return (
+    // These registered protocol stimuli intentionally omit injected captions because captions would alter the research material.
+    // eslint-disable-next-line jsx-a11y/media-has-caption
+    <video className={className} src={src} autoPlay playsInline loop={loop} muted={!audioEnabled} preload="auto" />
+  );
 }
 function BreathHoldScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const [holding,setHolding]=useState(false);const [elapsed,setElapsed]=useState(0);const start=useRef(0);

@@ -65,5 +65,5 @@ function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): R
   return {eventType,label:eventType === "media_onset" ? "Video started" : eventType === "media_offset" ? "Video completed" : eventType === "media_error" ? "Media failed to load" : "Subject event",severity:eventType === "media_error" ? "error" : "info",source:"subject"};
 }
 
-function scale(value:unknown) { return Math.max(1,Math.min(9,Math.round(Number(value) || 1))); }
+function scale(value:unknown) { return Math.max(1,Math.min(10,Math.round(Number(value) || 1))); }
 function unauthorized() { return Response.json({error:"Instructor authorization is required."},{status:401}); }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import test from "node:test";
 
 async function render(path = "/") {
@@ -67,4 +67,36 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(hosting, /"d1": "DB"/);
   assert.match(hosting, /"r2": "MEDIA"/);
   assert.doesNotMatch(`${subject}\n${instructor}\n${protocol}`, /—/);
+});
+
+test("ships every registered protocol stimulus", async () => {
+  const media = ["happy", "sad", "anger", "fear", "surprise", "disgust", "bodyscan", "relaxing-nature"];
+  const types = await readFile(new URL("../lib/types.ts", import.meta.url), "utf8");
+  const subject = await readFile(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8");
+  for (const name of media) {
+    const file = await stat(new URL(`../public/protocol-media/${name}.mp4`, import.meta.url));
+    assert.ok(file.size > 0, `${name}.mp4 is empty`);
+    assert.match(types, new RegExp(`/protocol-media/${name}\\.mp4`));
+  }
+  assert.match(subject, /className="stimulus-video"/);
+  assert.match(subject, /className="body-scan-video"/);
+  assert.match(subject, /className="breathing-video"/);
+});
+
+test("keeps the legacy SAM questions with discrete ten-point responses", async () => {
+  const [subject, protocol, route] = await Promise.all([
+    readFile(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/protocol.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/sessions/route.ts", import.meta.url), "utf8"),
+  ]);
+  for (const label of ["Valence (pleasure)", "Arousal (activation)", "Dominance (control)"]) {
+    assert.match(subject, new RegExp(label.replace(/[()]/g, "\\$&")));
+  }
+  for (const anchor of ["Unpleasant", "Pleasant", "Calm", "Excited", "Controlled", "In control"]) {
+    assert.match(subject, new RegExp(anchor));
+  }
+  assert.match(subject, /Array\.from\(\{length:10\}/);
+  assert.doesNotMatch(subject, /type="range"/);
+  assert.match(protocol, /Valence, arousal, and dominance/);
+  assert.match(route, /Math\.min\(10,/);
 });

@@ -71,6 +71,19 @@ function hydrateSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
   snapshot.recordingStartedAt = snapshot.recordingStartedAt ?? (["running","paused"].includes(snapshot.status) ? snapshot.createdAt : null);
   snapshot.preflightTest = snapshot.preflightTest ?? {status:"idle",detail:"Not run",completedAt:null};
   snapshot.subjectLastSeenAt = snapshot.subjectLastSeenAt ?? null;
+  snapshot.media = {
+    ...DEFAULT_MEDIA,
+    ...(snapshot.media ?? {}),
+    emotions: {
+      ...DEFAULT_MEDIA.emotions,
+      ...(snapshot.media?.emotions ?? {}),
+    },
+  };
+  for (const emotion of Object.keys(DEFAULT_MEDIA.emotions) as Array<keyof typeof DEFAULT_MEDIA.emotions>) {
+    snapshot.media.emotions[emotion] ||= DEFAULT_MEDIA.emotions[emotion];
+  }
+  snapshot.media.boxBreathing ||= DEFAULT_MEDIA.boxBreathing;
+  snapshot.media.bodyScan ||= DEFAULT_MEDIA.bodyScan;
   return snapshot;
 }
 

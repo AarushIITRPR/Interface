@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = "v6";
+export const PROTOCOL_VERSION = "v7";
 
 export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"] as const;
 export type Emotion = (typeof EMOTIONS)[number];
@@ -204,10 +204,17 @@ export type SubjectSnapshot = {
 };
 
 export const DEFAULT_MEDIA: MediaConfig = {
-  emotions: { happy: "", sad: "", anger: "", fear: "", surprise: "", disgust: "" },
+  emotions: {
+    happy: "/protocol-media/happy.mp4",
+    sad: "/protocol-media/sad.mp4",
+    anger: "/protocol-media/anger.mp4",
+    fear: "/protocol-media/fear.mp4",
+    surprise: "/protocol-media/surprise.mp4",
+    disgust: "/protocol-media/disgust.mp4",
+  },
   washout: "",
-  boxBreathing: "",
-  bodyScan: "",
+  boxBreathing: "/protocol-media/relaxing-nature.mp4",
+  bodyScan: "/protocol-media/bodyscan.mp4",
   fixation: "",
 };
 
