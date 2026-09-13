@@ -3,8 +3,9 @@
 import { ArrowUpRight, Eye, Volume2, VolumeX } from "lucide-react";
 import { MotionConfig, motion } from "motion/react";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { BREATH_HOLD_MAX_SEC, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
 // Step timers use the server clock so a subject computer with a skewed clock cannot shorten or stretch timed steps.
@@ -222,7 +223,7 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
   if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
   if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
-  if (step.type === "sweep" && step.variant === "breath_hold") return <BreathHoldScreen step={step} act={act} />;
+  if (step.type === "sweep" && step.variant === "breath_hold") return <BreathHoldScreen step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "bodyscan") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="bodyscan" src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
   if (step.durationSec) return <TimedScreen step={step} snapshot={snapshot} act={act} mode={step.fixation ? "fixation" : "timer"} src="" audioEnabled={audioEnabled} />;
   return <CenteredInstruction text={step.subjectPrompt || "Please wait."} />;
@@ -302,55 +303,112 @@ function ClipScreen({step,src,act,audioEnabled,paused}:{step:SubjectStep;src:str
   return <section className="placeholder-film" aria-label="Video stimulus"><div/><div/><div/></section>;
 }
 
-const DIMS = [
+const SAM_DIMENSIONS = [
   {key:"valence",prompt:"Valence (pleasure)",lo:"Unpleasant",hi:"Pleasant"},
   {key:"arousal",prompt:"Arousal (activation)",lo:"Calm",hi:"Excited"},
   {key:"dominance",prompt:"Dominance (control)",lo:"Controlled",hi:"In control"},
 ] as const;
+const sendUntilAccepted=(send:()=>Promise<void>)=>{const attempt=():Promise<void>=>send().catch(()=>{window.setTimeout(()=>void attempt(),1500)});void attempt();};
+
+/** Nine-point SAM, then the main emotion felt with its intensity, then whether the clip was familiar. */
 function RatingScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [stage,setStage]=useState(0); const values=useRef([5,5,5]); const dim=DIMS[stage];
-  const choose=(value:number)=>{values.current[stage]=value;if(stage<2)window.setTimeout(()=>setStage(stage+1),180);else act("rating",{expectedStepId:step.id,valence:values.current[0],arousal:values.current[1],dominance:value});};
-  useEffect(()=>{const key=(event:KeyboardEvent)=>{const value=event.key==="0"?10:Number(event.key);if(value>=1&&value<=10)choose(value)};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key)});
-  return <section className="rating-screen subject-enter"><p className="rating-count">{stage+1} / 3</p><h1>{dim.prompt}</h1><div className="rating-options" role="radiogroup" aria-label={`${dim.prompt}, ${dim.lo} to ${dim.hi}`}>{Array.from({length:10},(_,index)=>index+1).map(value=><button key={value} role="radio" aria-checked="false" aria-label={`${value} of 10${value===1?`, ${dim.lo}`:value===10?`, ${dim.hi}`:""}`} onClick={()=>choose(value)}>{value}</button>)}</div><div className="rating-anchors"><span>{dim.lo}</span><span>{dim.hi}</span></div></section>;
+  const [stage,setStage]=useState(0); const [emotion,setEmotion]=useState(""); const answers=useRef<Record<string,string|number|null>>({}); const sent=useRef(false);
+  const next=(key:string,value:string|number)=>{
+    answers.current[key]=value;
+    if(key==="discreteEmotion")setEmotion(String(value));
+    let following=stage+1;
+    if(key==="discreteEmotion"&&value==="Neutral"){answers.current.intensity=null;following+=1;}
+    if(following<6){window.setTimeout(()=>setStage(following),180);return;}
+    if(sent.current)return;sent.current=true;
+    sendUntilAccepted(()=>act("rating",{expectedStepId:step.id,...answers.current}));
+  };
+  const scale=stage<3||stage===4;
+  useEffect(()=>{if(!scale)return;const key=(event:KeyboardEvent)=>{const value=Number(event.key);if(value>=1&&value<=SAM_POINTS)next(stage<3?SAM_DIMENSIONS[stage].key:"intensity",value)};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key)});
+  const points=(count:number)=>Array.from({length:count},(_,index)=>index+1);
+  if(stage<3){const dim=SAM_DIMENSIONS[stage];return <RatingFrame count={stage+1} prompt={dim.prompt} lo={dim.lo} hi={dim.hi} options={points(SAM_POINTS).map(value=>({label:String(value),value}))} onChoose={value=>next(dim.key,value)} columns={SAM_POINTS} />;}
+  if(stage===3)return <RatingFrame count={4} prompt="Which emotion did you mainly feel?" options={DISCRETE_EMOTIONS.map(label=>({label,value:label}))} onChoose={value=>next("discreteEmotion",value)} columns={4} />;
+  if(stage===4)return <RatingFrame count={5} prompt={`How strong was that ${emotion.toLowerCase()}?`} lo="Very weak" hi="Very strong" options={points(INTENSITY_POINTS).map(value=>({label:String(value),value}))} onChoose={value=>next("intensity",value)} columns={INTENSITY_POINTS} />;
+  return <RatingFrame count={6} prompt="Have you seen this video before?" options={FAMILIARITY.map(label=>({label,value:label}))} onChoose={value=>next("familiarity",value)} columns={3} />;
 }
 
-const COLOURS = [{name:"Red",hex:"#b83232"},{name:"Blue",hex:"#245fa9"},{name:"Green",hex:"#34743b"},{name:"Yellow",hex:"#d3a522"},{name:"Purple",hex:"#76509a"},{name:"Orange",hex:"#c66728"}];
+function RatingFrame({count,prompt,lo,hi,options,onChoose,columns}:{count:number;prompt:string;lo?:string;hi?:string;options:Array<{label:string;value:string|number}>;onChoose:(value:string|number)=>void;columns:number}) {
+  return <section className="rating-screen subject-enter"><p className="rating-count">{count} / 6</p><h1>{prompt}</h1><div className="rating-options" style={{gridTemplateColumns:`repeat(${columns},1fr)`}} role="radiogroup" aria-label={lo&&hi?`${prompt}, ${lo} to ${hi}`:prompt}>{options.map((option,index)=><button key={option.label} role="radio" aria-checked="false" aria-label={lo&&hi?`${option.label} of ${options.length}${index===0?`, ${lo}`:index===options.length-1?`, ${hi}`:""}`:option.label} onClick={()=>onChoose(option.value)}>{option.label}</button>)}</div>{lo&&hi?<div className="rating-anchors"><span>{lo}</span><span>{hi}</span></div>:null}</section>;
+}
+
+/** Balanced Stroop: fixation, word until response or deadline, per-trial logging. Pauses restart the trial clock. */
 function StroopTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
-  const [started,setStarted]=useState(false); const [trial,setTrial]=useState(0); const [stimulus,setStimulus]=useState(()=>makeStimulus()); const startedAt=useRef(0); const results=useRef<Array<{correct:boolean;rt:number}>>([]); const done=useRef(false);
-  // Restarting the trial clock on resume keeps pause time out of the reaction time.
-  useEffect(()=>{if(started&&!paused)startedAt.current=performance.now()},[started,trial,paused]);
-  const answer=(name:string,eventTime:number)=>{if(paused||done.current)return;const correct=name===stimulus.ink;results.current.push({correct,rt:eventTime-startedAt.current});if(trial>=29){done.current=true;const accuracy=Math.round(results.current.filter(r=>r.correct).length/results.current.length*100);const avgRt=Math.round(results.current.reduce((s,r)=>s+r.rt,0)/results.current.length);const metadata={trials:30,accuracyPct:accuracy,averageRtMs:avgRt};const send=():Promise<void>=>act("taskComplete",{expectedStepId:step.id,eventType:"stroop_complete",label:"Stroop completed",metadata}).catch(()=>{window.setTimeout(send,1500)});void send()}else{setTrial(trial+1);setStimulus(makeStimulus())}};
-  if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
-  return <section className="task-screen"><div className="stroop-word" style={{color:stimulus.hex}}>{stimulus.word}</div><div className="colour-buttons">{COLOURS.map(colour=><button key={colour.name} style={{background:colour.hex}} onClick={event=>answer(colour.name,event.timeStamp)}>{colour.name}</button>)}</div></section>;
-}
-function makeStimulus(){const word=COLOURS[Math.floor(Math.random()*COLOURS.length)];let ink=COLOURS[Math.floor(Math.random()*COLOURS.length)];if(Math.random()>.35)while(ink.name===word.name)ink=COLOURS[Math.floor(Math.random()*COLOURS.length)];return{word:word.name.toUpperCase(),ink:ink.name,hex:ink.hex}}
-
-const NBACK_TRIALS = 20;
-function NBackTask({step,level,act,paused}:{step:SubjectStep;level:number;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
-  const [started,setStarted]=useState(false);const [lit,setLit]=useState<number|null>(null);const sequence=useRef<number[]>([]);const index=useRef(0);const ended=useRef(false);
-  const trial=useRef({target:false,responded:false,onset:0});const score=useRef({hits:0,misses:0,falseAlarms:0,correctRejections:0,hitRtMs:[] as number[]});
+  const [seed]=useState(newSeed); const trials=useMemo(()=>stroopTrials(seededRandom(seed)),[seed]);
+  const [started,setStarted]=useState(false); const [index,setIndex]=useState(0); const [showing,setShowing]=useState(false);
+  const onset=useRef(0); const responses=useRef<StroopResponse[]>([]); const done=useRef(false);
+  const record=(response:string|null,eventTime:number|null)=>{
+    if(done.current)return;
+    const trial=trials[index];
+    const rtMs=response!==null&&eventTime!==null?Math.round(eventTime-onset.current):null;
+    responses.current.push({...trial,response,rtMs,correct:response===trial.ink,timedOut:response===null});
+    setShowing(false);
+    if(index+1<trials.length){setIndex(index+1);return;}
+    done.current=true;
+    const metadata={seed,...summarizeStroop(responses.current),trialData:responses.current.map(({index:i,word,ink,congruent,response:r,rtMs:rt,correct,timedOut})=>({i,word,ink,congruent,response:r,rtMs:rt,correct,timedOut}))};
+    sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:"stroop_complete",label:"Stroop completed",metadata}));
+  };
   useEffect(()=>{
-    if(!started||paused)return;
-    let hideId=0;
-    const closeTrial=()=>{const current=trial.current;if(index.current===0)return;if(current.target&&!current.responded)score.current.misses+=1;if(!current.target&&!current.responded)score.current.correctRejections+=1;};
+    if(!started||paused||done.current)return;
+    if(!showing){const id=window.setTimeout(()=>{onset.current=performance.now();setShowing(true);},STROOP.fixationMs);return()=>clearTimeout(id);}
+    // Resuming from a pause restarts the response clock for the visible word.
+    onset.current=Math.max(onset.current,performance.now()-1);
+    const id=window.setTimeout(()=>record(null,null),STROOP.deadlineMs);
+    return()=>clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[started,paused,showing,index]);
+  if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
+  const trial=trials[index];
+  return <section className="task-screen"><div className="stroop-word" style={{color:showing?trial.hex:undefined}}>{showing?trial.word.toUpperCase():"+"}</div><div className="colour-buttons">{TASK_COLOURS.map(colour=><button key={colour.name} style={{background:colour.hex}} disabled={!showing||paused} onClick={event=>record(colour.name,event.timeStamp)}>{colour.name}</button>)}</div></section>;
+}
+
+/** N-back with a short practice block (with feedback) and a pre-generated scored block. */
+function NBackTask({step,level,act,paused}:{step:SubjectStep;level:number;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
+  const [stage,setStage]=useState<"intro"|"practice"|"ready"|"main">("intro");
+  const [seed]=useState(newSeed); const [lockedLevel,setLockedLevel]=useState(level);
+  const [lit,setLit]=useState<number|null>(null); const [feedback,setFeedback]=useState<"good"|"bad"|null>(null);
+  const index=useRef(0); const open=useRef<{responded:boolean;rtMs:number|null;onset:number}|null>(null); const records=useRef<NBackTrial[]>([]); const practiceRecords=useRef<NBackTrial[]>([]); const ended=useRef(false);
+  const sequences=useMemo(()=>{const random=seededRandom(seed);return {practice:nbackSequence(random,lockedLevel,NBACK.practiceTrials),main:nbackSequence(random,lockedLevel)};},[lockedLevel,seed]);
+  useEffect(()=>{
+    if((stage!=="practice"&&stage!=="main")||paused)return;
+    const practice=stage==="practice"; const sequence=practice?sequences.practice:sequences.main; const target=practice?practiceRecords:records;
+    let hideId=0; let feedbackId=0;
+    const closeTrial=()=>{
+      const trial=open.current; if(!trial)return; open.current=null;
+      const at=index.current-1; const isTarget=sequence.targets[at];
+      const outcome=nbackOutcome(isTarget,trial.responded,at>=sequence.scoredFrom);
+      target.current.push({index:at,position:sequence.positions[at],target:isTarget,responded:trial.responded,rtMs:trial.rtMs,outcome});
+      if(practice&&outcome==="miss"){setFeedback("bad");feedbackId=window.setTimeout(()=>setFeedback(null),300);}
+    };
     const next=()=>{
-      if(index.current>=NBACK_TRIALS){
-        if(!ended.current){closeTrial();ended.current=true;const {hits,misses,falseAlarms,correctRejections,hitRtMs}=score.current;const averageHitRtMs=hitRtMs.length?Math.round(hitRtMs.reduce((sum,value)=>sum+value,0)/hitRtMs.length):null;const metadata={level,trials:NBACK_TRIALS,hits,misses,falseAlarms,correctRejections,averageHitRtMs};const send=():Promise<void>=>act("taskComplete",{expectedStepId:step.id,eventType:"nback_complete",label:"N-back completed",metadata}).catch(()=>{window.setTimeout(send,1500)});void send();}
+      closeTrial();
+      if(index.current>=sequence.positions.length){
+        index.current=0;
+        if(practice){setStage("ready");return;}
+        if(!ended.current){ended.current=true;const metadata={seed,...summarizeNBack(lockedLevel,records.current),practice:summarizeNBack(lockedLevel,practiceRecords.current),trialData:records.current};sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:"nback_complete",label:"N-back completed",metadata}));}
         return;
       }
-      closeTrial();
-      let pos=Math.floor(Math.random()*9);
-      if(index.current>=level&&Math.random()<.3)pos=sequence.current[index.current-level];
-      sequence.current.push(pos);
-      trial.current={target:index.current>=level&&pos===sequence.current[index.current-level],responded:false,onset:performance.now()};
-      setLit(pos);hideId=window.setTimeout(()=>setLit(null),800);index.current+=1;
+      open.current={responded:false,rtMs:null,onset:performance.now()};
+      setLit(sequence.positions[index.current]);hideId=window.setTimeout(()=>setLit(null),NBACK.stimulusMs);index.current+=1;
     };
-    next();const id=window.setInterval(next,1100);
-    return()=>{clearInterval(id);clearTimeout(hideId);};
-  },[act,level,paused,started,step.id]);
-  const press=(eventTime:number)=>{const current=trial.current;if(paused||lit===null||current.responded)return;current.responded=true;if(current.target){score.current.hits+=1;score.current.hitRtMs.push(Math.round(eventTime-current.onset));}else score.current.falseAlarms+=1;};
-  if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
-  return <section className="task-screen"><div className="nback-grid">{Array.from({length:9},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" onClick={event=>press(event.timeStamp)}>Match</button></section>;
+    next();const id=window.setInterval(next,NBACK.soaMs);
+    return()=>{
+      clearInterval(id);clearTimeout(hideId);clearTimeout(feedbackId);setLit(null);
+      // A pause discards the trial on screen; it is shown again on resume.
+      if(open.current){open.current=null;index.current=Math.max(0,index.current-1);}
+    };
+  },[act,lockedLevel,paused,seed,sequences,stage,step.id]);
+  const press=(eventTime:number)=>{
+    const trial=open.current; if(paused||!trial||trial.responded)return;
+    trial.responded=true; trial.rtMs=Math.round(eventTime-trial.onset);
+    if(stage==="practice"){const good=(stage==="practice"?sequences.practice:sequences.main).targets[index.current-1];setFeedback(good?"good":"bad");window.setTimeout(()=>setFeedback(null),300);}
+  };
+  if(stage==="intro")return <section className="subject-center"><h1>{step.subjectPrompt}</h1><p className="task-note">N = {level}. First a short practice with feedback.</p><button className="paper-button" onClick={()=>{setLockedLevel(level);setStage("practice");}}>Start practice</button></section>;
+  if(stage==="ready")return <section className="subject-center"><h1>Practice complete.</h1><p className="task-note">The task itself has no feedback.</p><button className="paper-button" onClick={()=>setStage("main")}>Begin task</button></section>;
+  return <section className={`task-screen ${feedback?`nback-feedback-${feedback}`:""}`}><div className="nback-grid">{Array.from({length:NBACK.positions},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" onClick={event=>press(event.timeStamp)}>Match</button></section>;
 }
 
 function BreathingScreen({step,snapshot,act,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;src:string;audioEnabled:boolean}) {
@@ -370,9 +428,18 @@ function ProtocolVideo({src,audioEnabled,className,loop=false,paused=false}:{src
     <video ref={video} className={className} src={mediaUrl(src)} autoPlay playsInline loop={loop} muted={!audioEnabled} preload="auto" />
   );
 }
-function BreathHoldScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [holding,setHolding]=useState(false);const [elapsed,setElapsed]=useState(0);const start=useRef(0);
-  useEffect(()=>{if(!holding)return;start.current=performance.now();const id=window.setInterval(()=>setElapsed((performance.now()-start.current)/1000),100);return()=>clearInterval(id)},[holding]);
-  return <section className="subject-center breath-hold"><h1>{step.subjectPrompt}</h1>{holding?<><time>{elapsed.toFixed(1)}</time><button className="paper-button" onClick={()=>{const metadata={durationSec:Number(elapsed.toFixed(1))};const send=():Promise<void>=>act("taskComplete",{expectedStepId:step.id,eventType:"breath_hold_complete",label:"Breath hold completed",metadata}).catch(()=>{window.setTimeout(send,1500)});void send();}}>Release</button></>:<button className="paper-button" onClick={()=>setHolding(true)}>I am ready</button>}</section>;
+function BreathHoldScreen({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
+  const [holding,setHolding]=useState(false);const [elapsed,setElapsed]=useState(0);const start=useRef(0);const releasedRef=useRef(false);const [released,setReleased]=useState(false);
+  const release=useCallback((durationSec:number,capped:boolean)=>{
+    if(releasedRef.current)return;releasedRef.current=true;setReleased(true);
+    const metadata={durationSec:Number(durationSec.toFixed(1)),capped,maxSec:BREATH_HOLD_MAX_SEC};
+    sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:"breath_hold_complete",label:capped?"Breath hold stopped at the time limit":"Breath hold completed",metadata}));
+  },[act,step.id]);
+  useEffect(()=>{if(!holding)return;start.current=performance.now();const id=window.setInterval(()=>{const value=(performance.now()-start.current)/1000;setElapsed(Math.min(value,BREATH_HOLD_MAX_SEC));if(value>=BREATH_HOLD_MAX_SEC)release(BREATH_HOLD_MAX_SEC,true);},100);return()=>clearInterval(id)},[holding,release]);
+  // A pause (including "I need to stop") ends the hold immediately.
+  useEffect(()=>{if(paused&&holding)release((performance.now()-start.current)/1000,false);},[paused,holding,release]);
+  if(released)return <section className="subject-center breath-hold"><h1>Breathe normally.</h1></section>;
+  return <section className="subject-center breath-hold"><h1>{step.subjectPrompt}</h1>{holding?<><time>{elapsed.toFixed(1)}</time><button className="paper-button" onClick={()=>release((performance.now()-start.current)/1000,false)}>Release</button></>:<button className="paper-button" disabled={paused} onClick={()=>setHolding(true)}>I am ready</button>}</section>;
 }
+
 function clock(value:number){const n=Math.max(0,Math.ceil(value));return`${Math.floor(n/60)}:${String(n%60).padStart(2,"0")}`}

@@ -43,7 +43,10 @@ def export_fixture():
             event(6, "media_onset", 36, 2, "s02-clip-happy", client=iso(36.25), metadata={"loadDelayMs": 180}),
             event(7, "step_repeated", 40, 2, "s02-clip-happy", metadata={"attempt": 2}),
             event(8, "media_onset", 41, 2, "s02-clip-happy", attempt=2, client=iso(41.5)),
-            event(9, "session_complete", 60, 2, "s02-clip-happy", attempt=2),
+            event(9, "stroop_complete", 59, 2, "s02-clip-happy", attempt=2, metadata={"seed": 7, "accuracyPct": 50, "trialData": [
+                {"i": 0, "word": "Red", "ink": "Red", "congruent": True, "response": "Red", "rtMs": 500, "correct": True, "timedOut": False},
+                {"i": 1, "word": "Blue", "ink": "Green", "congruent": False, "response": None, "rtMs": None, "correct": False, "timedOut": True}]}),
+            event(10, "session_complete", 60, 2, "s02-clip-happy", attempt=2),
         ],
     }
 
@@ -124,6 +127,9 @@ class ExportTests(unittest.TestCase):
         self.assertIn("attempt repeated", by_attempt[("s02-clip-happy", 1)]["issues"])
         self.assertIn("paused 1x", by_attempt[("s01-washout", 1)]["issues"])
         self.assertEqual(by_attempt[("s00-setup", 1)]["issues"], [])
+        trials = list(csv.DictReader((out / "stroop_trials.tsv").open(), delimiter="\t"))
+        self.assertEqual([(t["seed"], t["i"], t["congruent"], t["timedOut"]) for t in trials], [("7", "0", "True", "False"), ("7", "1", "False", "True")])
+        self.assertNotIn("trialData", (out / "tasks.tsv").read_text())
         session = json.loads((out / "session.json").read_text())
         self.assertEqual(session["clock"]["recordingStartHostEpochNs"], ns(0))
 

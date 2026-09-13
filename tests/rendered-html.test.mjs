@@ -75,7 +75,7 @@ test("ships every registered protocol stimulus", async () => {
   assert.match(subject, /className="breathing-video"/);
 });
 
-test("keeps the legacy SAM questions with discrete ten-point responses", async () => {
+test("uses nine-point SAM questions with discrete emotion and familiarity checks", async () => {
   const [subject, protocol, route] = await Promise.all([
     readFile(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/protocol.ts", import.meta.url), "utf8"),
@@ -87,8 +87,10 @@ test("keeps the legacy SAM questions with discrete ten-point responses", async (
   for (const anchor of ["Unpleasant", "Pleasant", "Calm", "Excited", "Controlled", "In control"]) {
     assert.match(subject, new RegExp(anchor));
   }
-  assert.match(subject, /Array\.from\(\{length:10\}/);
+  assert.match(subject, /points\(SAM_POINTS\)/);
+  assert.match(subject, /Which emotion did you mainly feel\?/);
+  assert.match(subject, /Have you seen this video before\?/);
   assert.doesNotMatch(subject, /type="range"/);
   assert.match(protocol, /Valence, arousal, and dominance/);
-  assert.match(route, /Math\.min\(10,/);
+  assert.match(route, /scale\(payload\.valence,SAM_POINTS\)/);
 });

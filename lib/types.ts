@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = "v7";
+export const PROTOCOL_VERSION = "v8";
 
 export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"] as const;
 export type Emotion = (typeof EMOTIONS)[number];
@@ -26,6 +26,8 @@ export type DeviceConfig = Record<string,string>;
 export type Assignment = {
   pid: number;
   row: number;
+  /** Task-order row (1-6), counterbalanced independently of the emotion row. Absent on sessions created before v8. */
+  bufferRow?: number;
   buf1: BufferKind;
   buf2: BufferKind;
   buf3: BufferKind;
@@ -159,7 +161,7 @@ export type SessionSnapshot = {
   announcement: { id: string; text: string; kind: "info" | "pause" | "safety"; createdAt: string } | null;
   events: ExperimentEvent[];
   notes: Array<{ id: string; body: string; category: string; stepId: string; stepLabel: string; createdAt: string }>;
-  ratings: Array<{ emotion: Emotion; valence: number; arousal: number; dominance: number; createdAt: string }>;
+  ratings: Array<{ emotion: Emotion; valence: number; arousal: number; dominance: number; scalePoints?: number; discreteEmotion?: string | null; intensity?: number | null; familiarity?: string | null; createdAt: string }>;
   sensors: SensorChannel[];
   bpReadings: Array<{ stepId: string; label: string; systolic: number; diastolic: number; pulse: number | null; createdAt: string }>;
   media: MediaConfig;

@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
+import { SAM_POINTS } from "./tasks";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
@@ -186,7 +187,7 @@ export async function createSession(participantId: number, operator: string) {
     bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt,subjectLastSeenAt:null,
     acquisitionToken:acquisitionToken(), acquisition:emptyAcquisition(), recordings:[], requiredSensors:["face","audio","oximeter"], hardwareGateOverride:false,deviceConfig:{...DEFAULT_DEVICE_CONFIG},configRevision:1,configurationLocked:false,recordingStartedAt:null,preflightTest:{status:"idle",detail:"Not run",completedAt:null}, createdAt, updatedAt:createdAt,
   };
-  const event = appendEvent(snapshot,{ eventType:"session_prepared", label:"Session prepared", detail:`Participant ${assignment.pid}, Williams row ${assignment.row}`, source:"operator", metadata:{ assignment } });
+  const event = appendEvent(snapshot,{ eventType:"session_prepared", label:"Session prepared", detail:`Participant ${assignment.pid}, emotion row ${assignment.row}, task order ${assignment.bufferRow}`, source:"operator", metadata:{ assignment } });
   snapshot.revision = 2;
   snapshot.writeId = uid("w");
   const db = bindings().DB;
@@ -356,7 +357,12 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "message") { const text=String(payload.text ?? "").trim().slice(0,180); if(text){ current.announcement={id:uid("ann"),text,kind:payload.kind === "safety" ? "safety" : "info",createdAt:now()}; appendEvent(current,{eventType:"operator_message",label:"Operator message sent",detail:text,source:"operator"}); } }
     if (action === "ack") { if(current.announcement) appendEvent(current,{eventType:"message_ack",label:"Message acknowledged",source:"subject"}); current.announcement=null; }
     if (action === "log") appendEvent(current,{eventType:String(payload.eventType ?? "subject_event"),label:String(payload.label ?? "Subject event"),detail:String(payload.detail ?? ""),severity:(payload.severity as ExperimentEvent["severity"]) ?? "info",source:(payload.source as ExperimentEvent["source"]) ?? "subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}});
-    if (action === "rating" && running && step?.type === "sam" && step.emo) { current.ratings.push({emotion:step.emo,valence:Number(payload.valence),arousal:Number(payload.arousal),dominance:Number(payload.dominance),createdAt:now()}); appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{emotion:step.emo,valence:payload.valence,arousal:payload.arousal,dominance:payload.dominance}}); advance(current,"Response submitted","subject"); }
+    if (action === "rating" && running && step?.type === "sam" && step.emo) {
+      const rating = { emotion:step.emo, valence:Number(payload.valence), arousal:Number(payload.arousal), dominance:Number(payload.dominance), scalePoints:SAM_POINTS, discreteEmotion:(payload.discreteEmotion as string | null) ?? null, intensity:(payload.intensity as number | null) ?? null, familiarity:(payload.familiarity as string | null) ?? null, createdAt:now() };
+      current.ratings.push(rating);
+      appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{...rating}});
+      advance(current,"Response submitted","subject");
+    }
     if (action === "taskComplete" && running && (step?.type === "stroop" || step?.type === "nback" || step?.advance === "subject")) { appendEvent(current,{eventType:String(payload.eventType ?? "task_complete"),label:String(payload.label ?? "Task completed"),source:"subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}}); advance(current,"Task completed","subject"); }
     if (action === "note") { const body=String(payload.body ?? "").trim().slice(0,500); if(body){ current.notes.push({id:uid("note"),body,category:String(payload.category ?? "general"),stepId:step?.id ?? "",stepLabel:step ? shortLabel(step) : "",createdAt:now()}); appendEvent(current,{eventType:"operator_note",label:"Operator note",detail:body,source:"operator"}); } }
     if (action === "sensor") { const sensor=current.sensors.find((item)=>item.id===payload.id); if(sensor){ sensor.status=String(payload.status) as SensorStatus; sensor.detail=String(payload.detail ?? sensor.detail); sensor.updatedAt=now(); appendEvent(current,{eventType:"sensor_status",label:`${sensor.label}: ${sensor.status}`,severity:["missing","error"].includes(sensor.status)?"error":sensor.status==="delayed"?"warn":"info",source:"sensor",metadata:{sensorId:sensor.id,status:sensor.status}}); } }

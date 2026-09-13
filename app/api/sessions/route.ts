@@ -1,4 +1,5 @@
 import { getOperatorUser } from "@/app/operator-auth";
+import { DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, SAM_POINTS } from "@/lib/tasks";
 import { createSession, getLatestSetupSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
 
 export const dynamic = "force-dynamic";
@@ -61,8 +62,13 @@ function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): R
   if (action === "pause") return {reason:"Subject requested a stop",source:"subject"};
   if (action === "advance") return {expectedStepId,reason:"Subject completed the step",source:"subject"};
   if (action === "autoAdvance") return {expectedStepId};
-  if (action === "rating") return {expectedStepId,valence:scale(payload.valence),arousal:scale(payload.arousal),dominance:scale(payload.dominance)};
-  if (action === "taskComplete") return {expectedStepId,eventType:String(payload.eventType ?? "task_complete").slice(0,80),label:String(payload.label ?? "Task completed").slice(0,120),metadata:payload.metadata ?? {}};
+  if (action === "rating") return {
+    expectedStepId,valence:scale(payload.valence,SAM_POINTS),arousal:scale(payload.arousal,SAM_POINTS),dominance:scale(payload.dominance,SAM_POINTS),
+    discreteEmotion:oneOf(payload.discreteEmotion,DISCRETE_EMOTIONS),
+    intensity:payload.discreteEmotion === "Neutral" || payload.intensity == null ? null : scale(payload.intensity,INTENSITY_POINTS),
+    familiarity:oneOf(payload.familiarity,FAMILIARITY),
+  };
+  if (action === "taskComplete") return {expectedStepId,eventType:String(payload.eventType ?? "task_complete").slice(0,80),label:String(payload.label ?? "Task completed").slice(0,120),metadata:boundedMetadata(payload.metadata)};
   const eventType = String(payload.eventType) in MEDIA_EVENT_LABELS ? String(payload.eventType) : "subject_event";
   return {expectedStepId,eventType,label:MEDIA_EVENT_LABELS[eventType] ?? "Subject event",severity:eventType === "media_error" ? "error" : "info",source:"subject",metadata:sanitizeMediaTiming(payload.metadata)};
 }
@@ -92,7 +98,10 @@ function sanitizeMediaProgress(value:unknown) {
   return {loaded:count(raw.loaded),total:count(raw.total),failed:count(raw.failed)};
 }
 
-function scale(value:unknown) { return Math.max(1,Math.min(10,Math.round(Number(value) || 1))); }
+function scale(value:unknown,points:number) { return Math.max(1,Math.min(points,Math.round(Number(value) || 1))); }
+function oneOf(value:unknown,options:readonly string[]) { return options.includes(String(value)) ? String(value) : null; }
+/** Task results include per-trial data; keep them to a sane size. */
+function boundedMetadata(value:unknown) { if (!value || typeof value !== "object") return {}; return JSON.stringify(value).length <= 64_000 ? value : {truncated:true}; }
 /** Receive and reply times let clients estimate clock offset without counting server processing time. */
 function clockStamps(receivedAt: string) { return { serverReceivedAt:receivedAt, serverRepliedAt:new Date().toISOString() }; }
 function unauthorized() { return Response.json({error:"Instructor authorization is required."},{status:401}); }

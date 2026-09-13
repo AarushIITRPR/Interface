@@ -6,15 +6,21 @@ const BUFFER_ORDERS: BufferKind[][] = [
   ["nback","conversation","stroop"],["conversation","stroop","nback"],["conversation","nback","stroop"],
 ];
 
+/**
+ * Emotion order follows the six-row Williams square by participant; task order cycles through its six permutations
+ * independently (every sixth participant), so each emotion sequence is paired with every task order and all 36
+ * combinations are balanced across 36 participants.
+ */
 export function assignFor(raw: number | string): Assignment {
   const pid = Math.max(1, Number.parseInt(String(raw), 10) || 1);
   const row = (pid - 1) % 6;
+  const bufferRow = Math.floor((pid - 1) / 6) % 6;
   const order = WILLIAMS6[row].map((n) => EMOTIONS[n - 1]);
-  const buffers = BUFFER_ORDERS[row];
-  return { pid, row: row + 1, buf1: buffers[0], buf2: buffers[1], buf3: buffers[2], block1: [order[0],order[1]], block2: [order[2],order[3]], block3: [order[4],order[5]], fullOrder: order };
+  const buffers = BUFFER_ORDERS[bufferRow];
+  return { pid, row: row + 1, bufferRow: bufferRow + 1, buf1: buffers[0], buf2: buffers[1], buf3: buffers[2], block1: [order[0],order[1]], block2: [order[2],order[3]], block3: [order[4],order[5]], fullOrder: order };
 }
 
-// The plan depends only on the counterbalancing row, so there are at most six distinct plans to build.
+// The plan depends only on the emotion and task orders, so there are at most 36 distinct plans to build.
 const planCache = new Map<string, readonly ProtocolStep[]>();
 
 export function buildPlan(a: Assignment): readonly ProtocolStep[] {
@@ -28,7 +34,7 @@ function createPlan(a: Assignment): ProtocolStep[] {
   const steps: ProtocolStep[] = [];
   const add = (step: Omit<ProtocolStep,"id"|"index">) => steps.push({ ...step, id:`s${String(steps.length).padStart(2,"0")}-${step.type}${step.emo ? `-${step.emo}` : ""}`, index:steps.length });
   const clip = (emo: Emotion, phase: string) => add({ type:"clip", title:`Emotion clip: ${emo}`, subjectPrompt:"Watch naturally.", operatorScript:"Watch the clip naturally and react however feels natural. There is no right or wrong response.", operatorNote:"Onset and offset are logged automatically.", phase, emo, advance:"media", estimatedSec:DEFAULT_CLIP_SECONDS[emo] + 5 });
-  const rating = (emo: Emotion, phase: string) => add({ type:"sam", title:`Self-report: ${emo}`, subjectPrompt:"Choose what fits best.", operatorScript:"Choose the response that best matches your experience. Go with your first instinct.", operatorNote:"Valence, arousal, and dominance are presented one at a time on a 1 to 10 scale.", phase, emo, advance:"task", estimatedSec:25 });
+  const rating = (emo: Emotion, phase: string) => add({ type:"sam", title:`Self-report: ${emo}`, subjectPrompt:"Choose what fits best.", operatorScript:"Choose the response that best matches your experience. Go with your first instinct.", operatorNote:"Valence, arousal, and dominance on a 9-point SAM scale, then the main emotion felt with its intensity, then clip familiarity.", phase, emo, advance:"task", estimatedSec:40 });
   const washout = (phase: string) => add({ type:"washout", title:"Neutral washout", subjectPrompt:"", operatorScript:"Rest your eyes on the cross and breathe normally.", operatorNote:"Neutral fixation period.", phase, durationSec:20, advance:"timer", estimatedSec:20 });
   const gate = (phase: string, title="Return-to-baseline gate") => add({ type:"gate", title, subjectPrompt:"Sit quietly and breathe normally.", operatorScript:"Sit quietly and breathe normally while we prepare the next activity.", operatorNote:"Advance after the return-to-baseline checks are complete.", phase, durationSec:40, advance:"gate", estimatedSec:45 });
   const buffer = (kind: BufferKind, phase: string) => {

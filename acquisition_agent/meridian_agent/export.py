@@ -233,11 +233,13 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
         ["step_index", "step_id", "attempt", "type", "label", "phase", "emotion", "onset_s", "offset_s", "duration_s", "active_duration_s", "planned_duration_s", "stimulus_onset_s", "stimulus_load_delay_ms", "pauses", "end"],
         step_rows)
 
-    _write_tsv(out / "ratings.tsv", ["onset_s", "emotion", "valence", "arousal", "dominance"],
-        [[_seconds(clock.server_to_host_ns(r.get("createdAt")), origin_ns), r.get("emotion"), r.get("valence"), r.get("arousal"), r.get("dominance")] for r in export.get("ratings", [])])
+    _write_tsv(out / "ratings.tsv", ["onset_s", "clip_emotion", "valence", "arousal", "dominance", "scale_points", "felt_emotion", "intensity", "familiarity"],
+        [[_seconds(clock.server_to_host_ns(r.get("createdAt")), origin_ns), r.get("emotion"), r.get("valence"), r.get("arousal"), r.get("dominance"),
+          r.get("scalePoints", 10), r.get("discreteEmotion"), r.get("intensity"), r.get("familiarity")] for r in export.get("ratings", [])])
     task_events = [m for m in markers if m["eventType"] in ("stroop_complete", "nback_complete", "breath_hold_complete")]
-    _write_tsv(out / "tasks.tsv", ["onset_s", "event_type", "step_id", "metrics"],
-        [[_seconds(m["hostEpochNs"], origin_ns), m["eventType"], m["stepId"], m["metadata"]] for m in task_events])
+    _write_tsv(out / "tasks.tsv", ["onset_s", "event_type", "step_id", "summary"],
+        [[_seconds(m["hostEpochNs"], origin_ns), m["eventType"], m["stepId"], {key: value for key, value in m["metadata"].items() if key not in ("trialData", "clientTime")}] for m in task_events])
+    write_trial_tables(out, task_events)
 
     report = qa_report(export, session_dir, windows, artifacts)
     session = {key: export.get(key) for key in ("sessionCode", "participantId", "operator", "protocolVersion", "status", "assignment", "createdAt", "recordingStartedAt", "requiredSensors", "deviceConfig", "media", "hardwareGateOverride", "exportedAt")}
@@ -253,6 +255,26 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     (out / "qa_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     (out / "qa_report.md").write_text(qa_markdown(report), encoding="utf-8")
     return report
+
+
+TRIAL_TABLES = {
+    "stroop_complete": ("stroop_trials.tsv", ["i", "word", "ink", "congruent", "response", "rtMs", "correct", "timedOut"]),
+    "nback_complete": ("nback_trials.tsv", ["index", "position", "target", "responded", "rtMs", "outcome"]),
+}
+
+
+def write_trial_tables(out: Path, task_events: list[dict]) -> None:
+    """One row per task trial, with the step and generator seed so sequences can be regenerated."""
+    for event_type, (name, columns) in TRIAL_TABLES.items():
+        rows = []
+        for marker in task_events:
+            if marker["eventType"] != event_type:
+                continue
+            metadata = marker["metadata"]
+            for trial in metadata.get("trialData") or []:
+                rows.append([marker["stepId"], metadata.get("seed"), metadata.get("level")] + [trial.get(column) for column in columns])
+        if rows:
+            _write_tsv(out / name, ["step_id", "seed", "level"] + columns, rows)
 
 
 def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: list[dict]) -> dict:
