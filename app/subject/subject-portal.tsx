@@ -7,12 +7,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
+// Step timers use the server clock so a subject computer with a skewed clock cannot shorten or stretch timed steps.
+let serverOffsetMs = 0;
+let serverOffsetSamples = 0;
+const serverNow = () => Date.now() + serverOffsetMs;
+
+function trackServerClock(serverTime: string | undefined, sentAt: number, receivedAt: number) {
+  const server = Date.parse(serverTime ?? "");
+  const roundTrip = receivedAt - sentAt;
+  if (!Number.isFinite(server) || roundTrip > 1000) return;
+  const sample = server - (sentAt + receivedAt) / 2;
+  serverOffsetMs = serverOffsetSamples === 0 ? sample : serverOffsetMs * 0.7 + sample * 0.3;
+  serverOffsetSamples += 1;
+}
+
 async function sessionRequest(code: string, action?: string, payload?: Record<string,unknown>) {
+  const sentAt = Date.now();
   const response = action
     ? await fetch("/api/sessions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code,action,payload,view:"subject"})})
     : await fetch(`/api/sessions?code=${encodeURIComponent(code)}&view=subject`,{cache:"no-store"});
   const data = await response.json() as {session?:SubjectSnapshot;error?:string};
   if (!response.ok) throw new Error(data.error || "Unable to connect.");
+  trackServerClock(data.session?.serverTime,sentAt,Date.now());
   return data.session!;
 }
 
@@ -64,7 +80,7 @@ export function SubjectPortal() {
     const initial = query || saved || "";
     if (!initial) return;
     if (/^\d+$/.test(initial)) {
-      participantSessionRequest(Number(initial)).then(connectSnapshot).catch(()=>window.setTimeout(()=>{setDraft(initial);setError("No active session for this participant.")},0));
+      participantSessionRequest(Number(initial)).then(connectSnapshot).catch(()=>window.setTimeout(()=>{setDraft(initial);setError("No session is waiting for this participant. Use the session code.")},0));
     } else {
       window.setTimeout(()=>selectCode(initial),0);
     }
@@ -155,8 +171,8 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
   if (step.type === "clip") return <ClipScreen step={step} src={snapshot.mediaSrc} act={act} audioEnabled={audioEnabled} />;
   if (step.type === "sam") return <RatingScreen step={step} act={act} />;
   if (step.type === "washout") return <WashoutScreen step={step} snapshot={snapshot} act={act} />;
-  if (step.type === "stroop") return <StroopTask step={step} act={act} />;
-  if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} act={act} />;
+  if (step.type === "stroop") return <StroopTask step={step} act={act} paused={snapshot.status !== "running"} />;
+  if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
   if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
@@ -168,16 +184,17 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
 
 function CenteredInstruction({text}:{text:string}) { return <section className="subject-center subject-enter"><h1>{text}</h1></section>; }
 
-function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>void) {
+function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>Promise<unknown>) {
   const [remaining,setRemaining] = useState(step.durationSec ?? 0);
-  const fired = useRef(false);
+  const lastAttempt = useRef(0);
   useEffect(()=>{
     const tick=()=>{
       if(snapshot.status !== "running")return;
-      const elapsed=(Date.now()-Date.parse(snapshot.stepStartedAt))/1000;
+      const elapsed=(serverNow()-Date.parse(snapshot.stepStartedAt))/1000;
       const value=Math.max(0,(step.durationSec ?? 0)-elapsed);
       setRemaining(value);
-      if(value<=0 && !fired.current){fired.current=true;onDone?.();}
+      // Keep asking until the server moves on; a dropped request must not leave the subject stuck on a finished timer.
+      if(value<=0 && onDone && Date.now()-lastAttempt.current>=1000){lastAttempt.current=Date.now();onDone().catch(()=>undefined);}
     };
     tick(); const id=window.setInterval(tick,100); return()=>clearInterval(id);
   },[onDone,snapshot.status,snapshot.stepStartedAt,step.durationSec]);
@@ -209,14 +226,16 @@ function WashoutScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSna
 }
 
 function ClipScreen({step,src,act,audioEnabled}:{step:SubjectStep;src:string;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean}) {
-  const [playing,setPlaying]=useState(false); const fired=useRef(false);
-  const finish=()=>{if(fired.current)return;fired.current=true;act("log",{eventType:"media_offset"}).then(()=>act("advance",{expectedStepId:step.id,source:"subject"}));};
-  useEffect(()=>{if(!playing||src)return;const id=window.setTimeout(finish,12000);return()=>clearTimeout(id);});
+  const [playing,setPlaying]=useState(false); const [ended,setEnded]=useState(false); const errorLogged=useRef(false);
+  const finish=()=>{if(ended)return;setEnded(true);act("log",{eventType:"media_offset"}).catch(()=>undefined);};
+  useEffect(()=>{if(!playing||src||ended)return;const id=window.setTimeout(finish,12000);return()=>clearTimeout(id);});
+  useEffect(()=>{if(!ended)return;const send=()=>act("advance",{expectedStepId:step.id,source:"subject"}).catch(()=>undefined);send();const id=window.setInterval(send,1500);return()=>clearInterval(id);},[act,ended,step.id]);
+  const mediaError=()=>{if(errorLogged.current)return;errorLogged.current=true;act("log",{eventType:"media_error",label:"Media failed to load",severity:"error",source:"system"}).catch(()=>undefined);};
   if(!playing) return <section className="subject-center clip-ready"><h1>{step.subjectPrompt}</h1><button className="light-button" onClick={()=>{setPlaying(true);act("log",{eventType:"media_onset"})}}>Begin</button></section>;
   if(src) return (
     // Captions are intentionally not injected because they would alter the registered research stimulus.
     // eslint-disable-next-line jsx-a11y/media-has-caption
-    <video className="stimulus-video" src={src} autoPlay playsInline muted={!audioEnabled} onEnded={finish} onError={()=>act("log",{eventType:"media_error",label:"Media failed to load",severity:"error",source:"system"})}/>
+    <video className="stimulus-video" src={src} autoPlay playsInline muted={!audioEnabled} onEnded={finish} onError={mediaError}/>
   );
   return <section className="placeholder-film" aria-label="Video stimulus"><div/><div/><div/></section>;
 }
@@ -234,21 +253,42 @@ function RatingScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<strin
 }
 
 const COLOURS = [{name:"Red",hex:"#b83232"},{name:"Blue",hex:"#245fa9"},{name:"Green",hex:"#34743b"},{name:"Yellow",hex:"#d3a522"},{name:"Purple",hex:"#76509a"},{name:"Orange",hex:"#c66728"}];
-function StroopTask({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [started,setStarted]=useState(false); const [trial,setTrial]=useState(0); const [stimulus,setStimulus]=useState(()=>makeStimulus()); const startedAt=useRef(0); const results=useRef<Array<{correct:boolean;rt:number}>>([]);
-  useEffect(()=>{if(started)startedAt.current=performance.now()},[started,trial]);
-  const answer=(name:string,eventTime:number)=>{const correct=name===stimulus.ink;results.current.push({correct,rt:eventTime-startedAt.current});if(trial>=29){const accuracy=Math.round(results.current.filter(r=>r.correct).length/results.current.length*100);const avgRt=Math.round(results.current.reduce((s,r)=>s+r.rt,0)/results.current.length);act("taskComplete",{expectedStepId:step.id,eventType:"stroop_complete",label:"Stroop completed",metadata:{trials:30,accuracyPct:accuracy,averageRtMs:avgRt}})}else{setTrial(trial+1);setStimulus(makeStimulus())}};
+function StroopTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
+  const [started,setStarted]=useState(false); const [trial,setTrial]=useState(0); const [stimulus,setStimulus]=useState(()=>makeStimulus()); const startedAt=useRef(0); const results=useRef<Array<{correct:boolean;rt:number}>>([]); const done=useRef(false);
+  // Restarting the trial clock on resume keeps pause time out of the reaction time.
+  useEffect(()=>{if(started&&!paused)startedAt.current=performance.now()},[started,trial,paused]);
+  const answer=(name:string,eventTime:number)=>{if(paused||done.current)return;const correct=name===stimulus.ink;results.current.push({correct,rt:eventTime-startedAt.current});if(trial>=29){done.current=true;const accuracy=Math.round(results.current.filter(r=>r.correct).length/results.current.length*100);const avgRt=Math.round(results.current.reduce((s,r)=>s+r.rt,0)/results.current.length);const metadata={trials:30,accuracyPct:accuracy,averageRtMs:avgRt};const send=():Promise<void>=>act("taskComplete",{expectedStepId:step.id,eventType:"stroop_complete",label:"Stroop completed",metadata}).catch(()=>{window.setTimeout(send,1500)});void send()}else{setTrial(trial+1);setStimulus(makeStimulus())}};
   if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
   return <section className="task-screen"><div className="stroop-word" style={{color:stimulus.hex}}>{stimulus.word}</div><div className="colour-buttons">{COLOURS.map(colour=><button key={colour.name} style={{background:colour.hex}} onClick={event=>answer(colour.name,event.timeStamp)}>{colour.name}</button>)}</div></section>;
 }
 function makeStimulus(){const word=COLOURS[Math.floor(Math.random()*COLOURS.length)];let ink=COLOURS[Math.floor(Math.random()*COLOURS.length)];if(Math.random()>.35)while(ink.name===word.name)ink=COLOURS[Math.floor(Math.random()*COLOURS.length)];return{word:word.name.toUpperCase(),ink:ink.name,hex:ink.hex}}
 
-function NBackTask({step,level,act}:{step:SubjectStep;level:number;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [started,setStarted]=useState(false);const [lit,setLit]=useState<number|null>(null);const sequence=useRef<number[]>([]);const index=useRef(0);const matches=useRef(0);const presses=useRef(0);const target=useRef(false);const ended=useRef(false);
-  useEffect(()=>{if(!started)return;const next=()=>{if(index.current>=20){if(!ended.current){ended.current=true;act("taskComplete",{expectedStepId:step.id,eventType:"nback_complete",label:"N-back completed",metadata:{level,trials:20,matches:matches.current,responses:presses.current}})}return}let pos=Math.floor(Math.random()*9);if(index.current>=level&&Math.random()<.3)pos=sequence.current[index.current-level];sequence.current.push(pos);target.current=index.current>=level&&pos===sequence.current[index.current-level];setLit(pos);window.setTimeout(()=>setLit(null),800);index.current+=1};next();const id=window.setInterval(next,1100);return()=>clearInterval(id)},[act,level,started,step.id]);
-  const press=()=>{if(lit===null)return;presses.current+=1;if(target.current)matches.current+=1};
+const NBACK_TRIALS = 20;
+function NBackTask({step,level,act,paused}:{step:SubjectStep;level:number;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
+  const [started,setStarted]=useState(false);const [lit,setLit]=useState<number|null>(null);const sequence=useRef<number[]>([]);const index=useRef(0);const ended=useRef(false);
+  const trial=useRef({target:false,responded:false,onset:0});const score=useRef({hits:0,misses:0,falseAlarms:0,correctRejections:0,hitRtMs:[] as number[]});
+  useEffect(()=>{
+    if(!started||paused)return;
+    let hideId=0;
+    const closeTrial=()=>{const current=trial.current;if(index.current===0)return;if(current.target&&!current.responded)score.current.misses+=1;if(!current.target&&!current.responded)score.current.correctRejections+=1;};
+    const next=()=>{
+      if(index.current>=NBACK_TRIALS){
+        if(!ended.current){closeTrial();ended.current=true;const {hits,misses,falseAlarms,correctRejections,hitRtMs}=score.current;const averageHitRtMs=hitRtMs.length?Math.round(hitRtMs.reduce((sum,value)=>sum+value,0)/hitRtMs.length):null;const metadata={level,trials:NBACK_TRIALS,hits,misses,falseAlarms,correctRejections,averageHitRtMs};const send=():Promise<void>=>act("taskComplete",{expectedStepId:step.id,eventType:"nback_complete",label:"N-back completed",metadata}).catch(()=>{window.setTimeout(send,1500)});void send();}
+        return;
+      }
+      closeTrial();
+      let pos=Math.floor(Math.random()*9);
+      if(index.current>=level&&Math.random()<.3)pos=sequence.current[index.current-level];
+      sequence.current.push(pos);
+      trial.current={target:index.current>=level&&pos===sequence.current[index.current-level],responded:false,onset:performance.now()};
+      setLit(pos);hideId=window.setTimeout(()=>setLit(null),800);index.current+=1;
+    };
+    next();const id=window.setInterval(next,1100);
+    return()=>{clearInterval(id);clearTimeout(hideId);};
+  },[act,level,paused,started,step.id]);
+  const press=(eventTime:number)=>{const current=trial.current;if(paused||lit===null||current.responded)return;current.responded=true;if(current.target){score.current.hits+=1;score.current.hitRtMs.push(Math.round(eventTime-current.onset));}else score.current.falseAlarms+=1;};
   if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
-  return <section className="task-screen"><div className="nback-grid">{Array.from({length:9},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" onClick={press}>Match</button></section>;
+  return <section className="task-screen"><div className="nback-grid">{Array.from({length:9},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" onClick={event=>press(event.timeStamp)}>Match</button></section>;
 }
 
 function BreathingScreen({step,snapshot,act,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;src:string;audioEnabled:boolean}) {
@@ -269,6 +309,6 @@ function ProtocolVideo({src,audioEnabled,className,loop=false}:{src:string;audio
 function BreathHoldScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const [holding,setHolding]=useState(false);const [elapsed,setElapsed]=useState(0);const start=useRef(0);
   useEffect(()=>{if(!holding)return;start.current=performance.now();const id=window.setInterval(()=>setElapsed((performance.now()-start.current)/1000),100);return()=>clearInterval(id)},[holding]);
-  return <section className="subject-center breath-hold"><h1>{step.subjectPrompt}</h1>{holding?<><time>{elapsed.toFixed(1)}</time><button className="paper-button" onClick={()=>act("taskComplete",{expectedStepId:step.id,eventType:"breath_hold_complete",label:"Breath hold completed",metadata:{durationSec:Number(elapsed.toFixed(1))}})}>Release</button></>:<button className="paper-button" onClick={()=>setHolding(true)}>I am ready</button>}</section>;
+  return <section className="subject-center breath-hold"><h1>{step.subjectPrompt}</h1>{holding?<><time>{elapsed.toFixed(1)}</time><button className="paper-button" onClick={()=>{const metadata={durationSec:Number(elapsed.toFixed(1))};const send=():Promise<void>=>act("taskComplete",{expectedStepId:step.id,eventType:"breath_hold_complete",label:"Breath hold completed",metadata}).catch(()=>{window.setTimeout(send,1500)});void send();}}>Release</button></>:<button className="paper-button" onClick={()=>setHolding(true)}>I am ready</button>}</section>;
 }
 function clock(value:number){const n=Math.max(0,Math.ceil(value));return`${Math.floor(n/60)}:${String(n%60).padStart(2,"0")}`}

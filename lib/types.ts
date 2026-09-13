@@ -187,6 +187,7 @@ export type SubjectStep = Pick<ProtocolStep,
 };
 
 export type SubjectSnapshot = {
+  serverTime: string;
   code: string;
   participantId: number;
   revision: number;

@@ -1,5 +1,5 @@
 import { getOperatorUser } from "@/app/operator-auth";
-import { createSession, getLatestActiveSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
+import { createSession, getLatestSetupSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
 
 export const dynamic = "force-dynamic";
 
@@ -13,8 +13,8 @@ export async function GET(request: Request) {
   }
   const participantId = Number(url.searchParams.get("participantId"));
   if (subjectView && Number.isSafeInteger(participantId) && participantId > 0) {
-    const active = await getLatestActiveSessionForParticipant(participantId);
-    return active ? Response.json({session:toSubjectSnapshot(active)}) : Response.json({error:"No active session for this participant."},{status:404});
+    const active = await getLatestSetupSessionForParticipant(participantId);
+    return active ? Response.json({session:toSubjectSnapshot(active)}) : Response.json({error:"No session is waiting for this participant."},{status:404});
   }
   const code = url.searchParams.get("code")?.trim().toUpperCase() ?? "";
   if (!code) return Response.json({ error:"Session code is required." },{status:400});

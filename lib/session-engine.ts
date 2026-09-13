@@ -8,6 +8,7 @@ const now = () => new Date().toISOString();
 const uid = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 18)}`;
 const acquisitionToken = () => `mac_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 const OPERATOR_LEASE_MS = 12_000;
+const AUTO_ADVANCE_TOLERANCE_MS = 1_500;
 export const ACQUISITION_LEASE_MS = 10_000;
 const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9 };
 const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none" };
@@ -102,6 +103,11 @@ export async function createSession(participantId: number, operator: string) {
   const event = appendEvent(snapshot,{ eventType:"session_prepared", label:"Session prepared", detail:`Participant ${assignment.pid}, Williams row ${assignment.row}`, source:"operator", metadata:{ assignment } });
   snapshot.revision = 2;
   const db = bindings().DB;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const taken = await db.prepare(`SELECT 1 FROM sessions WHERE code = ? LIMIT 1`).bind(snapshot.code).first();
+    if (!taken) break;
+    snapshot.code = sessionCode(assignment.pid);
+  }
   await db.prepare(`INSERT INTO sessions (id, code, participant_id, operator, protocol_version, status, step_index, revision, assignment_json, snapshot_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(snapshot.id,snapshot.code,snapshot.participantId,snapshot.operator,snapshot.protocolVersion,snapshot.status,snapshot.stepIndex,snapshot.revision,JSON.stringify(assignment),JSON.stringify(snapshot),createdAt,createdAt).run();
   await persistEvent(snapshot.id,event);
@@ -114,10 +120,11 @@ export async function getSession(code: string) {
   return row ? hydrateSnapshot(JSON.parse(row.snapshot_json) as SessionSnapshot) : null;
 }
 
-export async function getLatestActiveSessionForParticipant(participantId: number) {
+/** Joining by participant number is limited to sessions still in setup, so a guessed number cannot attach to a study in progress. */
+export async function getLatestSetupSessionForParticipant(participantId: number) {
   await ensureSchema();
   if (!Number.isSafeInteger(participantId) || participantId < 1) return null;
-  const row = await bindings().DB.prepare(`SELECT snapshot_json FROM sessions WHERE participant_id = ? AND status IN ('setup','running','paused') ORDER BY created_at DESC LIMIT 1`)
+  const row = await bindings().DB.prepare(`SELECT snapshot_json FROM sessions WHERE participant_id = ? AND status = 'setup' ORDER BY created_at DESC LIMIT 1`)
     .bind(participantId).first<{snapshot_json:string}>();
   return row ? hydrateSnapshot(JSON.parse(row.snapshot_json) as SessionSnapshot) : null;
 }
@@ -145,6 +152,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
     return sensor?.status === "recording" && Date.now() - Date.parse(sensor.updatedAt) <= ACQUISITION_LEASE_MS;
   }));
   return {
+    serverTime: now(),
     code: snapshot.code,
     participantId: snapshot.participantId,
     revision: snapshot.revision,
@@ -214,7 +222,12 @@ export async function mutateSession(code: string, action: string, payload: Actio
     const expectedStepId = String(payload.expectedStepId ?? "");
     if (expectedStepId && step?.id !== expectedStepId) return current;
 
-    if (action === "advance" && current.status === "running") advance(current,String(payload.reason ?? ""),(payload.source === "subject" ? "subject" : "operator"));
+    const running = current.status === "running";
+    if (action === "advance" && running) {
+      const fromSubject = payload.source === "subject";
+      // Subjects may only finish steps they control; gates, timers, and operator checks stay with the operator.
+      if (!fromSubject || step?.advance === "media" || step?.advance === "subject") advance(current,String(payload.reason ?? ""),fromSubject ? "subject" : "operator");
+    }
     if (action === "heartbeat") {
       const previousSeen = current.operatorLastSeenAt ? Date.parse(current.operatorLastSeenAt) : NaN;
       const gap = Number.isFinite(previousSeen) ? Date.now() - previousSeen : 0;
@@ -239,15 +252,15 @@ export async function mutateSession(code: string, action: string, payload: Actio
         appendEvent(current,{eventType:"step_start",label:"Step started",detail:shortLabel(target),source:"operator"});
       }
     }
-    if (action === "autoAdvance" && current.status === "running" && step?.durationSec) advance(current,"Timer completed","system");
+    if (action === "autoAdvance" && running && step?.advance === "timer" && step.durationSec && Date.now()-Date.parse(current.stepStartedAt) >= step.durationSec*1000-AUTO_ADVANCE_TOLERANCE_MS) advance(current,"Timer completed","system");
     if (action === "pause" && current.status === "running") { current.status="paused"; current.pausedAt=now(); current.announcement={id:uid("ann"),text:"Please wait a moment.",kind:"pause",createdAt:now()}; appendEvent(current,{eventType:"session_paused",label:"Session paused",detail:String(payload.reason ?? ""),severity:"warn",source:payload.source === "subject" ? "subject" : "operator"}); }
     if (action === "resume" && current.status === "paused") { const delta = current.pausedAt ? Date.now()-Date.parse(current.pausedAt) : 0; current.stepStartedAt=new Date(Date.parse(current.stepStartedAt)+delta).toISOString(); current.status="running"; current.pausedAt=null; current.announcement=null; appendEvent(current,{eventType:"session_resumed",label:"Session resumed",source:"operator",metadata:{pauseMs:delta}}); }
     if (action === "repeat") { current.attempt += 1; current.stepStartedAt=now(); appendEvent(current,{eventType:"step_repeated",label:"Step repeated by operator",detail:String(payload.reason ?? "No reason entered"),severity:"warn",source:"operator",metadata:{attempt:current.attempt}}); }
     if (action === "message") { const text=String(payload.text ?? "").trim().slice(0,180); if(text){ current.announcement={id:uid("ann"),text,kind:payload.kind === "safety" ? "safety" : "info",createdAt:now()}; appendEvent(current,{eventType:"operator_message",label:"Operator message sent",detail:text,source:"operator"}); } }
     if (action === "ack") { if(current.announcement) appendEvent(current,{eventType:"message_ack",label:"Message acknowledged",source:"subject"}); current.announcement=null; }
     if (action === "log") appendEvent(current,{eventType:String(payload.eventType ?? "subject_event"),label:String(payload.label ?? "Subject event"),detail:String(payload.detail ?? ""),severity:(payload.severity as ExperimentEvent["severity"]) ?? "info",source:(payload.source as ExperimentEvent["source"]) ?? "subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}});
-    if (action === "rating") { current.ratings.push({emotion:step?.emo ?? "happy",valence:Number(payload.valence),arousal:Number(payload.arousal),dominance:Number(payload.dominance),createdAt:now()}); appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{emotion:step?.emo,valence:payload.valence,arousal:payload.arousal,dominance:payload.dominance}}); advance(current,"Response submitted","subject"); }
-    if (action === "taskComplete") { appendEvent(current,{eventType:String(payload.eventType ?? "task_complete"),label:String(payload.label ?? "Task completed"),source:"subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}}); advance(current,"Task completed","subject"); }
+    if (action === "rating" && running && step?.type === "sam" && step.emo) { current.ratings.push({emotion:step.emo,valence:Number(payload.valence),arousal:Number(payload.arousal),dominance:Number(payload.dominance),createdAt:now()}); appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{emotion:step.emo,valence:payload.valence,arousal:payload.arousal,dominance:payload.dominance}}); advance(current,"Response submitted","subject"); }
+    if (action === "taskComplete" && running && (step?.type === "stroop" || step?.type === "nback" || step?.advance === "subject")) { appendEvent(current,{eventType:String(payload.eventType ?? "task_complete"),label:String(payload.label ?? "Task completed"),source:"subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}}); advance(current,"Task completed","subject"); }
     if (action === "note") { const body=String(payload.body ?? "").trim().slice(0,500); if(body){ current.notes.push({id:uid("note"),body,category:String(payload.category ?? "general"),stepId:step?.id ?? "",stepLabel:step ? shortLabel(step) : "",createdAt:now()}); appendEvent(current,{eventType:"operator_note",label:"Operator note",detail:body,source:"operator"}); } }
     if (action === "sensor") { const sensor=current.sensors.find((item)=>item.id===payload.id); if(sensor){ sensor.status=String(payload.status) as SensorStatus; sensor.detail=String(payload.detail ?? sensor.detail); sensor.updatedAt=now(); appendEvent(current,{eventType:"sensor_status",label:`${sensor.label}: ${sensor.status}`,severity:["missing","error"].includes(sensor.status)?"error":sensor.status==="delayed"?"warn":"info",source:"sensor",metadata:{sensorId:sensor.id,status:sensor.status}}); } }
     if (action === "acquisitionHeartbeat") applyAcquisitionHeartbeat(current,payload);
@@ -289,8 +302,8 @@ export async function mutateSession(code: string, action: string, payload: Actio
       current.hardwareGateOverride = Boolean(payload.enabled);
       appendEvent(current,{eventType:"hardware_gate_override",label:current.hardwareGateOverride?"Hardware readiness override enabled":"Hardware readiness override cleared",severity:current.hardwareGateOverride?"warn":"info",source:"operator"});
     }
-    if (action === "bp") { current.bpReadings.push({stepId:step?.id ?? "",label:String(payload.label ?? step?.bpLabel ?? "Reading"),systolic:Number(payload.systolic),diastolic:Number(payload.diastolic),pulse:payload.pulse ? Number(payload.pulse) : null,createdAt:now()}); appendEvent(current,{eventType:"bp_recorded",label:"Blood pressure recorded",source:"operator",metadata:{systolic:payload.systolic,diastolic:payload.diastolic,pulse:payload.pulse}}); }
-    if (action === "nbackLevel") current.nbackLevel = Math.max(1,Math.min(3,Number(payload.level))) as 1|2|3;
+    if (action === "bp") { if (!Number.isFinite(Number(payload.systolic)) || !Number.isFinite(Number(payload.diastolic))) throw new Error("Enter systolic and diastolic values."); current.bpReadings.push({stepId:step?.id ?? "",label:String(payload.label ?? step?.bpLabel ?? "Reading"),systolic:Number(payload.systolic),diastolic:Number(payload.diastolic),pulse:Number.isFinite(Number(payload.pulse)) && payload.pulse !== "" && payload.pulse != null ? Number(payload.pulse) : null,createdAt:now()}); appendEvent(current,{eventType:"bp_recorded",label:"Blood pressure recorded",source:"operator",metadata:{systolic:payload.systolic,diastolic:payload.diastolic,pulse:payload.pulse}}); }
+    if (action === "nbackLevel" && Number.isFinite(Number(payload.level))) current.nbackLevel = Math.max(1,Math.min(3,Math.round(Number(payload.level)))) as 1|2|3;
     if (action === "media") { current.media = payload.media as MediaConfig; appendEvent(current,{eventType:"media_config",label:"Media configuration updated",source:"operator"}); }
     if (action === "complete") { current.status="complete"; current.stepIndex=plan.length-1; current.stepStartedAt=now(); appendEvent(current,{eventType:"session_complete",label:"Session completed by operator",source:"operator"}); }
     if (action === "abort") { current.status="aborted"; appendEvent(current,{eventType:"session_aborted",label:"Session aborted",severity:"warn",source:"operator"}); }

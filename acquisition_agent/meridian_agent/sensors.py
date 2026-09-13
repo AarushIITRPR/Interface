@@ -87,6 +87,14 @@ class Sensor:
             self.started_at = iso_now()
             self._recording.set()
 
+    def record_dropped(self, sample_count: int) -> None:
+        """Count samples lost before they reached the recorder, such as a full audio or video queue."""
+        if sample_count <= 0 or not self._recording.is_set():
+            return
+        with self._lock:
+            self._dropped_samples += sample_count
+            self._gap_count += 1
+
     def stop_recording(self) -> None:
         if self._recording.is_set():
             self._recording_ended_mono = time.monotonic()
@@ -655,6 +663,65 @@ class OximeterSensor(Sensor):
                             pass
 
 
+class FrameRecorder:
+    """Writes video frames on a background thread and logs one timestamp row per frame actually written.
+
+    The video container only stores a nominal frame rate, so `<sensor>_frames.csv` is the source of truth for
+    aligning video with the other streams.
+    """
+
+    def __init__(self, video_path: Path, fps: float, origin_mono: float, open_writer: Callable, max_queue: int = 60):
+        self.video_path = video_path
+        self.timestamps_path = video_path.with_name(f"{video_path.stem}_frames.csv")
+        self.fps = fps
+        self.origin_mono = origin_mono
+        self.open_writer = open_writer
+        self.frames: queue.Queue = queue.Queue(maxsize=max_queue)
+        self.written = 0
+        self.dropped = 0
+        self.error = ""
+        self._thread = threading.Thread(target=self._run, name=f"meridian-writer-{video_path.stem}", daemon=True)
+        self._thread.start()
+
+    def submit(self, frame, host_epoch_ns: int, monotonic: float) -> bool:
+        try:
+            self.frames.put_nowait((frame, host_epoch_ns, monotonic))
+            return True
+        except queue.Full:
+            self.dropped += 1
+            return False
+
+    def close(self, timeout: float = 10.0) -> None:
+        self.frames.put(None)
+        self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        writer = None
+        try:
+            with self.timestamps_path.open("a", newline="", buffering=1) as handle:
+                stamps = csv.writer(handle)
+                if self.timestamps_path.stat().st_size == 0:
+                    stamps.writerow(["frame_index","host_epoch_ns","monotonic_s"])
+                while True:
+                    item = self.frames.get()
+                    if item is None:
+                        break
+                    frame, host_epoch_ns, monotonic = item
+                    if writer is None:
+                        height, width = frame.shape[:2]
+                        writer = self.open_writer(str(self.video_path), self.fps, (width, height))
+                        if writer is None:
+                            raise RuntimeError("Cannot create camera recording")
+                    writer.write(frame)
+                    stamps.writerow([self.written, host_epoch_ns, f"{monotonic-self.origin_mono:.6f}"])
+                    self.written += 1
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {str(exc)[:120]}"
+        finally:
+            if writer is not None:
+                writer.release()
+
+
 class CameraSensor(Sensor):
     def __init__(self, sensor_id: str, source: str, session_dir: Path, origin_mono: float):
         super().__init__(sensor_id, source, session_dir, origin_mono)
@@ -674,9 +741,13 @@ class CameraSensor(Sensor):
             self.set_state("error",f"Camera support unavailable: {type(exc).__name__}")
             return
 
+        def open_writer(path: str, fps: float, size: tuple[int,int]):
+            writer = cv2.VideoWriter(path,cv2.VideoWriter_fourcc(*"MJPG"),fps,size)
+            return writer if writer.isOpened() else None
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         capture = None
-        writer = None
+        recorder: FrameRecorder | None = None
         try:
             backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_V4L2 if platform.system() == "Linux" else cv2.CAP_ANY
             capture = cv2.VideoCapture(self.source,backend)
@@ -697,6 +768,7 @@ class CameraSensor(Sensor):
                     self.set_state("delayed","Camera frame unavailable")
                     self._stop.wait(0.05)
                     continue
+                host_epoch_ns = time.time_ns()
                 current = time.monotonic(); frame_times.append(current)
                 measured = (len(frame_times)-1)/max(0.001,frame_times[-1]-frame_times[0]) if len(frame_times)>1 else fps
                 if current-last_preview >= 0.2:
@@ -708,22 +780,23 @@ class CameraSensor(Sensor):
                         with self._preview_lock:
                             self._preview_frame = jpeg.tobytes()
                     last_preview=current
-                if self._recording.is_set() and writer is None:
-                    self.path.parent.mkdir(parents=True,exist_ok=True)
-                    writer = cv2.VideoWriter(str(self.path),cv2.VideoWriter_fourcc(*"MJPG"),fps,(width,height))
-                    if not writer.isOpened():
-                        writer=None
-                        raise RuntimeError("Cannot create camera recording")
-                if not self._recording.is_set() and writer is not None:
-                    writer.release(); writer=None
-                if writer is not None:
-                    writer.write(frame)
-                self.sample(f"{width}x{height}",int(frame.nbytes) if writer is not None else 0,rate_hz=round(measured,2),point=float(measured),metrics={"width":width,"height":height,"fps":round(measured,2),"droppedFrames":dropped},validation=["Hardware detected","Frames arriving","Preview available","Frame rate measured"])
+                if self._recording.is_set() and recorder is None:
+                    recorder = FrameRecorder(self.path,fps,self.origin_mono,open_writer)
+                if not self._recording.is_set() and recorder is not None:
+                    recorder.close(); recorder=None
+                queued = False
+                if recorder is not None:
+                    if recorder.error:
+                        raise RuntimeError(recorder.error)
+                    queued = recorder.submit(frame,host_epoch_ns,current)
+                    if not queued:
+                        self.record_dropped(1)
+                self.sample(f"{width}x{height}",int(frame.nbytes) if queued else 0,rate_hz=round(measured,2),point=float(measured),metrics={"width":width,"height":height,"fps":round(measured,2),"droppedFrames":dropped+(recorder.dropped if recorder else 0)},validation=["Hardware detected","Frames arriving","Preview available","Frame rate measured"])
         except Exception as exc:
             self.set_state("error",f"{type(exc).__name__}: {str(exc)[:120]}")
         finally:
-            if writer is not None:
-                writer.release()
+            if recorder is not None:
+                recorder.close()
             if capture is not None:
                 capture.release()
 
@@ -743,15 +816,19 @@ class AudioSensor(Sensor):
             return
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        chunks: queue.Queue[bytes] = queue.Queue(maxsize=256)
+        chunks: queue.Queue[tuple[bytes,int]] = queue.Queue(maxsize=256)
+        missed = {"frames":0}
 
         def callback(indata, frames, timing, status):
             del timing
             if status:
                 self.set_state("delayed",str(status))
             try:
-                chunks.put_nowait(bytes(indata))
+                chunks.put_nowait((bytes(indata),missed["frames"]))
+                missed["frames"] = 0
             except queue.Full:
+                missed["frames"] += frames
+                self.record_dropped(frames)
                 self.set_state("delayed","Audio writer queue full")
 
         target = None
@@ -760,7 +837,7 @@ class AudioSensor(Sensor):
                 self.set_state("connected",f"Mono {self.sample_rate} Hz")
                 while not self._stop.is_set():
                     try:
-                        chunk = chunks.get(timeout=0.25)
+                        chunk, silence_frames = chunks.get(timeout=0.25)
                     except queue.Empty:
                         continue
                     if self._recording.is_set() and target is None:
@@ -770,18 +847,27 @@ class AudioSensor(Sensor):
                     if not self._recording.is_set() and target is not None:
                         target.close(); target=None
                     if target is not None:
+                        if silence_frames:
+                            target.writeframesraw(bytes(silence_frames*2))
                         target.writeframesraw(chunk)
                     frames = len(chunk) // 2
-                    from array import array
-                    samples = array("h"); samples.frombytes(chunk)
-                    rms = math.sqrt(sum(value*value for value in samples)/max(1,len(samples)))
-                    level = min(100,round(rms/32768*240,1))
+                    level = audio_level_pct(chunk)
                     self.sample("Audio signal detected" if level>1 else "Audio connected",len(chunk) if target is not None else 0,frames,float(self.sample_rate),point=level,metrics={"levelPct":level,"sampleRate":self.sample_rate},validation=["Hardware detected","Audio stream open",("Signal detected" if level>1 else "Waiting for sound")])
         except Exception as exc:
             self.set_state("error",f"{type(exc).__name__}: {str(exc)[:120]}")
         finally:
             if target is not None:
                 target.close()
+
+
+def audio_level_pct(chunk: bytes) -> float:
+    """RMS level of mono int16 PCM, scaled to 0-100 for the operator meter."""
+    import numpy as np
+    samples = np.frombuffer(chunk[:len(chunk)//2*2], dtype=np.int16)
+    if samples.size == 0:
+        return 0.0
+    rms = float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
+    return min(100.0, round(rms/32768*240, 1))
 
 
 def auto_oximeter_port() -> str:

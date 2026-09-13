@@ -33,7 +33,8 @@ Stimuli use the six-row Williams-style sequence. Stroop, N-back, and conversatio
 - Every response, task completion, operator intervention, sensor state change, note, pause, resume, repeat, and timing transition produces a structured event.
 - Session mutations use optimistic revision checks to reduce conflicting writes.
 - Both portals reject stale polling responses so a slower heartbeat cannot roll the UI back to an older task revision.
-- A subject tab attached to an ended session automatically follows the newest active session for the same participant. Participant IDs can also be entered directly on the subject connection screen.
+- A subject tab attached to an ended session automatically follows the newest session prepared for the same participant. Participant IDs can also be entered directly on the subject connection screen while that session is still in setup; once the protocol starts, the subject display must use the session code.
+- Subject requests can only complete steps the subject controls: ratings on rating steps, tasks on task steps, clips, and timers that have actually elapsed on the server. Gates and operator checks can only be advanced from the instructor console.
 - The instructor can recover a saved session by code without restarting the protocol.
 
 ## Local development

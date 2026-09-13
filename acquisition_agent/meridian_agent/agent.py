@@ -24,6 +24,19 @@ DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.si
 SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal")
 
 
+def unique_session_dir(root: Path, name: str) -> Path:
+    """Create a new, never-reused recording directory, even if the agent restarts within the same second."""
+    root.mkdir(parents=True,exist_ok=True)
+    for suffix in range(1000):
+        candidate = root / (name if suffix == 0 else f"{name}_{suffix+1}")
+        try:
+            candidate.mkdir(exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"Could not create a unique recording directory for {name}")
+
+
 class MeridianHttpError(RuntimeError):
     pass
 
@@ -39,8 +52,7 @@ class MeridianAgent:
         self.agent_id = str(uuid.uuid5(uuid.NAMESPACE_DNS,f"meridian:{self.host}:{uuid.getnode()}"))
         self.origin_mono = time.monotonic()
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        self.session_dir = Path(args.output).expanduser().resolve() / f"session_{self.code}_{stamp}"
-        self.session_dir.mkdir(parents=True,exist_ok=False)
+        self.session_dir = unique_session_dir(Path(args.output).expanduser().resolve(),f"session_{self.code}_{stamp}")
         self.marker_path = self.session_dir / "session_markers.jsonl"
         self.sensors: list[Sensor] = []
         self.stop_requested = False
