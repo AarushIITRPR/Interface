@@ -67,4 +67,21 @@ See `acquisition_agent/README.md` for installation, device configuration, Linux 
 
 The registered protocol media is stored in `public/protocol-media`. New and restored sessions receive the six emotion clips, the guided body-scan video, and the relaxing nature video used behind the box-breathing pacer by default. The neutral washout remains an unlabelled grey fixation screen so it does not introduce another affective stimulus.
 
-The subject portal resolves media through the session snapshot and logs emotion-clip onset, offset, completion, and playback failure events. Instructor-supplied media can still replace any default through the existing session media configuration.
+All registered stimuli are normalized with `scripts/normalize-media.sh`: H.264 1280x720 (aspect preserved with black bars), 30 fps constant, faststart, and AAC 48 kHz stereo at -23 LUFS integrated (EBU R128, true peak at most -2 dBTP). Clip content and duration are unchanged (happy 93 s, fear 95 s, sad 148 s, anger 151 s, disgust 151 s, surprise 183 s), so duration should be kept as a covariate. Replacement media should go through the same script.
+
+The subject display downloads every stimulus before the protocol starts and plays from memory; Start is blocked until loading finishes. Clip onset is logged when the video actually starts playing, with the display's server-corrected time and the load delay. Pauses pause the video in place and are logged with the media time. Every step also logs `step_displayed` when it appears on screen.
+
+## Protocol v8 design
+
+- **Counterbalancing:** emotion order follows the six-row Williams square by participant; task order (Stroop, N-back, conversation) cycles through its six permutations every sixth participant, so all 36 pairings balance across 36 participants.
+- **Ratings after each clip:** 9-point SAM valence, arousal, and dominance, then the main felt emotion (six emotions or neutral) with 9-point intensity, then whether the clip was seen before.
+- **Stroop:** 30 seeded trials, 15 congruent and 15 incongruent, congruency runs of at most 3, 400 ms fixation, 2 s deadline; per-trial data and congruent/incongruent RT with interference.
+- **N-back:** 8-trial practice with feedback, then 20 scored trials with exactly 30% targets and no accidental matches; per-trial outcomes and d'. The level locks when practice starts.
+- **Safety screening (`lib/safety.ts`):** six yes/no questions must be answered in Recording setup before starting. A yes skips the mapped physical steps (breath hold, standing, exertion), logged as `step_skipped`. Breath hold stops automatically at 60 s. The questions are study defaults for the research team to review.
+- **Return-to-baseline gate:** heart rate and skin conductance recorded during the resting baselines define the reference. A gate is ready when each signal stays within max(2 SD, 5 bpm / 10%) of baseline for 15 s. Advancing earlier requires an override reason; outcomes are logged as `gate_verified`, `gate_override`, or `gate_unverified`.
+- **Automatic pause:** while running, losing the instructor console or a required stream pauses the session with `operator_lost` or `sensor_lost`.
+- **Photodiode sync:** assigning a photodiode port shows a 56 px screen-corner patch that flashes on clip start, clip end, and each step. The agent records the photodiode and the export reports the measured display latency for every flash.
+
+## Analysis bundle
+
+When a session ends (or with `python -m meridian_agent --code CODE --token TOKEN --export-to RECORDING_DIR`), the agent writes `export/` next to the raw recordings: `events.tsv`, `steps.tsv`, `ratings.tsv`, `tasks.tsv`, `stroop_trials.tsv`, `nback_trials.tsv`, `sync_check.tsv` (with a photodiode), `session.json`, and `qa_report.json` / `qa_report.md`. Onsets are on the acquisition host clock, matching the `host_epoch_ns` column of every sensor CSV. The QA report flags per-step coverage gaps in required streams, pauses, interrupted or restarted stimuli, repeats, timer steps that ran long or short, skipped steps, and gate outcomes.
