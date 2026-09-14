@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel } from "./protocol";
 import { QUESTIONNAIRES, scoreQuestionnaire, validAnswers } from "./questionnaires";
 import { STIMULI, stimulusById } from "./stimuli";
-import { ARTIFACT_TYPES, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, sanitizeFields } from "./rig";
+import { ARTIFACT_TYPES, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, consentReady, heartRateAgreement, missingParticipantFields, openArtifactSpans, sanitizeFields } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
 import { SAM_POINTS } from "./tasks";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
@@ -442,6 +442,12 @@ export async function mutateSession(code: string, action: string, payload: Actio
       appendEvent(current,{ eventType:"questionnaire_submitted", label:`${definition.id} submitted`, source:"subject", metadata:{ questionnaireId:definition.id, scores } });
       advance(current,"Questionnaire submitted","subject");
     }
+    if (action === "consent") {
+      // Consent can be updated at any time, including a later withdrawal of sharing permission.
+      const values = sanitizeFields(CONSENT_FIELDS, payload.values);
+      current.consent = { values, updatedAt:now() };
+      appendEvent(current,{ eventType:"consent_recorded", label:"Data-sharing consent saved", detail:Object.entries(values).map(([key,value]) => `${key}=${value}`).join(", "), source:"operator", metadata:{ values } });
+    }
     if (action === "participantMetadata" && !["complete","aborted"].includes(current.status)) {
       const values = sanitizeFields(PARTICIPANT_FIELDS, payload.values);
       current.participantMetadata = { values, updatedAt:now() };
@@ -474,6 +480,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
     }
     if (action === "startSession" && current.status === "setup") {
       if (!screeningComplete(current.screening?.answers)) throw new Error("Complete the safety screening before starting the session.");
+      if (!consentReady(current.consent?.values)) throw new Error("Record participation and data-sharing consent before starting the session.");
       if (!current.hardwareGateOverride && (!requiredSensorsReady(current) || current.preflightTest.status!=="pass")) throw new Error("Complete a successful preflight before starting the session.");
       if (!current.hardwareGateOverride && !current.subjectMedia?.ready) throw new Error("Wait for the subject display to finish loading the study media.");
       current.status="running";
@@ -686,7 +693,7 @@ export function acquisitionExport(snapshot: SessionSnapshot) {
     deviceConfig:snapshot.deviceConfig, media:snapshot.media, hardwareGateOverride:snapshot.hardwareGateOverride,
     plan:plan.map((step) => ({ id:step.id, index:step.index, type:step.type, title:step.title, label:shortLabel(step), phase:step.phase, emotion:step.emo ?? null, durationSec:step.durationSec ?? null, advance:step.advance })),
     events:snapshot.events.map(agentEvent), ratings:snapshot.ratings, notes:snapshot.notes, bpReadings:snapshot.bpReadings,
-    participantMetadata:snapshot.participantMetadata?.values ?? {}, participantFields:PARTICIPANT_FIELDS,
+    participantMetadata:snapshot.participantMetadata?.values ?? {}, participantFields:PARTICIPANT_FIELDS, consent:snapshot.consent ?? null,
     protocolOptions:snapshot.assignment.options ?? null, stimuli:Object.fromEntries(Object.entries(snapshot.assignment.stimuli ?? {}).map(([clip,id]) => [clip, stimulusById(id, STIMULI) ?? { id }])),
     questionnaires:snapshot.questionnaires ?? [], questionnaireItems:QUESTIONNAIRES,
     csiSetup:snapshot.csiSetup?.values ?? {}, csiSetupFields:CSI_SETUP_FIELDS, csiCalibration:snapshot.csiCalibration ?? null,

@@ -118,3 +118,23 @@ export function heartRateAgreement(sensors: readonly HeartRateSensor[], nowMs: n
   const spreadBpm = Math.round((Math.max(...bpms) - Math.min(...bpms)) * 10) / 10;
   return { status: spreadBpm <= HR_AGREEMENT.maxSpreadBpm ? "agree" : "disagree", spreadBpm, sources };
 }
+
+/**
+ * Data-sharing consent per modality. Participation must be "Yes" to record; the other answers decide what the export
+ * marks as shareable and whether de-identified substitutes (such as a face colour trace instead of face video) are made.
+ */
+export const CONSENT_FIELDS: readonly ChoiceField[] = [
+  { id: "participation", label: "Signed consent to take part in this recording", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "shareFaceVideo", label: "Share identifiable face video", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "shareThermalVideo", label: "Share thermal face video", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "shareAudio", label: "Share voice recordings", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "sharePhysiology", label: "Share physiological signals (ECG, PPG, EDA, EMG, respiration)", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "shareWifi", label: "Share WiFi CSI recordings", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "shareResponses", label: "Share ratings, questionnaires, and task responses", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "shareDerived", label: "Share de-identified features when raw data is withheld", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "futureResearch", label: "Data may be reused in future studies", kind: "choice", options: ["Yes", "No"], required: true },
+];
+
+export function consentReady(values: Record<string, string | number> | undefined) {
+  return CONSENT_FIELDS.every((field) => Boolean(values?.[field.id])) && values?.participation === "Yes";
+}

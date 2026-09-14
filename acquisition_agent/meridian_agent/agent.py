@@ -90,6 +90,10 @@ class MeridianAgent:
         self.preflight_started_mono = 0.0
         self.preflight_result: dict = {"status":"idle","detail":"Not run","completedAt":None}
         self.calibration: dict | None = None
+        self.lsl = None
+        if getattr(args,"lsl",False) and not getattr(args,"export_to",None):
+            from .lsl import LslBridge
+            self.lsl = LslBridge(self.code)
 
     def request(self, action: str, **content) -> dict:
         payload = {"code":self.code,"token":self.token,"action":action,**content}
@@ -162,6 +166,9 @@ class MeridianAgent:
         camera_options = CameraOptions(codec=self.args.video_codec,width=self.args.camera_width,height=self.args.camera_height,fps=self.args.camera_fps,
                                        lock_settings=not self.args.no_camera_lock,thermal_format=self.args.thermal_format,thermal_units=self.args.thermal_units)
         self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono,camera_options) for sensor_id in SENSOR_IDS]
+        if self.lsl is not None:
+            for sensor in self.sensors:
+                sensor.sample_listener = self.lsl.push_value
         self.device_config = values
         self.config_revision = revision
         metadata = {
@@ -266,12 +273,16 @@ class MeridianAgent:
         clock = HostClock.now(self.clock_offset_ms,self.origin_mono)
         with self.events_path.open("a",encoding="utf-8") as handle:
             for event in sorted(fresh,key=lambda item: int(item.get("sequence") or 0)):
-                handle.write(json.dumps(event_marker(event,clock),separators=(",",":"))+"\n")
+                marker = event_marker(event,clock)
+                handle.write(json.dumps(marker,separators=(",",":"))+"\n")
+                if self.lsl is not None:
+                    self.lsl.push_event(marker,None if marker["monotonicS"] is None else marker["monotonicS"] + self.origin_mono)
                 self.last_event_sequence = int(event.get("sequence") or 0)
 
     def export_bundle(self, artifacts: list[dict]) -> None:
         data = self.request_export()
-        report = build_bundle(data,self.session_dir,HostClock.now(self.clock_offset_ms,self.origin_mono),artifacts)
+        report = build_bundle(data,self.session_dir,HostClock.now(self.clock_offset_ms,self.origin_mono),artifacts,
+                              derive_video=getattr(self.args,"derive_video",False),bids=not getattr(self.args,"no_bids",False))
         print(f"Analysis bundle written to {self.session_dir / 'export'} ({report['stepsFlagged']} of {report['stepCount']} step attempts flagged)")
 
     def request_export(self) -> dict:
@@ -388,6 +399,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--preview-port",type=int,default=8765,help="Loopback-only camera preview port")
     result.add_argument("--simulate-all",action="store_true",help="Use deterministic simulated streams for integration testing")
     result.add_argument("--export-to",default="",help="Write the analysis bundle for an existing recording directory without recording")
+    result.add_argument("--derive-video",action="store_true",help="Also decode face video for a colour trace and offline rPPG heart rate (slow)")
+    result.add_argument("--no-bids",action="store_true",help="Skip the BIDS-style copy of the export")
+    result.add_argument("--lsl",action="store_true",help="Publish events and live telemetry as Lab Streaming Layer streams (requires pylsl)")
     return result
 
 

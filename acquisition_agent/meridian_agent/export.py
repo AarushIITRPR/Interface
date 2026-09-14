@@ -266,7 +266,35 @@ def _write_tsv(path: Path, header: list[str], rows: list[list]) -> None:
             handle.write("\t".join(_cell(value) for value in row) + "\n")
 
 
-def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: list[dict]) -> dict:
+CONSENT_BY_SENSOR = {"face": "shareFaceVideo", "thermal": "shareThermalVideo", "audio": "shareAudio", "oximeter": "sharePhysiology", "ecg": "sharePhysiology",
+                     "emg": "sharePhysiology", "gsr": "sharePhysiology", "resp": "sharePhysiology", "csi": "shareWifi", "csi2": "shareWifi"}
+RESPONSE_FILES = {"ratings.tsv", "tasks.tsv", "stroop_trials.tsv", "nback_trials.tsv", "questionnaire_items.tsv", "questionnaire_scores.tsv", "annotations.tsv"}
+
+
+def consent_allows(consent: dict, key: str | None) -> bool:
+    return key is None or consent.get(key) == "Yes"
+
+
+def write_share_manifest(out: Path, export: dict, session_dir: Path, artifacts: list[dict]) -> dict:
+    """What may leave the lab under this participant's consent, and which de-identified substitutes replace withheld data."""
+    consent = ((export.get("consent") or {}).get("values")) or {}
+    files = []
+    for artifact in artifacts:
+        key = CONSENT_BY_SENSOR.get(artifact["sensorId"])
+        files.append({"path": artifact["relativePath"], "category": artifact["sensorId"], "consentField": key, "share": bool(consent) and consent_allows(consent, key)})
+    for path in sorted(out.rglob("*")):
+        if path.is_file() and path.name not in ("share_manifest.json",):
+            relative = str(path.relative_to(session_dir)).replace("\\", "/")
+            key = "shareResponses" if path.name in RESPONSE_FILES else None
+            files.append({"path": relative, "category": "export", "consentField": key, "share": bool(consent) and consent_allows(consent, key)})
+    manifest = {"consentRecorded": bool(consent), "futureResearch": consent.get("futureResearch"), "consent": consent,
+                "note": "Without recorded consent nothing is marked shareable.", "files": files}
+    (out / "share_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (out / "consent.json").write_text(json.dumps(export.get("consent"), indent=2), encoding="utf-8")
+    return manifest
+
+
+def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: list[dict], derive_video: bool = False, bids: bool = True) -> dict:
     """Write export/ (events, steps, ratings, tasks, session.json, QA report) and return the QA report."""
     out = session_dir / "export"
     out.mkdir(exist_ok=True)
@@ -308,6 +336,20 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     write_questionnaires(out, export, clock, origin_ns)
     write_annotations(out, export, clock, origin_ns)
     report = qa_report(export, session_dir, windows, artifacts, artifact_list)
+    derivatives_dir = out / "derivatives"
+    derivatives_dir.mkdir(exist_ok=True)
+    consent = ((export.get("consent") or {}).get("values")) or {}
+    derived_allowed = consent.get("shareDerived") == "Yes"
+    # A face colour trace substitutes for withheld face video; it is also computed on request for offline rPPG.
+    need_face_trace = derive_video or (bool(consent) and consent.get("shareFaceVideo") != "Yes" and derived_allowed)
+    from .derivatives import audio_envelope, physio_summary
+    summaries = physio_summary(windows, session_dir, artifacts, derivatives_dir, derive_video=need_face_trace)
+    summary_columns = ["ecgHeartRate", "rmssdMs", "oximeterHeartRate", "spo2", "sclUs", "scrCount", "breathingRate", "rppgHeartRate"]
+    _write_tsv(derivatives_dir / "physio_summary.tsv", ["step_id", "attempt"] + [_snake(name) for name in summary_columns],
+        [[row["stepId"], row["attempt"]] + [row.get(name, "n/a") for name in summary_columns] for row in summaries])
+    audio = next((session_dir / a["relativePath"] for a in artifacts if a["sensorId"] == "audio" and a["relativePath"].endswith(".wav")), None)
+    if audio and audio.exists() and bool(consent) and consent.get("shareAudio") != "Yes" and derived_allowed:
+        _write_tsv(derivatives_dir / "audio_envelope.tsv", ["offset_s", "rms"], [[offset, value] for offset, value in audio_envelope(audio)])
     environment = next((session_dir / artifact["relativePath"] for artifact in artifacts if artifact["sensorId"] == "environment" and artifact["relativePath"].endswith(".csv")), None)
     if environment and environment.exists():
         report["environment"] = environment_summary(environment)
@@ -334,7 +376,19 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     (out / "session.json").write_text(json.dumps(session, indent=2), encoding="utf-8")
     (out / "qa_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     (out / "qa_report.md").write_text(qa_markdown(report), encoding="utf-8")
+    if bids:
+        from .bids import write_bids
+        bids_events = [[_seconds(w["start_ns"], origin_ns), "n/a" if w.get("duration_s") is None else f"{w['duration_s']:.3f}", w["type"], w["step_id"], "protocol", w["label"]] for w in windows if w["start_ns"] is not None]
+        bids_events += [[_seconds(m["hostEpochNs"], origin_ns), 0, m["eventType"], m["stepId"], m["source"], m["label"]] for m in markers if m["hostEpochNs"] is not None and m["eventType"] not in ("step_start", "step_end", "artifact")]
+        bids_events += [[_seconds(a["start_ns"], origin_ns), f"{(a['end_ns'] - a['start_ns']) / 1e9:.3f}", "artifact", a["stepId"], "operator", a["type"]] for a in artifact_list]
+        bids_events.sort(key=lambda row: float(row[0]) if row[0] not in ("", None) else float("inf"))
+        write_bids(out, export, session_dir, artifacts, origin_ns, bids_events, out)
+    write_share_manifest(out, export, session_dir, artifacts)
     return report
+
+
+def _snake(name: str) -> str:
+    return "".join(f"_{char.lower()}" if char.isupper() else char for char in name)
 
 
 def artifact_windows(markers: list[dict]) -> list[dict]:

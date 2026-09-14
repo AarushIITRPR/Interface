@@ -205,6 +205,8 @@ export type SessionSnapshot = {
   preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null };
   createdAt: string;
   updatedAt: string;
+  /** Participation and per-modality data-sharing consent. */
+  consent?: { values: Record<string, string | number>; updatedAt: string };
   /** Scored questionnaire responses. */
   questionnaires?: Array<{ questionnaireId: string; stepId: string; answers: Record<string, number>; scores: Record<string, number>; createdAt: string }>;
   /** Categorical participant descriptors (skin type, age band, eyewear, ...) for interpreting contactless sensing. */

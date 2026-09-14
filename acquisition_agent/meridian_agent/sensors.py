@@ -69,6 +69,8 @@ class Sensor:
         self._longest_gap_s = 0.0
         self._previous_sample_mono = 0.0
         self._side_capture: tuple | None = None
+        # Optional callback (sensor_id, rate_hz, value, monotonic_s), used for Lab Streaming Layer output.
+        self.sample_listener: Callable[[str, float | None, float, float], None] | None = None
         self._side_rows = 0
         self._report.targetRateHz = TARGET_RATES.get(sensor_id)
 
@@ -177,6 +179,12 @@ class Sensor:
                 self._metrics.update(metrics)
             if validation is not None:
                 self._validation = validation[:8]
+        listener = self.sample_listener
+        if listener is not None and point is not None and math.isfinite(float(point)):
+            try:
+                listener(self.sensor_id, rate_hz, float(point), current)
+            except Exception:
+                self.sample_listener = None
 
     def report(self) -> SensorReport:
         with self._lock:

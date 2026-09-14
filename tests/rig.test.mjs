@@ -41,3 +41,12 @@ test("open artifact spans follow start and end events", () => {
   assert.deepEqual([...rig.openArtifactSpans(events)], ["left_seat"]);
   assert.equal(new Set(rig.ARTIFACT_TYPES.map((type) => type.key)).size, rig.ARTIFACT_TYPES.length);
 });
+
+test("consent requires every answer and participation", () => {
+  const all = Object.fromEntries(rig.CONSENT_FIELDS.map((field) => [field.id, "No"]));
+  assert.equal(rig.consentReady({ ...all, participation: "Yes" }), true);
+  assert.equal(rig.consentReady(all), false);
+  const { shareAudio, ...missing } = { ...all, participation: "Yes" };
+  void shareAudio;
+  assert.equal(rig.consentReady(missing), false);
+});
