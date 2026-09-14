@@ -70,7 +70,7 @@ class LiveRppg:
             self._cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
         scale = 320 / max(1, frame.shape[1])
         small = cv2.resize(frame, (320, max(1, round(frame.shape[0] * scale))))
-        faces = self._cascade.detectMultiScale(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), 1.2, 5, minSize=(40, 40))
+        faces = self._cascade.detectMultiScale(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), 1.1, 5, minSize=(40, 40))
         if len(faces):
             x, y, w, h = max(faces, key=lambda item: item[2] * item[3])
             # Central face region: skips hair and background, keeps forehead and cheeks.

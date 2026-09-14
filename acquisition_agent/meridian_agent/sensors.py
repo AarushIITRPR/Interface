@@ -69,6 +69,7 @@ class Sensor:
         self._longest_gap_s = 0.0
         self._previous_sample_mono = 0.0
         self._side_capture: tuple | None = None
+        self._final_report: SensorReport | None = None
         # Optional callback (sensor_id, rate_hz, value, monotonic_s), used for Lab Streaming Layer output.
         self.sample_listener: Callable[[str, float | None, float, float], None] | None = None
         self._side_rows = 0
@@ -130,6 +131,8 @@ class Sensor:
 
     def stop_recording(self) -> None:
         if self._recording.is_set():
+            # Judge stream health when recording ends; later checks would count the finalization time as a stall.
+            self._final_report = self.report()
             self._recording_ended_mono = time.monotonic()
             self.ended_at = iso_now()
             self._recording.clear()
@@ -228,7 +231,7 @@ class Sensor:
     def artifact(self) -> RecordingArtifact | None:
         if not self.path or not self.path.exists():
             return None
-        report = self.report()
+        report = self._final_report or self.report()
         duration = max(0.0,(self._recording_ended_mono or time.monotonic()) - self._recording_started_mono) if self._recording_started_mono else 0.0
         average_rate = self._recorded_samples / duration if duration else 0.0
         quality = "pass" if self._recorded_samples > 0 and report.status not in ("error", "missing") else "fail"
@@ -682,7 +685,8 @@ class FrontierXEcgSensor(Sensor):
                 server_number = random.randint(1,FRONTIERX_SERVER_COUNTS[self.domain])
                 try:
                     self.set_state("unknown",f"Connecting to Frontier X server {server_number}")
-                    socket_url = f"wss://liveecgwsapi.{self.domain}/server{server_number}?Authorization=token"
+                    # MERIDIAN_FRONTIERX_WS_URL points at a local emulator for testing (tools/emulate_devices.py).
+                    socket_url = os.environ.get("MERIDIAN_FRONTIERX_WS_URL") or f"wss://liveecgwsapi.{self.domain}/server{server_number}?Authorization=token"
                     socket_client = websocket.create_connection(socket_url,timeout=10)
                     socket_client.settimeout(1)
                     socket_client.send(frontierx_subscribe_payload(self.user_id,server_number))
@@ -1005,8 +1009,10 @@ class CameraSensor(Sensor):
         capture = None
         recorder: FrameRecorder | None = None
         system = platform.system()
+        # A video file can stand in for a camera when testing without hardware; it is replayed in real time and looped.
+        file_source = isinstance(self.source, str) and Path(self.source).is_file()
         try:
-            backend = cv2.CAP_DSHOW if system == "Windows" else cv2.CAP_V4L2 if system == "Linux" else cv2.CAP_ANY
+            backend = cv2.CAP_ANY if file_source else cv2.CAP_DSHOW if system == "Windows" else cv2.CAP_V4L2 if system == "Linux" else cv2.CAP_ANY
             capture = cv2.VideoCapture(self.source,backend)
             if not capture.isOpened():
                 raise RuntimeError(f"Cannot open camera {self.source}")
@@ -1027,13 +1033,22 @@ class CameraSensor(Sensor):
             settings: dict = {"sensor": self.sensor_id, "codec": "y16-raw" if self.radiometric else options.codec, "width": width, "height": height,
                               "fps": fps, "requested": {"width": options.width, "height": options.height, "fps": options.fps}, "lock": None}
             started = time.monotonic()
-            lock_pending = options.lock_settings and not self.radiometric
+            lock_pending = options.lock_settings and not self.radiometric and not file_source
+            if file_source:
+                settings["lock"] = {"locked": False, "reason": "video file source"}
+            file_frames = 0
             rppg = LiveRppg() if self.sensor_id == "face" and not self.radiometric else None
             frame_times: deque[float] = deque(maxlen=90)
             last_preview = 0.0
             dropped = 0
             while not self._stop.is_set():
                 ok, frame = capture.read()
+                if file_source:
+                    if not ok:
+                        capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
+                    file_frames += 1
+                    self._stop.wait(max(0.0, started + file_frames / fps - time.monotonic()))
                 if not ok:
                     dropped += 1
                     self.set_state("delayed","Camera frame unavailable")
@@ -1048,6 +1063,7 @@ class CameraSensor(Sensor):
                     lock_pending = False
                     settings["lock"] = lock_camera_settings(capture, cv2, system)
                 if (settings["lock"] is not None or not lock_pending) and not settings.get("written"):
+                    settings["source"] = "file" if file_source else "camera"
                     settings["written"] = True
                     (self.path.parent / "camera_settings.json").write_text(json.dumps({k: v for k, v in settings.items() if k != "written"}, indent=2), encoding="utf-8")
                 if current-last_preview >= 0.2:

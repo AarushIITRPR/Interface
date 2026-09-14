@@ -88,6 +88,17 @@ These ports can also be assigned in Recording setup. In Setup, **Record empty ro
 
 `--lsl` publishes a `Meridian-CODE-markers` stream with every protocol event and one `Meridian-CODE-<sensor>` telemetry stream per sensor, so LabRecorder can capture Meridian next to other LSL devices. Install the optional dependency first: `python -m pip install pylsl`.
 
+## Full test with device emulators
+
+`tools/emulate_devices.py` (Linux or macOS) creates virtual serial ports that speak each device's real wire format: CMS50E packets, two ESP32 CSI receivers, EMG with its handshake, GSR JSON, respiration belt, room environment, and a photodiode that flashes when the subject display logs a stimulus or step. It also serves a Frontier X-style ECG WebSocket. Heart rate, breathing, EMG bursts, and skin conductance responses follow the live protocol step, so derived signals can be checked against known values.
+
+```text
+python tools/emulate_devices.py --server http://localhost:3000 --code SESSION_CODE --links ../.local-run/devices
+MERIDIAN_FRONTIERX_WS_URL=ws://127.0.0.1:8766 python -m meridian_agent --server http://localhost:3000 --code SESSION_CODE --token TOKEN
+```
+
+In Recording setup, assign the linked ports (for example `../.local-run/devices/oximeter`), use `12345` as the ECG source, and give a video file path for the face or thermal camera: a file is replayed in real time as if it were a camera. Emulated photodiode latency reflects the emulator's polling of the server, not a real display.
+
 ## Verification without hardware
 
 ```text
