@@ -90,6 +90,17 @@ The subject display downloads every stimulus before the protocol starts and play
 - **Heart rate agreement**: live comparison of ECG, pulse oximeter, and a face-video rPPG estimate, with a warning when they differ by more than 8 bpm.
 - **Lossless face video, locked camera settings, radiometric thermal, respiration belt, and room environment sensor**: see `acquisition_agent/README.md`.
 
+## Protocol v9 options and dataset tools
+
+Chosen per session in Recording setup and fixed once recording starts (sessions created before v9 keep their original plan):
+
+- **Questionnaires** (`lib/questionnaires.ts`): PANAS at the start and end, TIPI at the start (before the resting baselines), and raw NASA-TLX after the Stroop and N-back tasks. Only instruments usable without licence fees are included; confirm the terms for your institution. Exported as `questionnaire_items.tsv` and `questionnaire_scores.tsv`.
+- **Paced breathing**: 60 seconds each at 6, 10, 15, and 20 breaths per minute, a reference for breathing-rate estimation from video, thermal, and CSI. **Longer exertion** runs 60 seconds instead of 20.
+- **Stimulus registry** (`lib/stimuli.ts`): register alternative clips per emotion and a neutral control clip. Each session stores its assigned exemplars, rotated evenly across participants. The **neutral control** block appears only once a neutral clip is registered.
+- **Continuous rating replay** (off by default; adds the clip durations): each clip replays while the participant moves a valence-arousal marker, sampled every 50 ms. Exported as `annotations.tsv`.
+
+Also in Recording setup: **consent and data sharing** (participation is required to start; per-modality sharing drives `share_manifest.json`, and withheld face video or voice can be replaced by a face colour trace or audio envelope when derived features are allowed). The **Cohort** tab shows session status, the 6 x 6 counterbalancing coverage, skin type, sex, and age balance among completed sessions, and per-session pauses, overrides, skips, and missing details, with a TSV export.
+
 ## Analysis bundle
 
-When a session ends (or with `python -m meridian_agent --code CODE --token TOKEN --export-to RECORDING_DIR`), the agent writes `export/` next to the raw recordings: `events.tsv`, `steps.tsv`, `ratings.tsv`, `tasks.tsv`, `stroop_trials.tsv`, `nback_trials.tsv`, `sync_check.tsv` (with a photodiode), `session.json`, and `qa_report.json` / `qa_report.md`. Onsets are on the acquisition host clock, matching the `host_epoch_ns` column of every sensor CSV. The QA report flags per-step coverage gaps in required streams, pauses, interrupted or restarted stimuli, repeats, timer steps that ran long or short, skipped steps, and gate outcomes.
+When a session ends (or with `python -m meridian_agent --code CODE --token TOKEN --export-to RECORDING_DIR`), the agent writes `export/` next to the raw recordings. It includes `derivatives/physio_summary.tsv` (per-step ECG heart rate and RMSSD, oximeter heart rate and SpO2, skin conductance level and SCR count, belt breathing rate; `--derive-video` adds offline face-video rPPG), a BIDS-style copy in `export/bids/`, `consent.json`, `share_manifest.json`, and: `events.tsv`, `steps.tsv`, `ratings.tsv`, `tasks.tsv`, `stroop_trials.tsv`, `nback_trials.tsv`, `sync_check.tsv` (with a photodiode), `session.json`, and `qa_report.json` / `qa_report.md`. Onsets are on the acquisition host clock, matching the `host_epoch_ns` column of every sensor CSV. The QA report flags per-step coverage gaps in required streams, pauses, interrupted or restarted stimuli, repeats, timer steps that ran long or short, skipped steps, and gate outcomes.

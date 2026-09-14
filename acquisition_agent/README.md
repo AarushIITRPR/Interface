@@ -84,6 +84,10 @@ The Overview shows heart rate from the ECG, the pulse oximeter, and a live face-
 
 These ports can also be assigned in Recording setup. In Setup, **Record empty room** captures a 60-second CSI baseline from every CSI receiver into `csi/empty_room_*.csv` before the participant sits down.
 
+## Lab Streaming Layer
+
+`--lsl` publishes a `Meridian-CODE-markers` stream with every protocol event and one `Meridian-CODE-<sensor>` telemetry stream per sensor, so LabRecorder can capture Meridian next to other LSL devices. Install the optional dependency first: `python -m pip install pylsl`.
+
 ## Verification without hardware
 
 ```text

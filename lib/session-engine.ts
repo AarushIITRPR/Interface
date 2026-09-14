@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { summarizeSession } from "./cohort";
 import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel } from "./protocol";
 import { QUESTIONNAIRES, scoreQuestionnaire, validAnswers } from "./questionnaires";
 import { STIMULI, stimulusById } from "./stimuli";
@@ -232,6 +233,13 @@ export async function getLatestSetupSessionForParticipant(participantId: number)
   const row = await bindings().DB.prepare(`${SESSION_SELECT} WHERE s.participant_id = ? AND s.status = 'setup' ORDER BY s.created_at DESC LIMIT 1`)
     .bind(participantId).first<SessionRow>();
   return row ? snapshotFromRow(row) : null;
+}
+
+/** Compact per-session summaries for the cohort dashboard (most recent 500 sessions). */
+export async function cohortSessions() {
+  await ensureSchema();
+  const result = await bindings().DB.prepare(`${SESSION_SELECT} ORDER BY s.created_at DESC LIMIT 500`).all<SessionRow>();
+  return result.results.map((row) => summarizeSession(snapshotFromRow(row)));
 }
 
 export async function listSessions() {

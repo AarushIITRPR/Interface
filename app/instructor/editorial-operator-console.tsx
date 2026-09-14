@@ -29,9 +29,10 @@ import type { ReactNode } from "react";
 import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, estimateRemaining, shortLabel } from "@/lib/protocol";
 import { ARTIFACT_TYPES, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, type MetadataField } from "@/lib/rig";
 import { SCREENING_QUESTIONS, screeningComplete, skippedSafetySteps } from "@/lib/safety";
+import type { CohortOverview } from "@/lib/cohort";
 import type { DeviceConfig, ProtocolOptions, ProtocolStep, SensorChannel, SessionSnapshot } from "@/lib/types";
 
-type WorkspaceTab = "overview" | "protocol" | "review";
+type WorkspaceTab = "overview" | "protocol" | "review" | "cohort";
 type Act = (action: string, payload?: Record<string, unknown>) => Promise<SessionSnapshot | null>;
 type HistoryItem = {
   code: string;
@@ -222,6 +223,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
               <SidebarButton active={tab === "overview"} icon={Monitor} label="Study overview" onClick={() => changeTab("overview")} />
               <SidebarButton active={tab === "protocol"} icon={ClipboardList} label="Protocol workspace" onClick={() => changeTab("protocol")} />
               <SidebarButton active={tab === "review"} icon={ScanLine} label="Recording review" onClick={() => changeTab("review")} />
+              <SidebarButton active={tab === "cohort"} icon={Activity} label="Cohort" onClick={() => changeTab("cohort")} />
             </nav>
             <div className="live-sidebar-footer">
               <span className={running ? "is-live" : "is-paused"}><Circle size={8} fill="currentColor" /> {statusText(snapshot.status)}</span>
@@ -237,6 +239,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
                 {tab === "overview" ? <Overview snapshot={snapshot} step={step} plan={plan} running={running} health={health} readyCount={readyCount} required={required} agentOnline={agentOnline} subjectOnline={subjectOnline} now={now} act={act} onSettings={() => setSettingsOpen(true)} /> : null}
                 {tab === "protocol" ? <Protocol snapshot={snapshot} step={step} plan={plan} running={running} subjectOnline={subjectOnline} act={act} navigateTo={navigateTo} /> : null}
                 {tab === "review" ? <Review snapshot={snapshot} required={required} now={now} onLedger={() => setLedgerOpen(true)} /> : null}
+                {tab === "cohort" ? <CohortDashboard /> : null}
               </motion.div>
             </AnimatePresence>
           </section>
@@ -669,4 +672,33 @@ function ConsentSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act
   const ready = consentReady(values);
   const missing = CONSENT_FIELDS.filter((field) => !values[field.id]).length;
   return <section className="live-rig-section"><h3>Consent and data sharing</h3><p>Record what the signed consent form allows. This can be updated later if the participant withdraws sharing permission.</p><FieldInputs fields={CONSENT_FIELDS} values={values} setValues={setValues} disabled={false} prefix="consent" /><p className={ready ? "good" : "attention"}>{missing ? `${missing} answers missing.` : values.participation !== "Yes" ? "Recording is not allowed without participation consent." : "Consent recorded for this session."}{snapshot.consent ? " Saved." : ""}</p><button onClick={() => void act("consent", { values })}>SAVE CONSENT</button></section>;
+}
+
+function CohortDashboard() {
+  const [cohort, setCohort] = useState<CohortOverview | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => fetch("/api/sessions?cohort=1", { cache: "no-store" }).then((response) => response.json()).then((data) => { if (!cancelled) { if (data.cohort) setCohort(data.cohort); else setError(data.error || "Unable to load the cohort."); } }).catch(() => !cancelled && setError("Unable to load the cohort."));
+    void load();
+    const timer = window.setInterval(load, 30_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
+  if (!cohort) return <section className="live-workspace-content"><p>{error || "Loading cohort..."}</p></section>;
+  const maxCell = Math.max(1, ...cohort.coverage.flat());
+  const download = () => {
+    const header = Object.keys(cohort.sessions[0] ?? {});
+    const rows = cohort.sessions.map((session) => header.map((key) => String((session as Record<string, unknown>)[key] ?? "")).join("\t"));
+    const url = URL.createObjectURL(new Blob([[header.join("\t"), ...rows].join("\n")], { type: "text/tab-separated-values" }));
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = "meridian-cohort.tsv"; anchor.click(); URL.revokeObjectURL(url);
+  };
+  return <section className="live-workspace-content live-cohort">
+    <div className="live-content-heading"><div><WorkspaceLabel>Cohort</WorkspaceLabel><h2>The dataset<br /><i>so far.</i></h2></div><div><span>{cohort.completedParticipants} PARTICIPANTS COMPLETE</span><p>Recruitment balance, counterbalancing coverage, and session quality across all sessions.</p></div></div>
+    <div className="live-cohort-stats">{Object.entries(cohort.statusCounts).map(([status, total]) => <article key={status}><b>{total}</b><span>{status}</span></article>)}{cohort.duplicateParticipants.length ? <article className="attention"><b>{cohort.duplicateParticipants.length}</b><span>participants with repeat sessions: {cohort.duplicateParticipants.join(", ")}</span></article> : null}</div>
+    <div className="live-cohort-grid">
+      <article><WorkspaceLabel>Counterbalancing coverage</WorkspaceLabel><p>Completed sessions per emotion order (rows) and task order (columns). Aim for every cell.</p><table className="live-coverage"><thead><tr><th />{[1, 2, 3, 4, 5, 6].map((column) => <th key={column}>T{column}</th>)}</tr></thead><tbody>{cohort.coverage.map((row, index) => <tr key={index}><th>E{index + 1}</th>{row.map((value, column) => <td key={column} style={{ background: value ? `rgba(61,107,69,${0.2 + 0.8 * value / maxCell})` : undefined }}>{value || ""}</td>)}</tr>)}</tbody></table><small>{cohort.coverage.flat().filter((value) => value === 0).length} of 36 cells still empty.</small></article>
+      {(["skinType", "sex", "ageBand"] as const).map((key) => <article key={key}><WorkspaceLabel>{key === "skinType" ? "Skin type (Fitzpatrick)" : key === "sex" ? "Sex" : "Age band"}</WorkspaceLabel><ul className="live-distribution">{Object.entries(cohort.distributions[key]).map(([label, total]) => <li key={label}><span>{label}</span><i style={{ width: `${Math.min(100, total * 100 / Math.max(1, cohort.completedParticipants))}%` }} /><b>{total}</b></li>)}</ul></article>)}
+    </div>
+    <article className="live-cohort-table"><header><WorkspaceLabel>Sessions</WorkspaceLabel><button onClick={download}><Download size={14} /> EXPORT TSV</button></header><div><table><thead><tr><th>Code</th><th>P</th><th>Status</th><th>Protocol</th><th>Min</th><th>Order</th><th>Skin</th><th>Details</th><th>Consent</th><th>Pauses</th><th>Overrides</th><th>Skipped</th><th>Artifacts</th><th>CSI baseline</th></tr></thead><tbody>{cohort.sessions.map((session) => <tr key={session.code}><td>{session.code}</td><td>{session.participantId}</td><td>{session.status}</td><td>{session.protocolVersion}</td><td>{session.durationMin ?? ""}</td><td>E{session.emotionRow}{session.taskRow ? `/T${session.taskRow}` : ""}</td><td>{session.skinType ?? ""}</td><td className={session.missingDetails ? "attention" : ""}>{session.missingDetails ? `${session.missingDetails} missing` : "complete"}</td><td className={session.consent ? "" : "attention"}>{session.consent ? "yes" : "no"}</td><td>{session.pauses}</td><td className={session.gateOverrides ? "attention" : ""}>{session.gateOverrides}</td><td>{session.skippedSteps}</td><td>{session.artifacts}</td><td>{session.csiBaseline}</td></tr>)}</tbody></table></div></article>
+  </section>;
 }

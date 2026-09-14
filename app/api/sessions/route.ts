@@ -1,6 +1,7 @@
 import { getOperatorUser } from "@/app/operator-auth";
 import { DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, SAM_POINTS } from "@/lib/tasks";
-import { appendAnnotationChunk, createSession, getLatestSetupSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
+import { summarizeCohort } from "@/lib/cohort";
+import { appendAnnotationChunk, cohortSessions, createSession, getLatestSetupSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,10 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const subjectView = url.searchParams.get("view") === "subject";
   const operator = subjectView ? null : await getOperatorUser();
+  if (url.searchParams.get("cohort") === "1") {
+    if (!operator) return unauthorized();
+    return Response.json({ cohort:summarizeCohort(await cohortSessions()) },{headers:{"cache-control":"no-store"}});
+  }
   if (url.searchParams.get("list") === "1") {
     if (!operator) return unauthorized();
     return Response.json({ sessions: await listSessions() });
