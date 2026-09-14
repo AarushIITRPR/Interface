@@ -88,3 +88,33 @@ export const CSI_SETUP_FIELDS: readonly MetadataField[] = [
 ];
 
 export const CSI_CALIBRATION_SEC = 60;
+
+export const HR_AGREEMENT = { maxSpreadBpm: 8, minRppgQuality: 0.3, freshMs: 10_000 } as const;
+
+type HeartRateSensor = { id: string; dataDetected: boolean; updatedAt: string; metrics: Record<string, number | string | boolean> };
+export type HeartRateAgreement = { status: "agree" | "disagree" | "insufficient"; spreadBpm: number | null; sources: Array<{ id: string; label: string; bpm: number }> };
+
+/**
+ * Compares heart rate from the ECG, the pulse oximeter, and the face-video rPPG estimate. Two or more fresh sources
+ * within 8 bpm agree; a larger spread usually means a loose sensor, a missing finger, or a poor face view.
+ */
+export function heartRateAgreement(sensors: readonly HeartRateSensor[], nowMs: number): HeartRateAgreement {
+  const fresh = (sensor: HeartRateSensor | undefined) => Boolean(sensor?.dataDetected && nowMs - Date.parse(sensor.updatedAt) <= HR_AGREEMENT.freshMs);
+  const value = (sensor: HeartRateSensor | undefined, key: string) => {
+    const number = sensor?.metrics[key];
+    return typeof number === "number" && number >= 30 && number <= 220 ? number : null;
+  };
+  const byId = (id: string) => sensors.find((sensor) => sensor.id === id);
+  const sources: HeartRateAgreement["sources"] = [];
+  const ecg = byId("ecg");
+  if (fresh(ecg) && value(ecg, "heartRate") !== null) sources.push({ id: "ecg", label: "ECG", bpm: value(ecg, "heartRate") as number });
+  const oximeter = byId("oximeter");
+  if (fresh(oximeter) && oximeter?.metrics.fingerDetected !== false && value(oximeter, "heartRate") !== null) sources.push({ id: "oximeter", label: "Pulse oximeter", bpm: value(oximeter, "heartRate") as number });
+  const face = byId("face");
+  const quality = face?.metrics.rppgQuality;
+  if (fresh(face) && value(face, "rppgHeartRate") !== null && typeof quality === "number" && quality >= HR_AGREEMENT.minRppgQuality) sources.push({ id: "face", label: "Face video (rPPG)", bpm: value(face, "rppgHeartRate") as number });
+  if (sources.length < 2) return { status: "insufficient", spreadBpm: null, sources };
+  const bpms = sources.map((source) => source.bpm);
+  const spreadBpm = Math.round((Math.max(...bpms) - Math.min(...bpms)) * 10) / 10;
+  return { status: spreadBpm <= HR_AGREEMENT.maxSpreadBpm ? "agree" : "disagree", spreadBpm, sources };
+}

@@ -13,11 +13,13 @@ import time
 import wave
 from collections import deque
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
 from .models import RecordingArtifact, SensorReport
+from .rppg import LiveRppg
 
 
 TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0}
@@ -296,6 +298,8 @@ class SimulatedSensor(Sensor):
                     metrics = {"levelPct":round(point),"sampleRate":48000}
                 elif self.sensor_id in ("face","thermal"):
                     metrics = {"width":1280 if self.sensor_id == "face" else 640,"height":720 if self.sensor_id == "face" else 480,"fps":rate,"droppedFrames":0}
+                    if self.sensor_id == "face":
+                        metrics.update({"faceDetected":True,"rppgHeartRate":round(71.5 + 1.5 * math.sin(phase / 9),1),"rppgQuality":0.52})
                 elif self.sensor_id == "resp":
                     point = 2048 + 600 * math.sin(phase / 1.6)
                     latest = "15 breaths/min"
@@ -812,6 +816,85 @@ class OximeterSensor(Sensor):
                             pass
 
 
+def _frames_equal(left, right) -> bool:
+    try:
+        import numpy as np
+        return bool(np.array_equal(left, right))
+    except Exception:
+        return False
+
+
+VIDEO_CODECS = {
+    # fourcc, file extension, rough compressed size as a share of raw frames (for disk estimates)
+    "ffv1": ("FFV1", ".mkv", 0.5),
+    "mjpg": ("MJPG", ".avi", 0.08),
+}
+
+
+@dataclass
+class CameraOptions:
+    codec: str = "ffv1"
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    lock_settings: bool = True
+    thermal_format: str = "rgb"
+    thermal_units: str = "centikelvin"
+
+
+def gb_per_hour(width: int, height: int, fps: float, bytes_per_pixel: float, share: float) -> float:
+    return width * height * bytes_per_pixel * fps * share * 3600 / 1e9
+
+
+class Y16Writer:
+    """Lossless 16-bit thermal frames: little-endian uint16 concatenated, described by a JSON sidecar."""
+
+    def __init__(self, path: str, fps: float, size: tuple[int, int], units: str):
+        self.path = Path(path)
+        self.size = size
+        self.handle = self.path.open("wb")
+        meta = {"format": "uint16le frames, row-major", "width": size[0], "height": size[1], "nominalFps": fps, "units": units,
+                "celsius": "value / 100 - 273.15" if units == "centikelvin" else "camera specific",
+                "frameTimestamps": self.path.with_name(f"{self.path.stem}_frames.csv").name}
+        self.path.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    def write(self, frame) -> None:
+        import numpy as np
+        self.handle.write(np.ascontiguousarray(frame, dtype="<u2").tobytes())
+
+    def release(self) -> None:
+        self.handle.close()
+
+
+def to_y16(frame, width: int, height: int):
+    """Normalize what OpenCV returns for Y16 capture (2-D uint16, or a flat byte buffer) to a height x width uint16 array."""
+    import numpy as np
+    array = np.asarray(frame)
+    if array.dtype == np.uint16 and array.ndim == 2:
+        return array
+    flat = array.reshape(-1)
+    if flat.dtype == np.uint8 and flat.size >= width * height * 2:
+        return flat[: width * height * 2].view("<u2").reshape(height, width)
+    raise ValueError(f"Unexpected Y16 frame {array.dtype} {array.shape}")
+
+
+def lock_camera_settings(capture, cv2, system: str) -> dict:
+    """Freeze auto exposure, white balance, and gain at their settled values so brightness does not drift under rPPG."""
+    props = {"exposure": cv2.CAP_PROP_EXPOSURE, "gain": cv2.CAP_PROP_GAIN, "wbTemperature": cv2.CAP_PROP_WB_TEMPERATURE}
+    settled = {name: capture.get(prop) for name, prop in props.items()}
+    manual_exposure = 0.25 if system == "Windows" else 1.0
+    capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, manual_exposure)
+    capture.set(cv2.CAP_PROP_AUTO_WB, 0)
+    for name, prop in props.items():
+        if settled[name] not in (None, -1, 0) or name == "gain":
+            capture.set(prop, settled[name])
+    readback = {name: capture.get(prop) for name, prop in props.items()}
+    auto_exposure = capture.get(cv2.CAP_PROP_AUTO_EXPOSURE)
+    auto_wb = capture.get(cv2.CAP_PROP_AUTO_WB)
+    locked = abs(auto_exposure - manual_exposure) < 1e-6 and auto_wb == 0
+    return {"locked": bool(locked), "settled": settled, "readback": readback, "autoExposure": auto_exposure, "autoWhiteBalance": auto_wb}
+
+
 class FrameRecorder:
     """Writes video frames on a background thread and logs one timestamp row per frame actually written.
 
@@ -850,7 +933,8 @@ class FrameRecorder:
             with self.timestamps_path.open("a", newline="", buffering=1) as handle:
                 stamps = csv.writer(handle)
                 if self.timestamps_path.stat().st_size == 0:
-                    stamps.writerow(["frame_index","host_epoch_ns","monotonic_s"])
+                    stamps.writerow(["frame_index","host_epoch_ns","monotonic_s","repeated"])
+                previous = None
                 while True:
                     item = self.frames.get()
                     if item is None:
@@ -862,7 +946,10 @@ class FrameRecorder:
                         if writer is None:
                             raise RuntimeError("Cannot create camera recording")
                     writer.write(frame)
-                    stamps.writerow([self.written, host_epoch_ns, f"{monotonic-self.origin_mono:.6f}"])
+                    # Identical consecutive frames mark a frozen stream, e.g. a thermal camera's flat-field correction.
+                    repeated = previous is not None and getattr(frame, "shape", None) == getattr(previous, "shape", None) and _frames_equal(frame, previous)
+                    stamps.writerow([self.written, host_epoch_ns, f"{monotonic-self.origin_mono:.6f}", int(repeated)])
+                    previous = frame
                     self.written += 1
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {str(exc)[:120]}"
@@ -872,10 +959,16 @@ class FrameRecorder:
 
 
 class CameraSensor(Sensor):
-    def __init__(self, sensor_id: str, source: str, session_dir: Path, origin_mono: float):
+    WARMUP_SEC = 2.0
+
+    def __init__(self, sensor_id: str, source: str, session_dir: Path, origin_mono: float, options: CameraOptions | None = None):
         super().__init__(sensor_id, source, session_dir, origin_mono)
         self.source = int(source) if source.isdigit() else source
-        self.path = session_dir / sensor_id / f"{sensor_id}.avi"
+        self.options = options or CameraOptions()
+        self.radiometric = sensor_id == "thermal" and self.options.thermal_format == "y16"
+        codec = VIDEO_CODECS.get(self.options.codec, VIDEO_CODECS["ffv1"])
+        self.path = session_dir / sensor_id / (f"{sensor_id}_y16.raw" if self.radiometric else f"{sensor_id}{codec[1]}")
+        self.estimated_gb_per_hour = 18.0
         self._preview_lock = threading.Lock()
         self._preview_frame: bytes | None = None
 
@@ -886,27 +979,48 @@ class CameraSensor(Sensor):
     def run(self) -> None:
         try:
             import cv2
+            import numpy as np
         except Exception as exc:
             self.set_state("error",f"Camera support unavailable: {type(exc).__name__}")
             return
 
+        fourcc, _, share = VIDEO_CODECS.get(self.options.codec, VIDEO_CODECS["ffv1"])
+        options = self.options
+
         def open_writer(path: str, fps: float, size: tuple[int,int]):
-            writer = cv2.VideoWriter(path,cv2.VideoWriter_fourcc(*"MJPG"),fps,size)
+            if self.radiometric:
+                return Y16Writer(path, fps, size, options.thermal_units)
+            writer = cv2.VideoWriter(path,cv2.VideoWriter_fourcc(*fourcc),fps,size)
             return writer if writer.isOpened() else None
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         capture = None
         recorder: FrameRecorder | None = None
+        system = platform.system()
         try:
-            backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_V4L2 if platform.system() == "Linux" else cv2.CAP_ANY
+            backend = cv2.CAP_DSHOW if system == "Windows" else cv2.CAP_V4L2 if system == "Linux" else cv2.CAP_ANY
             capture = cv2.VideoCapture(self.source,backend)
             if not capture.isOpened():
                 raise RuntimeError(f"Cannot open camera {self.source}")
+            if self.radiometric:
+                capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"Y16 "))
+                capture.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+            if options.width and options.height:
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, options.width)
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, options.height)
+            if options.fps:
+                capture.set(cv2.CAP_PROP_FPS, options.fps)
             width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
             height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
             requested_fps = capture.get(cv2.CAP_PROP_FPS)
-            fps = requested_fps if 1 <= requested_fps <= 120 else 30.0
-            self.set_state("connected",f"{width}x{height} at {fps:.1f} fps")
+            fps = requested_fps if 1 <= requested_fps <= 240 else 30.0
+            self.estimated_gb_per_hour = gb_per_hour(width, height, fps, 2 if self.radiometric else 3, 1.0 if self.radiometric else share)
+            self.set_state("connected",f"{width}x{height} at {fps:.1f} fps, {'Y16 raw' if self.radiometric else options.codec}")
+            settings: dict = {"sensor": self.sensor_id, "codec": "y16-raw" if self.radiometric else options.codec, "width": width, "height": height,
+                              "fps": fps, "requested": {"width": options.width, "height": options.height, "fps": options.fps}, "lock": None}
+            started = time.monotonic()
+            lock_pending = options.lock_settings and not self.radiometric
+            rppg = LiveRppg() if self.sensor_id == "face" and not self.radiometric else None
             frame_times: deque[float] = deque(maxlen=90)
             last_preview = 0.0
             dropped = 0
@@ -917,13 +1031,25 @@ class CameraSensor(Sensor):
                     self.set_state("delayed","Camera frame unavailable")
                     self._stop.wait(0.05)
                     continue
+                if self.radiometric:
+                    frame = to_y16(frame, width, height)
                 host_epoch_ns = time.time_ns()
                 current = time.monotonic(); frame_times.append(current)
                 measured = (len(frame_times)-1)/max(0.001,frame_times[-1]-frame_times[0]) if len(frame_times)>1 else fps
+                if lock_pending and current - started >= self.WARMUP_SEC:
+                    lock_pending = False
+                    settings["lock"] = lock_camera_settings(capture, cv2, system)
+                if (settings["lock"] is not None or not lock_pending) and not settings.get("written"):
+                    settings["written"] = True
+                    (self.path.parent / "camera_settings.json").write_text(json.dumps({k: v for k, v in settings.items() if k != "written"}, indent=2), encoding="utf-8")
                 if current-last_preview >= 0.2:
                     preview = frame
-                    if width > 640:
-                        preview = cv2.resize(frame,(640,max(1,round(height*640/width))))
+                    if self.radiometric:
+                        low, high = float(frame.min()), float(frame.max())
+                        scaled = ((frame.astype(np.float32) - low) * (255.0 / max(1.0, high - low))).astype(np.uint8)
+                        preview = cv2.applyColorMap(scaled, cv2.COLORMAP_INFERNO)
+                    if preview.shape[1] > 640:
+                        preview = cv2.resize(preview,(640,max(1,round(preview.shape[0]*640/preview.shape[1]))))
                     encoded,jpeg = cv2.imencode(".jpg",preview,[cv2.IMWRITE_JPEG_QUALITY,65])
                     if encoded:
                         with self._preview_lock:
@@ -940,7 +1066,18 @@ class CameraSensor(Sensor):
                     queued = recorder.submit(frame,host_epoch_ns,current)
                     if not queued:
                         self.record_dropped(1)
-                self.sample(f"{width}x{height}",int(frame.nbytes) if queued else 0,rate_hz=round(measured,2),point=float(measured),metrics={"width":width,"height":height,"fps":round(measured,2),"droppedFrames":dropped+(recorder.dropped if recorder else 0)},validation=["Hardware detected","Frames arriving","Preview available","Frame rate measured"])
+                locked = (settings["lock"] or {}).get("locked")
+                metrics = {"width":width,"height":height,"fps":round(measured,2),"droppedFrames":dropped+(recorder.dropped if recorder else 0),"codec":settings["codec"]}
+                validation = ["Hardware detected","Frames arriving","Preview available","Frame rate measured"]
+                if settings["lock"] is not None:
+                    metrics["settingsLocked"] = bool(locked)
+                    validation.append("Exposure and white balance locked" if locked else "Exposure or white balance could not be locked")
+                if rppg is not None:
+                    metrics.update(rppg.update(frame, current, cv2))
+                if self.radiometric and options.thermal_units == "centikelvin":
+                    metrics["minTempC"] = round(float(frame.min()) / 100 - 273.15, 2)
+                    metrics["maxTempC"] = round(float(frame.max()) / 100 - 273.15, 2)
+                self.sample(f"{width}x{height}",int(frame.nbytes) if queued else 0,rate_hz=round(measured,2),point=float(measured),metrics=metrics,validation=validation)
         except Exception as exc:
             self.set_state("error",f"{type(exc).__name__}: {str(exc)[:120]}")
         finally:
@@ -1196,13 +1333,13 @@ def _probe_serial_protocol(serial_module, port: str, baud: int, sensor_id: str) 
     return False
 
 
-def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin_mono: float) -> Sensor:
+def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin_mono: float, camera_options: CameraOptions | None = None) -> Sensor:
     if value == "simulate":
         return SimulatedSensor(sensor_id,session_dir,origin_mono)
     if value in ("", "none"):
         return UnavailableSensor(sensor_id,"Not configured",session_dir,origin_mono)
     if sensor_id == "face" or sensor_id == "thermal":
-        return CameraSensor(sensor_id,"0" if value == "auto" else value,session_dir,origin_mono)
+        return CameraSensor(sensor_id,"0" if value == "auto" else value,session_dir,origin_mono,camera_options)
     if sensor_id == "audio":
         return AudioSensor(value,session_dir,origin_mono)
     if sensor_id == "oximeter":

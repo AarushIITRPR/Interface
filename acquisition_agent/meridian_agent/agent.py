@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 from . import __version__
 from .export import HostClock, auxiliary_files, build_bundle, event_marker
 from .preview import PreviewServer
-from .sensors import CameraSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor
+from .sensors import CameraOptions, CameraSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor
 
 
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
@@ -126,7 +126,7 @@ class MeridianAgent:
             "recordingRoot":str(self.session_dir),
             "inventory":self.inventory,
             "diskFreeGb":round(free_gb,2),
-            "estimatedHours":round(free_gb/18.0,1),
+            "estimatedHours":round(free_gb/self.recording_gb_per_hour(),1),
             "clockOffsetMs":self.clock_offset_ms,
             "openFileCount":len(recorded) if self.recording_started else 0,
             "droppedPct":round(100*dropped/max(1,samples+dropped),3),
@@ -135,6 +135,11 @@ class MeridianAgent:
             "preflightTest":self.preflight_result,
             "csiCalibration":{key:value for key,value in (self.calibration or {}).items() if key in ("status","rows","detail")} or None,
         }
+
+    def recording_gb_per_hour(self) -> float:
+        """Disk use of the current configuration: cameras from resolution and codec, plus about 1 GB/h for everything else."""
+        cameras = sum(sensor.estimated_gb_per_hour for sensor in self.sensors if isinstance(sensor, CameraSensor))
+        return max(1.0, cameras + 1.0)
 
     def configure(self, requested: dict | None = None, revision: int = 0) -> None:
         defaults = {
@@ -154,7 +159,9 @@ class MeridianAgent:
         values = {sensor_id:("simulate" if self.args.simulate_all else str((requested or {}).get(sensor_id,defaults[sensor_id]))) for sensor_id in SENSOR_IDS}
         bauds = {"csi":self.args.csi_baud,"emg":self.args.emg_baud,"gsr":self.args.gsr_baud,"ecg":self.args.ecg_baud,"photodiode":self.args.photodiode_baud,"csi2":self.args.csi_baud,"resp":self.args.resp_baud,"environment":self.args.environment_baud}
         values,inventory = discover_serial_assignments(values,bauds)
-        self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono) for sensor_id in SENSOR_IDS]
+        camera_options = CameraOptions(codec=self.args.video_codec,width=self.args.camera_width,height=self.args.camera_height,fps=self.args.camera_fps,
+                                       lock_settings=not self.args.no_camera_lock,thermal_format=self.args.thermal_format,thermal_units=self.args.thermal_units)
+        self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono,camera_options) for sensor_id in SENSOR_IDS]
         self.device_config = values
         self.config_revision = revision
         metadata = {
@@ -209,8 +216,11 @@ class MeridianAgent:
             probe.write_text(json.dumps(payload,indent=2),encoding="utf-8")
             verified = json.loads(probe.read_text(encoding="utf-8")) == payload
             sync_ok = abs(self.clock_offset_ms) < 100
-            passed = not failed and verified and payload["diskFreeGb"] >= 10 and sync_ok
-            problem = ", ".join(failed) if failed else "clock synchronization" if not sync_ok else "local storage"
+            # Enough disk for a full session (about 45 minutes) with 50% margin.
+            needed_gb = max(10.0, self.recording_gb_per_hour() * 0.75 * 1.5)
+            payload["diskNeededGb"] = round(needed_gb,1)
+            passed = not failed and verified and payload["diskFreeGb"] >= needed_gb and sync_ok
+            problem = ", ".join(failed) if failed else "clock synchronization" if not sync_ok else f"disk space ({payload['diskFreeGb']} GB free, {payload['diskNeededGb']} GB needed)" if payload["diskFreeGb"] < needed_gb else "local storage"
             self.preflight_result = {"status":"pass" if passed else "fail","detail":"All required streams, synchronization, and local storage passed" if passed else "Check: "+problem,"completedAt":payload["completedAt"]}
 
     def run_calibration(self, command: dict) -> None:
@@ -363,6 +373,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--thermal",default="none",help="Thermal camera index/path")
     result.add_argument("--photodiode",default="none",help="Photodiode (screen sync patch) serial port, or none")
     result.add_argument("--photodiode-baud",type=int,default=921600)
+    result.add_argument("--video-codec",choices=("ffv1","mjpg"),default="ffv1",help="ffv1 is lossless (recommended for rPPG); mjpg is small but lossy")
+    result.add_argument("--camera-width",type=int,default=0,help="Requested capture width (0 keeps the camera default)")
+    result.add_argument("--camera-height",type=int,default=0,help="Requested capture height (0 keeps the camera default)")
+    result.add_argument("--camera-fps",type=float,default=0.0,help="Requested frame rate (0 keeps the camera default)")
+    result.add_argument("--no-camera-lock",action="store_true",help="Leave auto exposure and white balance on")
+    result.add_argument("--thermal-format",choices=("rgb","y16"),default="rgb",help="y16 records radiometric 16-bit frames (e.g. FLIR Lepton on PureThermal)")
+    result.add_argument("--thermal-units",choices=("centikelvin","raw"),default="centikelvin")
     result.add_argument("--csi2",default="none",help="Second ESP32 CSI receiver serial port, or none")
     result.add_argument("--resp",default="none",help="Respiration belt serial port, or none")
     result.add_argument("--resp-baud",type=int,default=115200)

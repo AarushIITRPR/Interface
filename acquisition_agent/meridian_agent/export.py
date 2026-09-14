@@ -242,7 +242,8 @@ def sha256(path: Path) -> str:
 
 def auxiliary_files(session_dir: Path) -> list[dict]:
     """Timing files that are not streams themselves but are needed to align them."""
-    candidates = sorted(session_dir.glob("*/*_frames.csv")) + [session_dir / "session_markers.jsonl", session_dir / "session_events.jsonl"]
+    candidates = (sorted(session_dir.glob("*/*_frames.csv")) + sorted(session_dir.glob("*/empty_room_*.csv")) + sorted(session_dir.glob("*/camera_settings.json"))
+                  + sorted(session_dir.glob("*/*_y16.json")) + [session_dir / "session_markers.jsonl", session_dir / "session_events.jsonl"])
     return [{"relativePath": str(path.relative_to(session_dir)).replace("\\", "/"), "bytes": path.stat().st_size, "sha256": sha256(path)} for path in candidates if path.exists()]
 
 
@@ -463,8 +464,9 @@ def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: l
                 seconds = overlap_seconds(start, end, item["start_ns"], item["end_ns"])
                 if seconds > 0:
                     artifact_seconds[item["type"]] = artifact_seconds.get(item["type"], 0.0) + seconds
-        if artifact_seconds:
-            issues.append("artifacts: " + ", ".join(f"{name} {seconds:.0f}s" for name, seconds in sorted(artifact_seconds.items())))
+        noticeable = {name: seconds for name, seconds in artifact_seconds.items() if seconds >= 0.5}
+        if noticeable:
+            issues.append("artifacts: " + ", ".join(f"{name} {seconds:.0f}s" for name, seconds in sorted(noticeable.items())))
         flagged += bool(issues)
         steps.append({"stepIndex": window["step_index"], "stepId": window["step_id"], "attempt": window["attempt"], "label": window["label"],
             "durationSec": None if window.get("duration_s") is None else round(window["duration_s"], 3),

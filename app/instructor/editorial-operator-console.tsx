@@ -341,6 +341,7 @@ function Overview({ snapshot, step, plan, running, health, readyCount, required,
       <div className="live-overview-cards">
         <article><WorkspaceLabel>Protocol progress</WorkspaceLabel><div className="live-progress-number"><b>{String(snapshot.stepIndex + 1).padStart(2, "0")}</b><span>of {String(plan.length).padStart(2, "0")}<br />stages</span></div><div className="live-progress-line"><i style={{ width: `${progress}%` }} /></div><small>Current: {shortLabel(step)} · {durationLabel(step)}</small></article>
         <article className="live-subject-card"><div><WorkspaceLabel>Subject display</WorkspaceLabel><b>One quiet task<br />at a time.</b><p>{step.subjectPrompt || "The subject display is waiting for the next instruction."}</p></div><Link href={`/subject?session=${snapshot.code}`} target="_blank">OPEN SUBJECT VIEW <ArrowUpRight size={14} /></Link><small className={subjectOnline ? "connected" : "waiting"}>{subjectOnline ? "DISPLAY CONNECTED" : "DISPLAY WAITING"}</small></article>
+        <HeartRateAgreementCard snapshot={snapshot} />
         <article className="live-health-card"><WorkspaceLabel>Recording health</WorkspaceLabel><div><b>{health}</b><span>%<small>{health === 100 ? "stable" : "ready"}</small></span></div><p className={health === 100 ? "good" : "attention"}>{health === 100 ? <Check size={14} /> : <Circle size={9} fill="currentColor" />} {readyCount} of {required.length} required streams ready.</p></article>
       </div>
 
@@ -636,4 +637,12 @@ function CsiSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) 
   const csiAssigned = ["csi", "csi2"].some((id) => snapshot.deviceConfig[id] && snapshot.deviceConfig[id] !== "none");
   const status = !calibration ? "Not recorded" : calibration.status === "running" ? `Recording (${CSI_CALIBRATION_SEC} s)...` : calibration.status === "done" ? `Recorded ${calibration.rows} packets` : `Failed: ${calibration.detail}`;
   return <section className="live-rig-section"><h3>WiFi CSI setup</h3><p>Radio settings and geometry are needed to reproduce CSI results. Record the empty room before the participant sits down.</p><FieldInputs fields={CSI_SETUP_FIELDS} values={values} setValues={setValues} disabled={locked} prefix="csi" /><button disabled={locked} onClick={() => void act("csiSetup", { values })}>SAVE CSI SETUP</button><div className="live-calibration"><span className={calibration?.status === "done" ? "good" : calibration?.status === "failed" ? "attention" : ""}>Empty-room baseline: {status}</span><button disabled={snapshot.status !== "setup" || !csiAssigned || calibration?.status === "running"} onClick={() => void act("csiCalibration")}>RECORD EMPTY ROOM</button></div></section>;
+}
+
+function HeartRateAgreementCard({ snapshot }: { snapshot: SessionSnapshot }) {
+  const agreement = snapshot.heartRateAgreement;
+  const status = agreement?.status ?? "insufficient";
+  const headline = status === "agree" ? `Within ${agreement?.spreadBpm} bpm` : status === "disagree" ? `${agreement?.spreadBpm} bpm apart` : "Need two sources";
+  const advice = status === "disagree" ? "Check the finger clip, ECG strap contact, and that the face is lit and in view." : status === "agree" ? "Contact and contactless heart rate agree." : "Connect at least two of ECG, oximeter, or a visible face.";
+  return <article className={`live-hr-card ${status}`}><WorkspaceLabel>Heart rate agreement</WorkspaceLabel><b>{headline}</b><ul>{(agreement?.sources ?? []).map((source) => <li key={source.id}><span>{source.label}</span><strong>{Math.round(source.bpm)} bpm</strong></li>)}</ul><p>{advice}</p></article>;
 }

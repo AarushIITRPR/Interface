@@ -1,3 +1,4 @@
+import type { HeartRateAgreement } from "./rig";
 import type { GateStatus, Physiology } from "./safety";
 
 export const PROTOCOL_VERSION = "v8";
@@ -194,6 +195,8 @@ export type SessionSnapshot = {
   csiCalibration?: { status: "running" | "done" | "failed"; detail: string; startedAt: string; completedAt: string | null; rows: number; durationSec: number };
   /** Safety screening answers recorded by the operator before the session starts. */
   screening?: { answers: Record<string, boolean>; completedAt: string };
+  /** ECG vs oximeter vs face-video heart rate, computed on read. */
+  heartRateAgreement?: HeartRateAgreement;
   /** Return-to-baseline evaluation for the current gate step, computed on read. */
   gate?: GateStatus | null;
   /** Stimulus preload progress reported by the subject display. */

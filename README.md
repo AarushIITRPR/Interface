@@ -82,6 +82,14 @@ The subject display downloads every stimulus before the protocol starts and play
 - **Automatic pause:** while running, losing the instructor console or a required stream pauses the session with `operator_lost` or `sensor_lost`.
 - **Photodiode sync:** assigning a photodiode port shows a 56 px screen-corner patch that flashes on clip start, clip end, and each step. The agent records the photodiode and the export reports the measured display latency for every flash.
 
+## Dataset rig features
+
+- **Participant details** (Recording setup): categorical descriptors that affect contactless sensing, including Fitzpatrick skin type, age band, sex, eyewear, facial hair, makeup, recent caffeine, nicotine, or exercise, heart-rate medication, and camera distances. No names or dates. Exported as BIDS-style `participants.tsv` and `participants.json`.
+- **Artifact labels**: buttons in the Overview and keyboard shortcuts in every tab while the protocol runs. T talking, L left seat, and O operator in view toggle on and off; C cough, M movement, D door or other person, and P phone mark the 3 seconds before the press to 1 second after. Exported as `artifacts.tsv`; the QA report lists artifact seconds per step.
+- **WiFi CSI setup**: channel, bandwidth, packet rate, and transmitter/receiver geometry, plus a 60-second empty-room baseline recorded during setup. A second CSI receiver is supported.
+- **Heart rate agreement**: live comparison of ECG, pulse oximeter, and a face-video rPPG estimate, with a warning when they differ by more than 8 bpm.
+- **Lossless face video, locked camera settings, radiometric thermal, respiration belt, and room environment sensor**: see `acquisition_agent/README.md`.
+
 ## Analysis bundle
 
 When a session ends (or with `python -m meridian_agent --code CODE --token TOKEN --export-to RECORDING_DIR`), the agent writes `export/` next to the raw recordings: `events.tsv`, `steps.tsv`, `ratings.tsv`, `tasks.tsv`, `stroop_trials.tsv`, `nback_trials.tsv`, `sync_check.tsv` (with a photodiode), `session.json`, and `qa_report.json` / `qa_report.md`. Onsets are on the acquisition host clock, matching the `host_epoch_ns` column of every sensor CSV. The QA report flags per-step coverage gaps in required streams, pauses, interrupted or restarted stimuli, repeats, timer steps that ran long or short, skipped steps, and gate outcomes.

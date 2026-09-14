@@ -64,6 +64,26 @@ During recording, Meridian writes `ecg/ecg.csv` with both the local monotonic cl
 
 The Frontier X integration follows the live-share protocol implemented in the supplied `Multimodal-Analysis-Dashboards` ECG capture. That endpoint is not a versioned public SDK, so a manufacturer webapp protocol change may require a corresponding adapter update.
 
+## Video recording for contactless sensing
+
+Face video is recorded losslessly by default (`--video-codec ffv1`, `.mkv`): JPEG-style compression removes the small colour changes remote photoplethysmography depends on. Lossless 1280x720 at 30 fps needs roughly 150 GB per hour, so for rPPG-focused studies consider `--camera-width 640 --camera-height 480` (about a quarter of that). `--video-codec mjpg` restores the old small, lossy files. Preflight now requires free disk for a 45-minute session with 50% margin.
+
+About two seconds after the camera opens, the agent locks auto exposure, white balance, and gain at their settled values and writes `face/camera_settings.json`. The Setup view shows whether the camera accepted the lock; some webcams ignore it. `--no-camera-lock` leaves automatic control on. `--camera-fps 60` requests a higher frame rate.
+
+For radiometric thermal cameras that expose 16-bit frames over UVC (for example FLIR Lepton on a PureThermal board), use `--thermal-format y16`. Frames are written as `thermal/thermal_y16.raw` (little-endian uint16) with `thermal_y16.json`; in the default `--thermal-units centikelvin`, degrees Celsius are `value / 100 - 273.15`. Every frame timestamp file has a `repeated` column that marks identical consecutive frames, such as a thermal camera's flat-field correction freeze.
+
+The Overview shows heart rate from the ECG, the pulse oximeter, and a live face-video estimate (POS method on the face region) and warns when they differ by more than 8 bpm. The face-video estimate is operator feedback only, not a recorded reference.
+
+## Additional serial sensors
+
+| Stream | Option | Line format |
+|---|---|---|
+| Second WiFi CSI receiver | `--csi2 PORT` | Same as `--csi` |
+| Respiration belt (ESP32 ADC) | `--resp PORT` (115200 baud) | `t_us,raw` or `t_us,seq,raw`; live breathing rate is shown |
+| Room environment | `--environment PORT` (115200 baud) | `t_ms,temp_c,humidity_pct,lux[,pressure_hpa]` or JSON with those keys (`rh` accepted) |
+
+These ports can also be assigned in Recording setup. In Setup, **Record empty room** captures a 60-second CSI baseline from every CSI receiver into `csi/empty_room_*.csv` before the participant sits down.
+
 ## Verification without hardware
 
 ```text

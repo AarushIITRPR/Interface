@@ -53,7 +53,8 @@ class RecordingTests(unittest.TestCase):
         self.assertTrue(writers[0].released)
         with (self.root / "face" / "face_frames.csv").open(newline="") as handle:
             rows = list(csv.reader(handle))
-        self.assertEqual(rows[0], ["frame_index", "host_epoch_ns", "monotonic_s"])
+        self.assertEqual(rows[0], ["frame_index", "host_epoch_ns", "monotonic_s", "repeated"])
+        self.assertEqual([row[3] for row in rows[1:]], ["0", "1", "1", "1", "1"])
         self.assertEqual([row[0] for row in rows[1:]], ["0", "1", "2", "3", "4"])
         self.assertEqual(rows[-1][1], "1004")
 

@@ -257,3 +257,6 @@
 .live-rig-section p { font-size: .84rem; }.live-rig-section p.good, .live-calibration .good { color: #3d6b45; }.live-rig-section p.attention, .live-calibration .attention { color: #9a4f2f; }
 .live-field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 14px; margin: 10px 0; }.live-field-grid label { display: grid; gap: 4px; font-size: .78rem; }.live-field-grid select, .live-field-grid input { min-height: 34px; padding: 4px 8px; border: 1px solid #a99d90; background: #fff; font: inherit; }
 .live-number-field { display: flex; align-items: center; gap: 6px; }.live-number-field input { width: 100%; }.live-calibration { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: .84rem; }
+.live-hr-card b { display: block; margin: 6px 0 8px; font-size: 1.4rem; }.live-hr-card ul { margin: 0 0 8px; padding: 0; list-style: none; font-size: .8rem; }.live-hr-card li { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }.live-hr-card p { margin: 0; font-size: .76rem; color: #6b625a; }
+.live-hr-card.agree b { color: #3d6b45; }.live-hr-card.disagree b { color: #9a4f2f; }.live-hr-card.disagree { border-color: #9a4f2f; }
+.live-overview-cards { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }

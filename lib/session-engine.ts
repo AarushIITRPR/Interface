@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
-import { ARTIFACT_TYPES, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, sanitizeFields } from "./rig";
+import { ARTIFACT_TYPES, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, sanitizeFields } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
 import { SAM_POINTS } from "./tasks";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
@@ -63,12 +63,13 @@ function snapshotFromRow(row: SessionRow) {
   snapshot.serverTime = now();
   const hydrated = hydrateSnapshot(snapshot);
   const step = buildPlan(hydrated.assignment)[hydrated.stepIndex];
+  hydrated.heartRateAgreement = heartRateAgreement(hydrated.sensors, Date.now());
   hydrated.gate = step?.type === "gate" && ["running","paused"].includes(hydrated.status) ? evaluateGate(hydrated.acquisition.physiology, Date.now(), Date.parse(hydrated.stepStartedAt)) : null;
   return hydrated;
 }
 
 /** Protocol snapshot as stored: telemetry and per-response fields are kept out of it. */
-const UNSTORED_FIELDS = new Set(["sensors","acquisition","operatorLastSeenAt","subjectLastSeenAt","serverTime","gate"]);
+const UNSTORED_FIELDS = new Set(["sensors","acquisition","operatorLastSeenAt","subjectLastSeenAt","serverTime","gate","heartRateAgreement"]);
 function storedSnapshot(snapshot: SessionSnapshot) {
   return JSON.stringify(Object.fromEntries(Object.entries(snapshot).filter(([key]) => !UNSTORED_FIELDS.has(key))));
 }
