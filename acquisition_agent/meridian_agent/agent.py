@@ -18,11 +18,12 @@ from urllib.request import Request, urlopen
 from . import __version__
 from .export import HostClock, auxiliary_files, build_bundle, event_marker
 from .preview import PreviewServer
-from .sensors import CameraSensor, Sensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor
+from .sensors import CameraSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor
 
 
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
-SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode")
+SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode","csi2","resp","environment")
+CSI_SENSOR_IDS = ("csi","csi2")
 
 
 def unique_session_dir(root: Path, name: str) -> Path:
@@ -88,6 +89,7 @@ class MeridianAgent:
         self.preview: PreviewServer | None = None
         self.preflight_started_mono = 0.0
         self.preflight_result: dict = {"status":"idle","detail":"Not run","completedAt":None}
+        self.calibration: dict | None = None
 
     def request(self, action: str, **content) -> dict:
         payload = {"code":self.code,"token":self.token,"action":action,**content}
@@ -131,6 +133,7 @@ class MeridianAgent:
             "previewUrls":self.preview.urls() if self.preview else {},
             "configRevision":self.config_revision,
             "preflightTest":self.preflight_result,
+            "csiCalibration":{key:value for key,value in (self.calibration or {}).items() if key in ("status","rows","detail")} or None,
         }
 
     def configure(self, requested: dict | None = None, revision: int = 0) -> None:
@@ -144,9 +147,12 @@ class MeridianAgent:
             "ecg":self.args.ecg,
             "thermal":self.args.thermal,
             "photodiode":self.args.photodiode,
+            "csi2":self.args.csi2,
+            "resp":self.args.resp,
+            "environment":self.args.environment,
         }
         values = {sensor_id:("simulate" if self.args.simulate_all else str((requested or {}).get(sensor_id,defaults[sensor_id]))) for sensor_id in SENSOR_IDS}
-        bauds = {"csi":self.args.csi_baud,"emg":self.args.emg_baud,"gsr":self.args.gsr_baud,"ecg":self.args.ecg_baud,"photodiode":self.args.photodiode_baud}
+        bauds = {"csi":self.args.csi_baud,"emg":self.args.emg_baud,"gsr":self.args.gsr_baud,"ecg":self.args.ecg_baud,"photodiode":self.args.photodiode_baud,"csi2":self.args.csi_baud,"resp":self.args.resp_baud,"environment":self.args.environment_baud}
         values,inventory = discover_serial_assignments(values,bauds)
         self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono) for sensor_id in SENSOR_IDS]
         self.device_config = values
@@ -167,6 +173,10 @@ class MeridianAgent:
         if self.recording_started:
             return
         self.inventory = discover_device_inventory()
+        if self.calibration and self.calibration["status"] == "running":
+            for sensor in self.calibration["receivers"]:
+                sensor.stop_side_capture()
+            self.calibration.update(status="failed",detail="Hardware changed during the baseline")
         for sensor in self.sensors:
             sensor.stop()
         self.configure(requested,revision)
@@ -186,6 +196,7 @@ class MeridianAgent:
             for sensor in self.sensors:
                 sensor.start_recording()
             self.recording_started = True
+        self.run_calibration(command)
         if command.get("command") == "test" and self.preflight_result.get("status") != "running":
             self.preflight_started_mono = time.monotonic()
             self.preflight_result = {"status":"running","detail":"Validating streams and local storage","completedAt":None}
@@ -201,6 +212,26 @@ class MeridianAgent:
             passed = not failed and verified and payload["diskFreeGb"] >= 10 and sync_ok
             problem = ", ".join(failed) if failed else "clock synchronization" if not sync_ok else "local storage"
             self.preflight_result = {"status":"pass" if passed else "fail","detail":"All required streams, synchronization, and local storage passed" if passed else "Check: "+problem,"completedAt":payload["completedAt"]}
+
+    def run_calibration(self, command: dict) -> None:
+        """Empty-room CSI baseline: while the server asks for it, CSI receivers also write to csi*/empty_room_*.csv."""
+        started_at = command.get("calibrationStartedAt")
+        if command.get("command") == "calibrate" and started_at and (self.calibration is None or self.calibration["startedAt"] != started_at):
+            receivers = [sensor for sensor in self.sensors if sensor.sensor_id in CSI_SENSOR_IDS and not isinstance(sensor, UnavailableSensor)]
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            self.calibration = {"startedAt":started_at,"started":time.monotonic(),"seconds":float(command.get("calibrationSec") or 60),"receivers":receivers,"status":"running","rows":0,"detail":"Recording the empty room"}
+            if not receivers:
+                self.calibration.update(status="failed",detail="No CSI receiver is connected")
+                return
+            for sensor in receivers:
+                header = getattr(sensor,"header",["host_epoch_ns","monotonic_s","sample_count","value"]) if not isinstance(sensor, SimulatedSensor) else ["host_epoch_ns","monotonic_s","sample_count","value"]
+                sensor.start_side_capture(f"{sensor.sensor_id}/empty_room_{stamp}.csv",header)
+        calibration = self.calibration
+        if calibration and calibration["status"] == "running" and time.monotonic() - calibration["started"] >= calibration["seconds"]:
+            rows = sum(sensor.stop_side_capture() for sensor in calibration["receivers"])
+            calibration["rows"] = rows
+            calibration["status"] = "done" if rows else "failed"
+            calibration["detail"] = f"{rows} packets from {len(calibration['receivers'])} receiver(s)" if rows else "No CSI packets arrived during the baseline"
 
     def write_marker(self, command: dict) -> None:
         step = command.get("step") or {}
@@ -332,6 +363,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--thermal",default="none",help="Thermal camera index/path")
     result.add_argument("--photodiode",default="none",help="Photodiode (screen sync patch) serial port, or none")
     result.add_argument("--photodiode-baud",type=int,default=921600)
+    result.add_argument("--csi2",default="none",help="Second ESP32 CSI receiver serial port, or none")
+    result.add_argument("--resp",default="none",help="Respiration belt serial port, or none")
+    result.add_argument("--resp-baud",type=int,default=115200)
+    result.add_argument("--environment",default="none",help="Room environment sensor serial port, or none")
+    result.add_argument("--environment-baud",type=int,default=115200)
     result.add_argument("--preview-port",type=int,default=8765,help="Loopback-only camera preview port")
     result.add_argument("--simulate-all",action="store_true",help="Use deterministic simulated streams for integration testing")
     result.add_argument("--export-to",default="",help="Write the analysis bundle for an existing recording directory without recording")
@@ -341,7 +377,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     if args.simulate_all:
-        for name in ("camera","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode"):
+        for name in ("camera","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode","csi2","resp","environment"):
             setattr(args,name,"simulate")
     if not args.code or not args.token:
         print("Session code and acquisition token are required",file=sys.stderr)

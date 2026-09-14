@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from .models import RecordingArtifact, SensorReport
 
 
-TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0,"photodiode":1000.0}
+TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0}
 
 FRONTIERX_SCALE_PER_COUNT = 0.0000038146972
 FRONTIERX_SAMPLE_RATE_HZ = 125.0
@@ -66,6 +66,8 @@ class Sensor:
         self._total_gap_s = 0.0
         self._longest_gap_s = 0.0
         self._previous_sample_mono = 0.0
+        self._side_capture: tuple | None = None
+        self._side_rows = 0
         self._report.targetRateHz = TARGET_RATES.get(sensor_id)
 
     def start(self) -> None:
@@ -86,6 +88,33 @@ class Sensor:
             self._recording_started_mono = time.monotonic()
             self.started_at = iso_now()
             self._recording.set()
+
+    def start_side_capture(self, relative_path: str, header: list[str]) -> Path:
+        """Write rows to a separate file outside the main recording, e.g. an empty-room CSI baseline during setup."""
+        path = self.session_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("w", newline="", buffering=1)
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        with self._lock:
+            self._side_capture = (handle, writer)
+            self._side_rows = 0
+        return path
+
+    def stop_side_capture(self) -> int:
+        with self._lock:
+            capture, self._side_capture = self._side_capture, None
+            rows = self._side_rows
+        if capture:
+            capture[0].close()
+        return rows
+
+    def _side_write(self, row: list[object]) -> None:
+        with self._lock:
+            if self._side_capture is None:
+                return
+            self._side_capture[1].writerow(row)
+            self._side_rows += 1
 
     def record_dropped(self, sample_count: int) -> None:
         """Count samples lost before they reached the recorder, such as a full audio or video queue."""
@@ -227,7 +256,7 @@ class UnavailableSensor(Sensor):
 
 
 class SimulatedSensor(Sensor):
-    RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":50.0,"ecg":500.0,"thermal":9.0,"photodiode":1000.0}
+    RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":50.0,"ecg":500.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0}
 
     def __init__(self, sensor_id: str, session_dir: Path, origin_mono: float):
         super().__init__(sensor_id,"simulator",session_dir,origin_mono)
@@ -267,8 +296,20 @@ class SimulatedSensor(Sensor):
                     metrics = {"levelPct":round(point),"sampleRate":48000}
                 elif self.sensor_id in ("face","thermal"):
                     metrics = {"width":1280 if self.sensor_id == "face" else 640,"height":720 if self.sensor_id == "face" else 480,"fps":rate,"droppedFrames":0}
+                elif self.sensor_id == "resp":
+                    point = 2048 + 600 * math.sin(phase / 1.6)
+                    latest = "15 breaths/min"
+                    metrics = {"breathingRate":15.0,"raw":round(point)}
+                elif self.sensor_id == "environment":
+                    latest = "23.4 C, 48% RH, 310 lux"
+                    metrics = {"tempC":23.4,"humidityPct":48.0,"lux":310.0}
+                elif self.sensor_id == "csi2":
+                    latest = "RSSI -52 dBm"
+                    metrics = {"rssi":-52,"lostPackets":0,"subcarriers":52}
+                row = [time.time_ns(),f"{time.monotonic()-self.origin_mono:.6f}",batch,latest]
                 if self._recording.is_set():
-                    writer.writerow([time.time_ns(),f"{time.monotonic()-self.origin_mono:.6f}",batch,latest])
+                    writer.writerow(row)
+                self._side_write(row)
                 self.sample(latest,32 if self._recording.is_set() else 0,batch,rate,point,metrics,validation)
 
 
@@ -329,6 +370,7 @@ class SerialLineSensor(Sensor):
                         row = [time.time_ns(), f"{time.monotonic() - self.origin_mono:.6f}", *values]
                         if self._recording.is_set():
                             writer.writerow(row)
+                        self._side_write(row)
                         point,metrics,validation = self.telemetry(values)
                         self.sample(latest,len(raw) if self._recording.is_set() else 0,point=point,metrics=metrics,validation=validation)
                 except Exception as exc:
@@ -371,8 +413,8 @@ class EmgSensor(SerialLineSensor):
         return float(centered),{"raw":raw,"rms":round(abs(centered)/2048,3),"clippingPct":100.0 if raw in (0,4095) else 0.0},["Hardware detected","EMG packet format valid","Samples arriving"]
 
 
-class PhotodiodeSensor(SerialLineSensor):
-    """Light sensor on the subject screen's sync patch, read by an ESP32 as `t_us,raw` or `t_us,seq,raw` lines."""
+class AdcLineSensor(SerialLineSensor):
+    """ESP32 analogue channel sent as `t_us,raw` or `t_us,seq,raw` lines."""
 
     header = ["host_epoch_ns", "monotonic_s", "device_t_us", "raw"]
 
@@ -388,11 +430,94 @@ class PhotodiodeSensor(SerialLineSensor):
             return None
         return [device_t, raw], f"Level {raw}"
 
+
+class PhotodiodeSensor(AdcLineSensor):
+    """Light sensor on the subject screen's sync patch."""
+
     def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
         raw = int(values[1])
         low = min(raw, int(self._metrics.get("minLevel", raw)))
         high = max(raw, int(self._metrics.get("maxLevel", raw)))
         return float(raw),{"level":raw,"minLevel":low,"maxLevel":high},["Hardware detected","Photodiode line format valid","Samples arriving"]
+
+
+def breathing_rate_bpm(times_s: list[float], values: list[float]) -> float | None:
+    """Breaths per minute from a respiration belt trace: smoothed, mean-removed, upward zero crossings with hysteresis."""
+    if len(values) < 20 or times_s[-1] - times_s[0] < 10:
+        return None
+    window = max(1, len(values) // max(1, round(times_s[-1] - times_s[0])) // 2)
+    smoothed = [sum(values[max(0, i - window):i + window + 1]) / len(values[max(0, i - window):i + window + 1]) for i in range(len(values))]
+    mean = sum(smoothed) / len(smoothed)
+    centred = [value - mean for value in smoothed]
+    spread = (max(centred) - min(centred)) or 1.0
+    band = 0.1 * spread
+    crossings = []
+    state = centred[0] > 0
+    for stamp, value in zip(times_s, centred):
+        if not state and value > band:
+            crossings.append(stamp)
+            state = True
+        elif state and value < -band:
+            state = False
+    if len(crossings) < 2:
+        return None
+    return round(60 * (len(crossings) - 1) / (crossings[-1] - crossings[0]), 1)
+
+
+class RespirationSensor(AdcLineSensor):
+    """Chest respiration belt (strain gauge or conductive rubber) on an ESP32 ADC, the breathing-rate reference."""
+
+    def __init__(self, sensor_id: str, port: str, baud: int, session_dir: Path, origin_mono: float):
+        super().__init__(sensor_id, port, baud, session_dir, origin_mono)
+        self._trace: deque[tuple[float, float]] = deque(maxlen=3000)
+        self._last_rate_mono = 0.0
+
+    def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
+        raw = float(values[1])
+        current = time.monotonic()
+        self._trace.append((current, raw))
+        while self._trace and current - self._trace[0][0] > 30:
+            self._trace.popleft()
+        metrics: dict = {"raw": raw}
+        if current - self._last_rate_mono >= 2:
+            self._last_rate_mono = current
+            rate = breathing_rate_bpm([t for t, _ in self._trace], [v for _, v in self._trace])
+            if rate is not None:
+                metrics["breathingRate"] = rate
+        return raw,metrics,["Hardware detected","Respiration line format valid","Samples arriving"]
+
+
+class EnvironmentSensor(SerialLineSensor):
+    """Room temperature, humidity, light at the face, and pressure (e.g. BME280 + light sensor), about 1 Hz.
+
+    Accepts `t_ms,temp_c,humidity_pct,lux[,pressure_hpa]` or JSON with the same keys (`rh` for humidity).
+    """
+
+    header = ["host_epoch_ns", "monotonic_s", "device_t_ms", "temp_c", "humidity_pct", "lux", "pressure_hpa"]
+
+    def parse(self, line: str) -> tuple[list[object], str] | None:
+        if line.startswith("#"):
+            return None
+        try:
+            if line.startswith("{"):
+                data = json.loads(line)
+                values = [data.get("t_ms", ""), data.get("temp_c"), data.get("humidity_pct", data.get("rh")), data.get("lux"), data.get("pressure_hpa", "")]
+            else:
+                parts = line.split(",")
+                if len(parts) not in (4, 5):
+                    return None
+                values = parts + ([""] if len(parts) == 4 else [])
+            temp, humidity, lux = float(values[1]), float(values[2]), float(values[3])
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return None
+        pressure = "" if values[4] in ("", None) else float(values[4])
+        return [values[0], temp, humidity, lux, pressure], f"{temp:.1f} C, {humidity:.0f}% RH, {lux:.0f} lux"
+
+    def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
+        metrics = {"tempC": float(values[1]), "humidityPct": float(values[2]), "lux": float(values[3])}
+        if values[4] != "":
+            metrics["pressureHpa"] = float(values[4])
+        return float(values[3]),metrics,["Hardware detected","Environment line format valid","Samples arriving"]
 
 
 class CsiSensor(SerialLineSensor):
@@ -1089,6 +1214,14 @@ def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin
         return EmgSensor(sensor_id,value,baud,session_dir,origin_mono)
     if sensor_id == "gsr":
         return GsrSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id in ("resp", "environment", "csi2") and value == "auto":
+        return UnavailableSensor(sensor_id,"Select the serial port in Recording setup",session_dir,origin_mono)
+    if sensor_id == "resp":
+        return RespirationSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id == "environment":
+        return EnvironmentSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id == "csi2":
+        return CsiSensor(sensor_id,value,baud,session_dir,origin_mono)
     if sensor_id == "photodiode":
         if value == "auto":
             return UnavailableSensor(sensor_id,"Select the photodiode serial port in Recording setup",session_dir,origin_mono)

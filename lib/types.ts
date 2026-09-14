@@ -79,7 +79,7 @@ export type ExperimentEvent = {
 export type SensorChannel = {
   id: string;
   label: string;
-  group: "video" | "audio" | "physio" | "gaze" | "sync" | "interaction";
+  group: "video" | "audio" | "physio" | "gaze" | "sync" | "interaction" | "environment";
   status: SensorStatus;
   latencyMs: number | null;
   detail: string;
@@ -186,6 +186,12 @@ export type SessionSnapshot = {
   preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null };
   createdAt: string;
   updatedAt: string;
+  /** Categorical participant descriptors (skin type, age band, eyewear, ...) for interpreting contactless sensing. */
+  participantMetadata?: { values: Record<string, string | number>; updatedAt: string };
+  /** WiFi CSI room geometry and radio settings. */
+  csiSetup?: { values: Record<string, string | number>; updatedAt: string };
+  /** Empty-room CSI baseline recorded during setup. */
+  csiCalibration?: { status: "running" | "done" | "failed"; detail: string; startedAt: string; completedAt: string | null; rows: number; durationSec: number };
   /** Safety screening answers recorded by the operator before the session starts. */
   screening?: { answers: Record<string, boolean>; completedAt: string };
   /** Return-to-baseline evaluation for the current gate step, computed on read. */
@@ -262,4 +268,6 @@ export const SENSOR_CATALOG: Array<Pick<SensorChannel, "id" | "label" | "group">
   { id: "photodiode", label: "Photodiode", group: "sync" },
   { id: "screen", label: "Screen capture", group: "video" },
   { id: "interaction", label: "Interaction log", group: "interaction" },
+  { id: "csi2", label: "WiFi CSI receiver 2", group: "physio" },
+  { id: "environment", label: "Room environment", group: "environment" },
 ];

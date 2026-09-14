@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
+import { ARTIFACT_TYPES, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, sanitizeFields } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
 import { SAM_POINTS } from "./tasks";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
@@ -13,8 +14,8 @@ const OPERATOR_LEASE_MS = 12_000;
 const AUTO_ADVANCE_TOLERANCE_MS = 1_500;
 const SAVE_ATTEMPTS = 6;
 export const ACQUISITION_LEASE_MS = 10_000;
-const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9,photodiode:1000 };
-const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none",photodiode:"none" };
+const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9,photodiode:1000,csi2:100,resp:50,environment:1 };
+const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none",photodiode:"none",csi2:"none",resp:"none",environment:"none" };
 /** Streams the acquisition agent can record; the rest of SENSOR_CATALOG is reserved for future devices. */
 const AGENT_SENSOR_IDS = Object.keys(DEFAULT_DEVICE_CONFIG);
 
@@ -89,7 +90,7 @@ function eventStatement(sessionId: string, event: ExperimentEvent, guard?: { cod
 }
 
 function protocolSignature(snapshot: SessionSnapshot) {
-  return JSON.stringify([snapshot.status,snapshot.stepIndex,snapshot.stepStartedAt,snapshot.preflightTest,snapshot.events.length,snapshot.subjectMedia]);
+  return JSON.stringify([snapshot.status,snapshot.stepIndex,snapshot.stepStartedAt,snapshot.preflightTest,snapshot.events.length,snapshot.subjectMedia,snapshot.csiCalibration]);
 }
 
 const SENSOR_START_GRACE_MS = 15_000;
@@ -420,6 +421,28 @@ export async function mutateSession(code: string, action: string, payload: Actio
       current.preflightTest={status:"running",detail:"Validating selected devices for 10 seconds",completedAt:null};
       appendEvent(current,{eventType:"preflight_started",label:"Preflight test started",source:"operator"});
     }
+    if (action === "participantMetadata" && !["complete","aborted"].includes(current.status)) {
+      const values = sanitizeFields(PARTICIPANT_FIELDS, payload.values);
+      current.participantMetadata = { values, updatedAt:now() };
+      const missing = missingParticipantFields(values);
+      appendEvent(current,{ eventType:"participant_metadata", label:"Participant details saved", detail:missing.length ? `Missing: ${missing.join(", ")}` : "Complete", source:"operator", metadata:{ values, missing } });
+    }
+    if (action === "csiSetup" && !["complete","aborted"].includes(current.status)) {
+      const values = sanitizeFields(CSI_SETUP_FIELDS, payload.values);
+      current.csiSetup = { values, updatedAt:now() };
+      appendEvent(current,{ eventType:"csi_setup", label:"WiFi CSI setup saved", source:"operator", metadata:{ values } });
+    }
+    if (action === "csiCalibration" && current.status === "setup" && current.csiCalibration?.status !== "running") {
+      current.csiCalibration = { status:"running", detail:"Recording the empty room", startedAt:now(), completedAt:null, rows:0, durationSec:CSI_CALIBRATION_SEC };
+      appendEvent(current,{ eventType:"csi_calibration_started", label:"Empty-room CSI baseline started", detail:`${CSI_CALIBRATION_SEC} s`, source:"operator" });
+    }
+    if (action === "artifact" && ["running","paused"].includes(current.status)) {
+      const type = ARTIFACT_TYPES.find((item) => item.id === payload.type);
+      if (!type) throw new Error("Unknown artifact type.");
+      let kind: "point" | "start" | "end" = "point";
+      if (type.kind === "span") kind = openArtifactSpans(current.events).has(type.id) ? "end" : "start";
+      appendEvent(current,{ eventType:"artifact", label:`Artifact: ${type.label}${kind === "start" ? " started" : kind === "end" ? " ended" : ""}`, severity:"warn", source:"operator", metadata:{ type:type.id, kind } });
+    }
     if (action === "screening" && current.status === "setup") {
       const incoming = payload.answers && typeof payload.answers === "object" ? payload.answers as Record<string,unknown> : {};
       const answers = Object.fromEntries(SCREENING_QUESTIONS.filter((item) => typeof incoming[item.id] === "boolean").map((item) => [item.id, incoming[item.id] as boolean]));
@@ -531,6 +554,13 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
     });
   }
   recordPhysiology(snapshot);
+  if (payload.csiCalibration && typeof payload.csiCalibration === "object" && snapshot.csiCalibration?.status === "running") {
+    const report = payload.csiCalibration as Record<string,unknown>;
+    if (["done","failed"].includes(String(report.status))) {
+      snapshot.csiCalibration = { ...snapshot.csiCalibration, status:String(report.status) as "done" | "failed", detail:clean(report.detail,200), completedAt:now(), rows:finite(report.rows,0,Number.MAX_SAFE_INTEGER) };
+      appendEvent(snapshot,{ eventType:"csi_calibration_completed", label:`Empty-room CSI baseline ${report.status}`, detail:snapshot.csiCalibration.detail, severity:report.status === "failed" ? "error" : "info", source:"sensor", metadata:{ rows:snapshot.csiCalibration.rows } });
+    }
+  }
   if (payload.preflightTest && typeof payload.preflightTest === "object") {
     const test=payload.preflightTest as Record<string,unknown>;
     const status=["idle","running","pass","fail"].includes(String(test.status)) ? String(test.status) as SessionSnapshot["preflightTest"]["status"] : "idle";
@@ -586,10 +616,10 @@ function sanitizePreviewUrls(value: unknown){const result:Record<string,string>=
 
 export function acquisitionCommand(snapshot: SessionSnapshot) {
   const step = buildPlan(snapshot.assignment)[snapshot.stepIndex] ?? null;
-  const command = ["complete","aborted"].includes(snapshot.status)?"finalize":snapshot.status==="setup"?(snapshot.preflightTest.status==="running"?"test":"probe"):"record";
+  const command = ["complete","aborted"].includes(snapshot.status)?"finalize":snapshot.status==="setup"?(snapshot.csiCalibration?.status==="running"?"calibrate":snapshot.preflightTest.status==="running"?"test":"probe"):"record";
   return {
     serverTime:now(), sessionCode:snapshot.code, participantId:snapshot.participantId,
-    command,deviceConfig:snapshot.deviceConfig,configRevision:snapshot.configRevision,requiredSensors:snapshot.requiredSensors,
+    command,calibrationSec:snapshot.csiCalibration?.durationSec ?? CSI_CALIBRATION_SEC,calibrationStartedAt:snapshot.csiCalibration?.startedAt ?? null,deviceConfig:snapshot.deviceConfig,configRevision:snapshot.configRevision,requiredSensors:snapshot.requiredSensors,
     sessionStatus:snapshot.status, revision:snapshot.revision, stepIndex:snapshot.stepIndex,
     step:step?{id:step.id,label:shortLabel(step),phase:step.phase,startedAt:snapshot.stepStartedAt,attempt:snapshot.attempt}:null,
     // Recent ledger entries let the agent write event markers stamped with when they happened, not when it polled.
@@ -612,5 +642,7 @@ export function acquisitionExport(snapshot: SessionSnapshot) {
     deviceConfig:snapshot.deviceConfig, media:snapshot.media, hardwareGateOverride:snapshot.hardwareGateOverride,
     plan:plan.map((step) => ({ id:step.id, index:step.index, type:step.type, title:step.title, label:shortLabel(step), phase:step.phase, emotion:step.emo ?? null, durationSec:step.durationSec ?? null, advance:step.advance })),
     events:snapshot.events.map(agentEvent), ratings:snapshot.ratings, notes:snapshot.notes, bpReadings:snapshot.bpReadings,
+    participantMetadata:snapshot.participantMetadata?.values ?? {}, participantFields:PARTICIPANT_FIELDS,
+    csiSetup:snapshot.csiSetup?.values ?? {}, csiSetupFields:CSI_SETUP_FIELDS, csiCalibration:snapshot.csiCalibration ?? null,
   };
 }

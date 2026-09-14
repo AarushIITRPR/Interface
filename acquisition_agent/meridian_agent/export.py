@@ -16,6 +16,9 @@ from datetime import datetime
 from pathlib import Path
 
 PAUSE_START_EVENTS = {"session_paused", "operator_lost", "sensor_lost"}
+# Matches POINT_ARTIFACT_WINDOW in lib/rig.ts: the operator presses after noticing the event.
+POINT_ARTIFACT_BEFORE_S = 3.0
+POINT_ARTIFACT_AFTER_S = 1.0
 MIN_STEP_COVERAGE_PCT = 95.0
 
 
@@ -297,7 +300,14 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
         [[_seconds(m["hostEpochNs"], origin_ns), m["eventType"], m["stepId"], {key: value for key, value in m["metadata"].items() if key not in ("trialData", "clientTime")}] for m in task_events])
     write_trial_tables(out, task_events)
 
-    report = qa_report(export, session_dir, windows, artifacts)
+    artifact_list = artifact_windows(markers)
+    _write_tsv(out / "artifacts.tsv", ["onset_s", "duration_s", "type", "kind", "step_id", "unclosed"],
+        [[_seconds(a["start_ns"], origin_ns), f"{(a['end_ns'] - a['start_ns']) / 1e9:.3f}", a["type"], a["kind"], a["stepId"], a.get("unclosed", False)] for a in artifact_list])
+    write_participants(out, export)
+    report = qa_report(export, session_dir, windows, artifacts, artifact_list)
+    environment = next((session_dir / artifact["relativePath"] for artifact in artifacts if artifact["sensorId"] == "environment" and artifact["relativePath"].endswith(".csv")), None)
+    if environment and environment.exists():
+        report["environment"] = environment_summary(environment)
     photodiode = next((session_dir / artifact["relativePath"] for artifact in artifacts if artifact["sensorId"] == "photodiode" and artifact["relativePath"].endswith(".csv")), None)
     if photodiode and photodiode.exists():
         sync = sync_check(markers, photodiode_edges(photodiode))
@@ -312,11 +322,65 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     session["streams"] = artifacts
     session["auxiliaryFiles"] = auxiliary_files(session_dir)
     session["bpReadings"] = export.get("bpReadings", [])
+    session["participant"] = export.get("participantMetadata", {})
+    session["csiSetup"] = export.get("csiSetup", {})
+    session["csiCalibration"] = export.get("csiCalibration")
     session["notes"] = export.get("notes", [])
     (out / "session.json").write_text(json.dumps(session, indent=2), encoding="utf-8")
     (out / "qa_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     (out / "qa_report.md").write_text(qa_markdown(report), encoding="utf-8")
     return report
+
+
+def artifact_windows(markers: list[dict]) -> list[dict]:
+    """Operator artifact labels as host-clock windows: points cover the reaction lag, spans run from start to end."""
+    windows: list[dict] = []
+    open_spans: dict[str, dict] = {}
+    last_ns = max((m["hostEpochNs"] for m in markers if m["hostEpochNs"] is not None), default=None)
+    for marker in markers:
+        if marker["eventType"] != "artifact" or marker["hostEpochNs"] is None:
+            continue
+        meta = marker["metadata"]
+        kind, kind_type, stamp = meta.get("kind"), str(meta.get("type")), marker["hostEpochNs"]
+        if kind == "point":
+            windows.append({"type": kind_type, "kind": "point", "stepId": marker["stepId"], "start_ns": stamp - int(POINT_ARTIFACT_BEFORE_S * 1e9), "end_ns": stamp + int(POINT_ARTIFACT_AFTER_S * 1e9)})
+        elif kind == "start":
+            open_spans[kind_type] = {"type": kind_type, "kind": "span", "stepId": marker["stepId"], "start_ns": stamp}
+        elif kind == "end" and kind_type in open_spans:
+            window = open_spans.pop(kind_type)
+            window["end_ns"] = stamp
+            windows.append(window)
+    for window in open_spans.values():
+        window["end_ns"] = last_ns if last_ns is not None else window["start_ns"]
+        window["unclosed"] = True
+        windows.append(window)
+    return sorted(windows, key=lambda item: item["start_ns"])
+
+
+def overlap_seconds(start_ns: int, end_ns: int, other_start: int, other_end: int) -> float:
+    return max(0, min(end_ns, other_end) - max(start_ns, other_start)) / 1e9
+
+
+def environment_summary(path: Path) -> dict | None:
+    """Session ranges for room temperature, humidity, and light; a large light change is flagged for rPPG."""
+    columns: dict[str, list[float]] = {"temp_c": [], "humidity_pct": [], "lux": []}
+    with path.open(newline="", encoding="utf-8", errors="replace") as handle:
+        for row in csv.DictReader(handle):
+            for key in columns:
+                try:
+                    columns[key].append(float(row[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+    if not any(columns.values()):
+        return None
+    summary: dict = {}
+    for key, values in columns.items():
+        if values:
+            ordered = sorted(values)
+            summary[key] = {"min": round(ordered[0], 2), "median": round(ordered[len(ordered) // 2], 2), "max": round(ordered[-1], 2)}
+    lux = summary.get("lux")
+    summary["lightingChanged"] = bool(lux and lux["median"] > 0 and (lux["max"] - lux["min"]) / lux["median"] > 0.3)
+    return summary
 
 
 TRIAL_TABLES = {
@@ -339,7 +403,25 @@ def write_trial_tables(out: Path, task_events: list[dict]) -> None:
             _write_tsv(out / name, ["step_id", "seed", "level"] + columns, rows)
 
 
-def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: list[dict]) -> dict:
+def write_participants(out: Path, export: dict) -> None:
+    """BIDS-style participants.tsv (one row) with a participants.json data dictionary."""
+    fields = export.get("participantFields") or []
+    values = export.get("participantMetadata") or {}
+    columns = ["participant_id", "session_code"] + [field["id"] for field in fields]
+    row = [f"sub-{int(export.get('participantId') or 0):03d}", export.get("sessionCode")] + [values.get(field["id"], "n/a") for field in fields]
+    _write_tsv(out / "participants.tsv", columns, [row])
+    dictionary = {"participant_id": {"Description": "Participant number, zero padded"}, "session_code": {"Description": "Meridian session code"}}
+    for field in fields:
+        entry = {"LongName": field["label"]}
+        if field.get("options"):
+            entry["Levels"] = {option: option for option in field["options"]}
+        if field.get("unit"):
+            entry["Units"] = field["unit"]
+        dictionary[field["id"]] = entry
+    (out / "participants.json").write_text(json.dumps(dictionary, indent=2), encoding="utf-8")
+
+
+def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: list[dict], artifact_list: list[dict] | None = None) -> dict:
     required = set(export.get("requiredSensors") or [])
     files = stream_files(session_dir, artifacts)
     times = {sensor: read_host_times(path) for sensor, path in files.items()}
@@ -375,17 +457,35 @@ def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: l
             issues.append(f"active duration {active:.1f}s vs planned {planned}s")
         if window["type"] == "clip" and window["stimulus_onset_ns"] is None and window["end"] != "repeated":
             issues.append("no stimulus onset recorded")
+        artifact_seconds: dict[str, float] = {}
+        if start is not None and end is not None:
+            for item in artifact_list or []:
+                seconds = overlap_seconds(start, end, item["start_ns"], item["end_ns"])
+                if seconds > 0:
+                    artifact_seconds[item["type"]] = artifact_seconds.get(item["type"], 0.0) + seconds
+        if artifact_seconds:
+            issues.append("artifacts: " + ", ".join(f"{name} {seconds:.0f}s" for name, seconds in sorted(artifact_seconds.items())))
         flagged += bool(issues)
         steps.append({"stepIndex": window["step_index"], "stepId": window["step_id"], "attempt": window["attempt"], "label": window["label"],
             "durationSec": None if window.get("duration_s") is None else round(window["duration_s"], 3),
             "activeDurationSec": None if active is None else round(active, 3), "plannedDurationSec": planned,
-            "stimulusLoadDelayMs": window["stimulus_load_delay_ms"], "streams": streams, "issues": issues})
+            "stimulusLoadDelayMs": window["stimulus_load_delay_ms"], "artifactSeconds": {k: round(v, 1) for k, v in artifact_seconds.items()}, "streams": streams, "issues": issues})
     events = export.get("events", [])
     skipped = [{"stepId": e.get("stepId"), "detail": e.get("detail")} for e in events if e.get("eventType") == "step_skipped"]
     gates = [{"stepId": e.get("stepId"), "outcome": e.get("eventType"), "reason": e.get("detail")} for e in events if e.get("eventType") in ("gate_verified", "gate_override", "gate_unverified")]
+    missing_metadata = [field["id"] for field in export.get("participantFields") or [] if field.get("required") and not (export.get("participantMetadata") or {}).get(field["id"])]
+    calibration = export.get("csiCalibration") or {}
     return {"sessionCode": export.get("sessionCode"), "participantId": export.get("participantId"), "status": export.get("status"),
+        "missingParticipantFields": missing_metadata, "csiEmptyRoomBaseline": calibration.get("status", "not recorded"),
         "requiredSensors": sorted(required), "minCoveragePct": MIN_STEP_COVERAGE_PCT, "stepsFlagged": flagged, "stepCount": len(steps),
         "skippedSteps": skipped, "gates": gates, "steps": steps}
+
+
+def environment_line(environment: dict | None) -> str:
+    if not environment:
+        return "Room environment: not recorded."
+    parts = [f"{label} {environment[key]['min']}-{environment[key]['max']}{unit}" for key, label, unit in (("temp_c", "temperature", " C"), ("humidity_pct", "humidity", "%"), ("lux", "light", " lux")) if key in environment]
+    return "Room environment: " + ", ".join(parts) + (". Lighting changed by more than 30% during the session." if environment.get("lightingChanged") else ".")
 
 
 def sync_line(sync: dict | None) -> str:
@@ -403,7 +503,9 @@ def qa_markdown(report: dict) -> str:
         f"Required streams: {', '.join(report['requiredSensors']) or 'none'} (minimum {report['minCoveragePct']}% coverage per step).", "",
         f"Skipped by screening: {', '.join(item['detail'] for item in report.get('skippedSteps', [])) or 'none'}.",
         f"Return-to-baseline gates: {', '.join(item['outcome'].replace('gate_', '') for item in report.get('gates', [])) or 'none'}.",
-        sync_line(report.get("syncCheck")), "",
+        sync_line(report.get("syncCheck")),
+        f"Participant details missing: {', '.join(report.get('missingParticipantFields') or []) or 'none'}. CSI empty-room baseline: {report.get('csiEmptyRoomBaseline', 'not recorded')}.",
+        environment_line(report.get("environment")), "",
         "| # | Step | Attempt | Active s | Planned s | Issues |", "|---|---|---|---|---|---|"]
     for step in report["steps"]:
         issues = "; ".join(step["issues"]) or "OK"

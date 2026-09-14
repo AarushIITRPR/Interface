@@ -30,7 +30,7 @@ export async function POST(request: Request) {
         recordingRoot:agent.recordingRoot,inventory:agent.inventory,diskFreeGb:agent.diskFreeGb,
         estimatedHours:agent.estimatedHours,clockOffsetMs:agent.clockOffsetMs,openFileCount:agent.openFileCount,
         droppedPct:agent.droppedPct,previewUrls:agent.previewUrls,configRevision:agent.configRevision,
-        preflightTest:agent.preflightTest,sensors:Array.isArray(body.sensors)?body.sensors:[],
+        preflightTest:agent.preflightTest,csiCalibration:agent.csiCalibration,sensors:Array.isArray(body.sensors)?body.sensors:[],
       }) ?? session;
     } else if (body.action === "finalize") {
       current = await mutateSession(code,"acquisitionFinalize",{recordings:Array.isArray(body.recordings)?body.recordings:[]}) ?? session;
