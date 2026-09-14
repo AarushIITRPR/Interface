@@ -1,5 +1,7 @@
 import { env } from "cloudflare:workers";
-import { assignFor, buildPlan, shortLabel } from "./protocol";
+import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel } from "./protocol";
+import { QUESTIONNAIRES, scoreQuestionnaire, validAnswers } from "./questionnaires";
+import { STIMULI, stimulusById } from "./stimuli";
 import { ARTIFACT_TYPES, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, sanitizeFields } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
 import { SAM_POINTS } from "./tasks";
@@ -36,6 +38,8 @@ async function createSchema() {
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_events_session_sequence ON events(session_id, sequence)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS media_assets (id TEXT PRIMARY KEY, object_key TEXT NOT NULL, filename TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, created_at TEXT NOT NULL)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_media_created ON media_assets(created_at DESC)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS annotations (id TEXT PRIMARY KEY, code TEXT NOT NULL, step_id TEXT NOT NULL, chunk INTEGER NOT NULL, samples_json TEXT NOT NULL, created_at TEXT NOT NULL)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_annotations_code ON annotations(code, step_id, chunk)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS session_telemetry (code TEXT PRIMARY KEY, sensors_json TEXT, acquisition_json TEXT, operator_last_seen_at TEXT, subject_last_seen_at TEXT, updated_at TEXT NOT NULL)`),
   ]);
 }
@@ -240,7 +244,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   const plan = buildPlan(snapshot.assignment);
   const current = plan[snapshot.stepIndex] ?? null;
   let mediaSrc = "";
-  if (current?.type === "clip" && current.emo) mediaSrc = snapshot.media.emotions[current.emo];
+  if ((current?.type === "clip" || current?.type === "annotation") && current.clip) mediaSrc = clipSource(snapshot.assignment, current.clip, snapshot.media.emotions);
   if (current?.type === "washout") mediaSrc = snapshot.media.washout;
   if (current?.type === "bodyscan") mediaSrc = snapshot.media.bodyScan;
   if (current?.fixation) mediaSrc = snapshot.media.fixation;
@@ -252,7 +256,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
     serverTime: now(),
     // A photodiode on the screen corner needs the sync patch; without one the patch stays hidden from the subject.
     syncPatch: Boolean(snapshot.deviceConfig.photodiode && snapshot.deviceConfig.photodiode !== "none"),
-    mediaManifest: [...new Set([...Object.values(snapshot.media.emotions),snapshot.media.washout,snapshot.media.boxBreathing,snapshot.media.bodyScan,snapshot.media.fixation].filter(Boolean))],
+    mediaManifest: [...new Set([...Object.values(snapshot.assignment.stimuli ?? {}).map((id) => stimulusById(id, STIMULI)?.src ?? ""),...Object.values(snapshot.media.emotions),snapshot.media.washout,snapshot.media.boxBreathing,snapshot.media.bodyScan,snapshot.media.fixation].filter(Boolean))],
     code: snapshot.code,
     participantId: snapshot.participantId,
     revision: snapshot.revision,
@@ -275,7 +279,9 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
       safety: current.safety,
       fixation: current.fixation,
       advance: current.advance,
-      variant: current.title === "Box breathing" ? "box_breathing" : current.title === "Breath hold" ? "breath_hold" : null,
+      questionnaireId: current.questionnaireId,
+      breathsPerMin: current.breathsPerMin,
+      variant: current.title === "Box breathing" ? "box_breathing" : current.title === "Breath hold" ? "breath_hold" : current.breathsPerMin ? "paced_breathing" : null,
     } : null,
   };
 }
@@ -393,8 +399,8 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "message") { const text=String(payload.text ?? "").trim().slice(0,180); if(text){ current.announcement={id:uid("ann"),text,kind:payload.kind === "safety" ? "safety" : "info",createdAt:now()}; appendEvent(current,{eventType:"operator_message",label:"Operator message sent",detail:text,source:"operator"}); } }
     if (action === "ack") { if(current.announcement) appendEvent(current,{eventType:"message_ack",label:"Message acknowledged",source:"subject"}); current.announcement=null; }
     if (action === "log") appendEvent(current,{eventType:String(payload.eventType ?? "subject_event"),label:String(payload.label ?? "Subject event"),detail:String(payload.detail ?? ""),severity:(payload.severity as ExperimentEvent["severity"]) ?? "info",source:(payload.source as ExperimentEvent["source"]) ?? "subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}});
-    if (action === "rating" && running && step?.type === "sam" && step.emo) {
-      const rating = { emotion:step.emo, valence:Number(payload.valence), arousal:Number(payload.arousal), dominance:Number(payload.dominance), scalePoints:SAM_POINTS, discreteEmotion:(payload.discreteEmotion as string | null) ?? null, intensity:(payload.intensity as number | null) ?? null, familiarity:(payload.familiarity as string | null) ?? null, createdAt:now() };
+    if (action === "rating" && running && step?.type === "sam" && step.clip) {
+      const rating = { emotion:step.clip, valence:Number(payload.valence), arousal:Number(payload.arousal), dominance:Number(payload.dominance), scalePoints:SAM_POINTS, discreteEmotion:(payload.discreteEmotion as string | null) ?? null, intensity:(payload.intensity as number | null) ?? null, familiarity:(payload.familiarity as string | null) ?? null, createdAt:now() };
       current.ratings.push(rating);
       appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{...rating}});
       advance(current,"Response submitted","subject");
@@ -421,6 +427,20 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "startPreflight" && current.status === "setup") {
       current.preflightTest={status:"running",detail:"Validating selected devices for 10 seconds",completedAt:null};
       appendEvent(current,{eventType:"preflight_started",label:"Preflight test started",source:"operator"});
+    }
+    if (action === "protocolOptions" && current.status === "setup" && current.stepIndex === 0) {
+      const options = sanitizeProtocolOptions(payload.options, current.assignment.options ?? DEFAULT_PROTOCOL_OPTIONS);
+      current.assignment = { ...current.assignment, options };
+      appendEvent(current,{ eventType:"protocol_options", label:"Protocol options saved", detail:Object.entries(options).filter(([,on]) => on).map(([name]) => name).join(", ") || "Core protocol only", source:"operator", metadata:{ options, steps:buildPlan(current.assignment).length } });
+    }
+    if (action === "questionnaire" && running && step?.type === "questionnaire" && step.questionnaireId) {
+      const definition = QUESTIONNAIRES[step.questionnaireId];
+      const answers = definition ? validAnswers(definition, payload.answers) : null;
+      if (!answers) throw new Error("Answer every question.");
+      const scores = scoreQuestionnaire(definition.id, answers);
+      current.questionnaires = [...(current.questionnaires ?? []), { questionnaireId:definition.id, stepId:step.id, answers, scores, createdAt:now() }];
+      appendEvent(current,{ eventType:"questionnaire_submitted", label:`${definition.id} submitted`, source:"subject", metadata:{ questionnaireId:definition.id, scores } });
+      advance(current,"Questionnaire submitted","subject");
     }
     if (action === "participantMetadata" && !["complete","aborted"].includes(current.status)) {
       const values = sanitizeFields(PARTICIPANT_FIELDS, payload.values);
@@ -504,6 +524,29 @@ export async function mutateSession(code: string, action: string, payload: Actio
 }
 
 export function getBindings() { return bindings(); }
+
+/**
+ * Continuous annotation samples are append-only and high volume, so they go to their own table instead of the
+ * session snapshot. Only the step currently being replayed accepts samples.
+ */
+export async function appendAnnotationChunk(code: string, payload: ActionPayload) {
+  await ensureSchema();
+  const session = await getSession(code);
+  if (!session) return null;
+  const step = buildPlan(session.assignment)[session.stepIndex];
+  if (step?.type !== "annotation" || step.id !== payload.expectedStepId || !["running","paused"].includes(session.status)) return session;
+  const samples = Array.isArray(payload.samples) ? payload.samples : [];
+  if (!samples.length) return session;
+  await bindings().DB.prepare(`INSERT OR IGNORE INTO annotations (id, code, step_id, chunk, samples_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .bind(`${session.code}:${step.id}:${session.attempt}:${payload.chunk}`, session.code, step.id, Number(payload.chunk), JSON.stringify({ attempt:session.attempt, samples }), now()).run();
+  return session;
+}
+
+export async function listAnnotations(code: string) {
+  await ensureSchema();
+  const result = await bindings().DB.prepare(`SELECT step_id, chunk, samples_json FROM annotations WHERE code = ? ORDER BY step_id, chunk`).bind(code).all<{ step_id:string; chunk:number; samples_json:string }>();
+  return result.results.map((row) => ({ stepId:row.step_id, chunk:row.chunk, ...(JSON.parse(row.samples_json) as { attempt:number; samples:unknown[] }) }));
+}
 
 function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPayload) {
   const seenAt = now();
@@ -644,6 +687,8 @@ export function acquisitionExport(snapshot: SessionSnapshot) {
     plan:plan.map((step) => ({ id:step.id, index:step.index, type:step.type, title:step.title, label:shortLabel(step), phase:step.phase, emotion:step.emo ?? null, durationSec:step.durationSec ?? null, advance:step.advance })),
     events:snapshot.events.map(agentEvent), ratings:snapshot.ratings, notes:snapshot.notes, bpReadings:snapshot.bpReadings,
     participantMetadata:snapshot.participantMetadata?.values ?? {}, participantFields:PARTICIPANT_FIELDS,
+    protocolOptions:snapshot.assignment.options ?? null, stimuli:Object.fromEntries(Object.entries(snapshot.assignment.stimuli ?? {}).map(([clip,id]) => [clip, stimulusById(id, STIMULI) ?? { id }])),
+    questionnaires:snapshot.questionnaires ?? [], questionnaireItems:QUESTIONNAIRES,
     csiSetup:snapshot.csiSetup?.values ?? {}, csiSetupFields:CSI_SETUP_FIELDS, csiCalibration:snapshot.csiCalibration ?? null,
   };
 }

@@ -5,6 +5,7 @@ import { MotionConfig, motion } from "motion/react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { QUESTIONNAIRES } from "@/lib/questionnaires";
 import { BREATH_HOLD_MAX_SEC, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
@@ -250,6 +251,9 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
   if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
   if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
+  if (step.type === "sweep" && step.variant === "paced_breathing") return <PacedBreathingScreen step={step} snapshot={snapshot} act={act} />;
+  if (step.type === "questionnaire") return <QuestionnaireScreen step={step} act={act} paused={snapshot.status !== "running"} />;
+  if (step.type === "annotation") return <AnnotationScreen step={step} src={snapshot.mediaSrc} act={act} audioEnabled={audioEnabled} paused={snapshot.status !== "running"} />;
   if (step.type === "sweep" && step.variant === "breath_hold") return <BreathHoldScreen step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "bodyscan") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="bodyscan" src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
   if (step.durationSec) return <TimedScreen step={step} snapshot={snapshot} act={act} mode={step.fixation ? "fixation" : "timer"} src="" audioEnabled={audioEnabled} />;
@@ -470,3 +474,64 @@ function BreathHoldScreen({step,act,paused}:{step:SubjectStep;act:(a:string,p?:R
 }
 
 function clock(value:number){const n=Math.max(0,Math.ceil(value));return`${Math.floor(n/60)}:${String(n%60).padStart(2,"0")}`}
+
+/** One item at a time; the subject can go back before submitting. */
+function QuestionnaireScreen({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
+  const questionnaire=QUESTIONNAIRES[step.questionnaireId ?? ""];
+  const [index,setIndex]=useState(0); const [answers,setAnswers]=useState<Record<string,number>>({}); const [sent,setSent]=useState(false);
+  if(!questionnaire) return <CenteredInstruction text="Please wait." />;
+  if(sent) return <CenteredInstruction text="Thank you." />;
+  const item=questionnaire.items[index]; const {scale}=questionnaire;
+  const values=Array.from({length:scale.points},(_,point)=>scale.min+point*scale.step);
+  const choose=(value:number)=>{
+    if(paused)return;
+    const next={...answers,[item.id]:value}; setAnswers(next);
+    if(index+1<questionnaire.items.length){window.setTimeout(()=>setIndex(index+1),150);return;}
+    setSent(true);
+    sendUntilAccepted(()=>act("questionnaire",{expectedStepId:step.id,answers:next}));
+  };
+  const low=item.lowLabel ?? scale.lowLabel; const high=item.highLabel ?? scale.highLabel; const dense=scale.points>10;
+  return <section className="rating-screen questionnaire-screen subject-enter"><p className="rating-count">{index+1} / {questionnaire.items.length}</p><p className="task-note">{index===0?questionnaire.instructions:questionnaire.title}</p><h1>{item.text}</h1><div className={`rating-options ${dense?"dense":""}`} style={{gridTemplateColumns:`repeat(${scale.points},1fr)`}} role="radiogroup" aria-label={`${item.text}, ${low} to ${high}`}>{values.map((value,point)=><button key={value} role="radio" aria-checked={answers[item.id]===value} className={answers[item.id]===value?"chosen":""} disabled={paused} aria-label={scale.labels?.[point] ?? `${value} of ${scale.min+(scale.points-1)*scale.step}`} title={scale.labels?.[point]} onClick={()=>choose(value)}>{dense?"":scale.labels?point+1:value}</button>)}</div><div className="rating-anchors"><span>{low}</span><span>{high}</span></div>{index>0?<button className="paper-button questionnaire-back" disabled={paused} onClick={()=>setIndex(index-1)}>Back</button>:null}</section>;
+}
+
+/** Breathing guide at a fixed rate with equal inhale and exhale, driven by the server-corrected step clock. */
+function PacedBreathingScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
+  const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
+  const remaining=useRemaining(step,snapshot,done);
+  const cycle=60/(step.breathsPerMin ?? 10); const elapsed=(step.durationSec ?? 0)-remaining; const phase=(elapsed%cycle)/cycle;
+  const level=phase<0.5?phase*2:(1-phase)*2; const inhaling=phase<0.5;
+  return <section className="subject-center paced-breathing"><h1>{inhaling?"Breathe in":"Breathe out"}</h1><div className="paced-bar" aria-hidden="true"><i style={{height:`${Math.round(8+level*92)}%`}} /></div><small>{step.breathsPerMin} breaths per minute · {Math.ceil(remaining)}</small></section>;
+}
+
+/**
+ * Continuous valence (left to right) and arousal (bottom to top) while the clip replays. The marker position is
+ * sampled every 50 ms with the server-corrected clock and sent in 2 s chunks that are retried until stored.
+ */
+function AnnotationScreen({step,src,act,audioEnabled,paused}:{step:SubjectStep;src:string;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean;paused:boolean}) {
+  const [playing,setPlaying]=useState(false); const [ended,setEnded]=useState(false); const [marker,setMarker]=useState({valence:0,arousal:0});
+  const markerRef=useRef(marker); const onsetLogged=useRef(false); const video=useRef<HTMLVideoElement>(null); const grid=useRef<HTMLDivElement>(null);
+  const buffer=useRef<number[][]>([]); const chunk=useRef(0); const outbox=useRef<Array<{chunk:number;samples:number[][]}>>([]);
+  const move=(valence:number,arousal:number)=>{const next={valence:Math.max(-1,Math.min(1,valence)),arousal:Math.max(-1,Math.min(1,arousal))};markerRef.current=next;setMarker(next);};
+  const fromPointer=(event:React.PointerEvent<HTMLDivElement>)=>{const box=grid.current?.getBoundingClientRect();if(!box||event.buttons===0&&event.type!=="pointerdown")return;move(((event.clientX-box.left)/box.width)*2-1,1-((event.clientY-box.top)/box.height)*2);};
+  const flush=useCallback(()=>{
+    if(buffer.current.length){outbox.current.push({chunk:chunk.current,samples:buffer.current});chunk.current+=1;buffer.current=[];}
+    const pending=[...outbox.current];
+    return Promise.all(pending.map((item)=>act("annotationChunk",{expectedStepId:step.id,...item}).then(()=>{outbox.current=outbox.current.filter((entry)=>entry!==item);}).catch(()=>undefined)));
+  },[act,step.id]);
+  useEffect(()=>{if(!playing||ended||paused)return;const sample=window.setInterval(()=>{if(onsetLogged.current)buffer.current.push([Math.round(serverNow()),markerRef.current.valence,markerRef.current.arousal]);},50);const send=window.setInterval(()=>void flush(),2000);return()=>{clearInterval(sample);clearInterval(send);};},[ended,flush,paused,playing]);
+  useEffect(()=>{if(!ended)return;let stopped=false;const finish=async()=>{await flush();if(outbox.current.length&&!stopped){window.setTimeout(()=>void finish(),1500);return;}sendUntilAccepted(()=>act("advance",{expectedStepId:step.id,source:"subject"}));};void finish();return()=>{stopped=true;};},[act,ended,flush,step.id]);
+  useEffect(()=>{const element=video.current;if(!element||!onsetLogged.current||ended)return;if(paused)element.pause();else void element.play().catch(()=>undefined);},[ended,paused]);
+  useEffect(()=>{const key=(event:KeyboardEvent)=>{const delta=0.1;const {valence,arousal}=markerRef.current;if(event.key==="ArrowLeft")move(valence-delta,arousal);if(event.key==="ArrowRight")move(valence+delta,arousal);if(event.key==="ArrowUp")move(valence,arousal+delta);if(event.key==="ArrowDown")move(valence,arousal-delta);};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);},[]);
+  const onPlaying=()=>{if(onsetLogged.current)return;onsetLogged.current=true;flashSyncPatch();void act("log",{expectedStepId:step.id,eventType:"media_onset",metadata:{clientTime:serverIso(),mediaTimeSec:video.current?.currentTime}}).catch(()=>undefined);};
+  const onEnded=()=>{if(ended)return;flashSyncPatch();void act("log",{expectedStepId:step.id,eventType:"media_offset",metadata:{clientTime:serverIso(),mediaTimeSec:video.current?.currentTime}}).catch(()=>undefined);setEnded(true);};
+  if(!playing) return <section className="subject-center clip-ready"><h1>{step.subjectPrompt}</h1><p className="task-note">Left to right: unpleasant to pleasant. Bottom to top: calm to excited. Drag the marker, or use the arrow keys.</p><button className="light-button" disabled={paused} onClick={()=>setPlaying(true)}>Begin</button></section>;
+  return <section className="annotation-screen">
+    {/* Registered protocol stimuli intentionally omit captions, which would alter the research material. */}
+    {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+    <video ref={video} className="annotation-video" src={mediaUrl(src)} autoPlay playsInline muted={!audioEnabled} onPlaying={onPlaying} onEnded={onEnded} />
+    <div ref={grid} className="annotation-grid" role="slider" tabIndex={0} aria-label="Valence and arousal" aria-valuetext={`valence ${marker.valence.toFixed(1)}, arousal ${marker.arousal.toFixed(1)}`} onPointerDown={fromPointer} onPointerMove={fromPointer}>
+      <span className="axis top">Excited</span><span className="axis bottom">Calm</span><span className="axis left">Unpleasant</span><span className="axis right">Pleasant</span>
+      <i style={{left:`${(marker.valence+1)*50}%`,top:`${(1-marker.arousal)*50}%`}} />
+    </div>
+  </section>;
+}

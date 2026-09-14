@@ -305,6 +305,8 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     _write_tsv(out / "artifacts.tsv", ["onset_s", "duration_s", "type", "kind", "step_id", "unclosed"],
         [[_seconds(a["start_ns"], origin_ns), f"{(a['end_ns'] - a['start_ns']) / 1e9:.3f}", a["type"], a["kind"], a["stepId"], a.get("unclosed", False)] for a in artifact_list])
     write_participants(out, export)
+    write_questionnaires(out, export, clock, origin_ns)
+    write_annotations(out, export, clock, origin_ns)
     report = qa_report(export, session_dir, windows, artifacts, artifact_list)
     environment = next((session_dir / artifact["relativePath"] for artifact in artifacts if artifact["sensorId"] == "environment" and artifact["relativePath"].endswith(".csv")), None)
     if environment and environment.exists():
@@ -324,6 +326,8 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     session["auxiliaryFiles"] = auxiliary_files(session_dir)
     session["bpReadings"] = export.get("bpReadings", [])
     session["participant"] = export.get("participantMetadata", {})
+    session["protocolOptions"] = export.get("protocolOptions")
+    session["stimuli"] = export.get("stimuli", {})
     session["csiSetup"] = export.get("csiSetup", {})
     session["csiCalibration"] = export.get("csiCalibration")
     session["notes"] = export.get("notes", [])
@@ -402,6 +406,36 @@ def write_trial_tables(out: Path, task_events: list[dict]) -> None:
                 rows.append([marker["stepId"], metadata.get("seed"), metadata.get("level")] + [trial.get(column) for column in columns])
         if rows:
             _write_tsv(out / name, ["step_id", "seed", "level"] + columns, rows)
+
+
+def write_questionnaires(out: Path, export: dict, clock: HostClock, origin_ns: int | None) -> None:
+    """Item responses (long format) and scale scores (one row per administration)."""
+    responses = export.get("questionnaires") or []
+    if not responses:
+        return
+    items = {qid: {item["id"]: item["text"] for item in definition.get("items", [])} for qid, definition in (export.get("questionnaireItems") or {}).items()}
+    _write_tsv(out / "questionnaire_items.tsv", ["questionnaire", "step_id", "item", "text", "response"],
+        [[entry["questionnaireId"], entry["stepId"], item, items.get(entry["questionnaireId"], {}).get(item, ""), value] for entry in responses for item, value in entry["answers"].items()])
+    score_names = sorted({name for entry in responses for name in entry.get("scores", {})})
+    _write_tsv(out / "questionnaire_scores.tsv", ["onset_s", "questionnaire", "step_id"] + score_names,
+        [[_seconds(clock.server_to_host_ns(entry.get("createdAt")), origin_ns), entry["questionnaireId"], entry["stepId"]] + [entry.get("scores", {}).get(name, "n/a") for name in score_names] for entry in responses])
+
+
+def write_annotations(out: Path, export: dict, clock: HostClock, origin_ns: int | None) -> None:
+    """Continuous valence and arousal (each -1 to 1) on the host clock, one row per 50 ms sample."""
+    chunks = sorted(export.get("annotations") or [], key=lambda item: (item.get("stepId"), item.get("attempt", 1), item.get("chunk", 0)))
+    if not chunks:
+        return
+    plan = {step["id"]: step for step in export.get("plan", [])}
+    offset_ns = round(clock.offset_ms * 1_000_000)
+    rows = []
+    for chunk in chunks:
+        clip = plan.get(chunk.get("stepId"), {}).get("label", "")
+        for server_ms, valence, arousal in chunk.get("samples", []):
+            host_ns = int(server_ms) * 1_000_000 - offset_ns
+            rows.append([_seconds(host_ns, origin_ns), host_ns, chunk.get("stepId"), clip, chunk.get("attempt", 1), valence, arousal])
+    rows.sort(key=lambda row: row[1])
+    _write_tsv(out / "annotations.tsv", ["onset_s", "host_epoch_ns", "step_id", "clip", "attempt", "valence", "arousal"], rows)
 
 
 def write_participants(out: Path, export: dict) -> None:

@@ -44,3 +44,12 @@ export const sessionTelemetry = sqliteTable("session_telemetry", {
   subjectLastSeenAt: text("subject_last_seen_at"),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const annotations = sqliteTable("annotations", {
+  id: text("id").primaryKey(),
+  code: text("code").notNull(),
+  stepId: text("step_id").notNull(),
+  chunk: integer("chunk").notNull(),
+  samplesJson: text("samples_json").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [index("idx_annotations_code").on(table.code, table.stepId, table.chunk)]);

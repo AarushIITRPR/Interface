@@ -1,6 +1,6 @@
 import { getOperatorUser } from "@/app/operator-auth";
 import { DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, SAM_POINTS } from "@/lib/tasks";
-import { createSession, getLatestSetupSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
+import { appendAnnotationChunk, createSession, getLatestSetupSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
 
 export const dynamic = "force-dynamic";
 
@@ -40,14 +40,14 @@ export async function POST(request: Request) {
     if (subjectView && !isSubjectAction(body.action,body.payload ?? {})) return unauthorized();
     if (!subjectView && !operator) return unauthorized();
     const payload = subjectView ? sanitizeSubjectPayload(body.action,body.payload ?? {}) : body.payload ?? {};
-    const session = await mutateSession(body.code,body.action,payload);
+    const session = body.action === "annotationChunk" ? await appendAnnotationChunk(body.code.trim().toUpperCase(),payload) : await mutateSession(body.code,body.action,payload);
     return session ? Response.json({session:subjectView ? toSubjectSnapshot(session) : session,...clockStamps(receivedAt)}) : Response.json({error:"Session not found."},{status:404});
   } catch (error) {
     return Response.json({error:error instanceof Error ? error.message : "Unable to save the session."},{status:500});
   }
 }
 
-const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat"]);
+const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","questionnaire","annotationChunk"]);
 
 function isSubjectAction(action:string,payload:Record<string,unknown>) {
   if (!SUBJECT_ACTIONS.has(action)) return false;
@@ -68,6 +68,19 @@ function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): R
     intensity:payload.discreteEmotion === "Neutral" || payload.intensity == null ? null : scale(payload.intensity,INTENSITY_POINTS),
     familiarity:oneOf(payload.familiarity,FAMILIARITY),
   };
+  if (action === "questionnaire") {
+    const raw = payload.answers && typeof payload.answers === "object" ? payload.answers as Record<string,unknown> : {};
+    return {expectedStepId,answers:Object.fromEntries(Object.entries(raw).slice(0,64).map(([key,value]) => [key.slice(0,32),Number(value)]))};
+  }
+  if (action === "annotationChunk") {
+    // Each sample is [server-corrected epoch ms, valence, arousal] with valence and arousal in [-1, 1].
+    const samples = (Array.isArray(payload.samples) ? payload.samples : []).slice(0,400).flatMap((raw) => {
+      if (!Array.isArray(raw) || raw.length !== 3) return [];
+      const [time, valence, arousal] = raw.map(Number);
+      return Number.isFinite(time) && Math.abs(valence) <= 1 && Math.abs(arousal) <= 1 ? [[Math.round(time), Math.round(valence*1000)/1000, Math.round(arousal*1000)/1000]] : [];
+    });
+    return {expectedStepId,chunk:Math.max(0,Math.min(100_000,Math.round(Number(payload.chunk) || 0))),samples};
+  }
   if (action === "taskComplete") return {expectedStepId,eventType:String(payload.eventType ?? "task_complete").slice(0,80),label:String(payload.label ?? "Task completed").slice(0,120),metadata:boundedMetadata(payload.metadata)};
   const eventType = String(payload.eventType) in MEDIA_EVENT_LABELS ? String(payload.eventType) : "subject_event";
   return {expectedStepId,eventType,label:MEDIA_EVENT_LABELS[eventType] ?? "Subject event",severity:eventType === "media_error" ? "error" : "info",source:"subject",metadata:sanitizeMediaTiming(payload.metadata)};

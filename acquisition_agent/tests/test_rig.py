@@ -10,7 +10,7 @@ from pathlib import Path
 from meridian_agent.export import HostClock, artifact_windows, build_bundle, environment_summary, event_marker
 from meridian_agent.sensors import EnvironmentSensor, RespirationSensor, SimulatedSensor, breathing_rate_bpm
 
-from test_export import event, export_fixture, ns
+from test_export import event, export_fixture, iso, ns
 
 
 class RigSensorTests(unittest.TestCase):
@@ -130,6 +130,28 @@ class RigExportTests(unittest.TestCase):
         self.assertIn("artifacts: cough 3s", washout["issues"])
         self.assertEqual(report["missingParticipantFields"], ["eyewear"])
         self.assertIn("Participant details missing: eyewear", (out / "qa_report.md").read_text())
+
+    def test_bundle_writes_questionnaires_and_annotations(self):
+        export = export_fixture()
+        export["plan"] = export["plan"] + [{"index": 3, "id": "s03-annotation-happy", "type": "annotation", "label": "Replay rating: happy", "phase": "Continuous rating", "emotion": "happy", "durationSec": None, "advance": "media"}]
+        export["questionnaireItems"] = {"nasa_tlx": {"items": [{"id": "mental", "text": "How mentally demanding was the task?"}, {"id": "effort", "text": "How hard?"}]}}
+        export["questionnaires"] = [{"questionnaireId": "nasa_tlx", "stepId": "s11-questionnaire-nasa_tlx", "answers": {"mental": 80, "effort": 60}, "scores": {"rawTlx": 70.0}, "createdAt": iso(30)}]
+        base_ms = int(ns(40) // 1_000_000)
+        export["annotations"] = [
+            {"stepId": "s03-annotation-happy", "chunk": 1, "attempt": 1, "samples": [[base_ms + 2000, 0.5, 0.25]]},
+            {"stepId": "s03-annotation-happy", "chunk": 0, "attempt": 1, "samples": [[base_ms, 0.0, 0.0], [base_ms + 50, 0.1, -0.2]]},
+        ]
+        build_bundle(export, self.root, HostClock(250.0, 0.0, ns(0), 0.0), [])
+        out = self.root / "export"
+        items = list(csv.DictReader((out / "questionnaire_items.tsv").open(), delimiter="\t"))
+        self.assertEqual([(row["item"], row["response"]) for row in items], [("mental", "80"), ("effort", "60")])
+        scores = list(csv.DictReader((out / "questionnaire_scores.tsv").open(), delimiter="\t"))
+        self.assertEqual((scores[0]["questionnaire"], scores[0]["rawTlx"]), ("nasa_tlx", "70.0"))
+        annotations = list(csv.DictReader((out / "annotations.tsv").open(), delimiter="\t"))
+        self.assertEqual([row["valence"] for row in annotations], ["0.0", "0.1", "0.5"])
+        # Server-clock sample times are shifted onto the host clock by the measured offset (250 ms).
+        self.assertEqual(int(annotations[0]["host_epoch_ns"]), ns(40) - 250_000_000)
+        self.assertEqual(annotations[0]["clip"], "Replay rating: happy")
 
 
 if __name__ == "__main__":

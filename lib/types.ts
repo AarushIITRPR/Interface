@@ -1,12 +1,22 @@
 import type { HeartRateAgreement } from "./rig";
+import type { ClipKind } from "./stimuli";
 import type { GateStatus, Physiology } from "./safety";
 
-export const PROTOCOL_VERSION = "v8";
+export const PROTOCOL_VERSION = "v9";
 
 export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"] as const;
 export type Emotion = (typeof EMOTIONS)[number];
 export type BufferKind = "stroop" | "nback" | "conversation";
-export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "end";
+export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "questionnaire" | "annotation" | "end";
+
+/** Optional protocol blocks, chosen per session during setup and fixed once recording starts. */
+export type ProtocolOptions = {
+  questionnaires: boolean;
+  pacedBreathing: boolean;
+  extendedExertion: boolean;
+  neutralClip: boolean;
+  annotationReplay: boolean;
+};
 export type SessionStatus = "setup" | "running" | "paused" | "complete" | "aborted";
 export type SensorStatus = "connected" | "recording" | "delayed" | "missing" | "error" | "unknown";
 export type SensorQuality = "disabled" | "waiting" | "good" | "degraded" | "bad";
@@ -38,6 +48,10 @@ export type Assignment = {
   block2: [Emotion, Emotion];
   block3: [Emotion, Emotion];
   fullOrder: Emotion[];
+  /** Protocol blocks for this session (v9+). Absent means the v8 protocol. */
+  options?: ProtocolOptions;
+  /** Stimulus id per clip kind from the registry (v9+). */
+  stimuli?: Partial<Record<ClipKind, string>>;
 };
 
 export type ProtocolStep = {
@@ -51,6 +65,10 @@ export type ProtocolStep = {
   phase: string;
   durationSec?: number;
   emo?: Emotion;
+  /** Clip shown or rated: an emotion or the neutral control. */
+  clip?: ClipKind;
+  questionnaireId?: string;
+  breathsPerMin?: number;
   safety?: boolean;
   bp?: boolean;
   bpLabel?: string;
@@ -168,7 +186,7 @@ export type SessionSnapshot = {
   announcement: { id: string; text: string; kind: "info" | "pause" | "safety"; createdAt: string } | null;
   events: ExperimentEvent[];
   notes: Array<{ id: string; body: string; category: string; stepId: string; stepLabel: string; createdAt: string }>;
-  ratings: Array<{ emotion: Emotion; valence: number; arousal: number; dominance: number; scalePoints?: number; discreteEmotion?: string | null; intensity?: number | null; familiarity?: string | null; createdAt: string }>;
+  ratings: Array<{ emotion: ClipKind; valence: number; arousal: number; dominance: number; scalePoints?: number; discreteEmotion?: string | null; intensity?: number | null; familiarity?: string | null; createdAt: string }>;
   sensors: SensorChannel[];
   bpReadings: Array<{ stepId: string; label: string; systolic: number; diastolic: number; pulse: number | null; createdAt: string }>;
   media: MediaConfig;
@@ -187,6 +205,8 @@ export type SessionSnapshot = {
   preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null };
   createdAt: string;
   updatedAt: string;
+  /** Scored questionnaire responses. */
+  questionnaires?: Array<{ questionnaireId: string; stepId: string; answers: Record<string, number>; scores: Record<string, number>; createdAt: string }>;
   /** Categorical participant descriptors (skin type, age band, eyewear, ...) for interpreting contactless sensing. */
   participantMetadata?: { values: Record<string, string | number>; updatedAt: string };
   /** WiFi CSI room geometry and radio settings. */
@@ -208,9 +228,9 @@ export type SessionSnapshot = {
 };
 
 export type SubjectStep = Pick<ProtocolStep,
-  "id" | "index" | "type" | "subjectPrompt" | "durationSec" | "safety" | "fixation" | "advance"
+  "id" | "index" | "type" | "subjectPrompt" | "durationSec" | "safety" | "fixation" | "advance" | "questionnaireId" | "breathsPerMin"
 > & {
-  variant: "box_breathing" | "breath_hold" | null;
+  variant: "box_breathing" | "breath_hold" | "paced_breathing" | null;
 };
 
 export type SubjectSnapshot = {

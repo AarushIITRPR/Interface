@@ -15,6 +15,13 @@
       "when": 1789296529599,
       "tag": "0001_session_telemetry",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789369764155,
+      "tag": "0002_annotations",
+      "breakpoints": true
     }
   ]
 }
