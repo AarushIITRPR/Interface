@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from meridian_agent.agent import clock_offset_ms, unique_session_dir
+from meridian_agent.agent import ClockEstimator, clock_offset_ms, unique_session_dir
 from meridian_agent.sensors import FrameRecorder, SimulatedSensor, audio_level_pct
 
 
@@ -75,6 +75,16 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(artifact_report.droppedSamples, 480)
         self.assertEqual(sensor._gap_count, 1)
 
+    def test_artifact_quality_is_judged_when_recording_stops(self):
+        sensor = SimulatedSensor("gsr", self.root, time.monotonic())
+        sensor.path.parent.mkdir(parents=True, exist_ok=True)
+        sensor.path.write_text("host_epoch_ns\n")
+        sensor.start_recording()
+        sensor.sample("3.1 uS", 10, 1, 20.0, 3.1)
+        sensor.stop_recording()
+        sensor._last_sample_mono -= 30  # finalization took long after the stream stopped
+        self.assertEqual(sensor.artifact().quality, "pass")  # before the fix, the 30 s gap made this "fail"
+
     def test_audio_level(self):
         self.assertEqual(audio_level_pct(b""), 0.0)
         self.assertEqual(audio_level_pct(np.zeros(480, dtype=np.int16).tobytes()), 0.0)
@@ -98,6 +108,16 @@ class RecordingTests(unittest.TestCase):
         skewed = clock_offset_ms(command, sent - 2.0, received - 2.0, 0.0)
         self.assertAlmostEqual(skewed, 2000.0, delta=0.5)
         self.assertEqual(clock_offset_ms({"serverTime": "not a time"}, sent, received, 12.5), 12.5)
+
+    def test_clock_estimator_prefers_fastest_exchange(self):
+        estimator = ClockEstimator()
+        stamps = {"serverReceivedAt": "2026-01-01T00:00:00.050Z", "serverTime": "2026-01-01T00:00:00.060Z"}
+        sent = _epoch("2026-01-01T00:00:00.040Z")
+        self.assertAlmostEqual(estimator.add(stamps, sent, _epoch("2026-01-01T00:00:00.070Z")), 0.0, delta=0.5)
+        # A delayed reply (host busy for 400 ms before reading it) would alone suggest a -200 ms offset.
+        delayed = estimator.add(stamps, sent, _epoch("2026-01-01T00:00:00.470Z"))
+        self.assertAlmostEqual(delayed, 0.0, delta=0.5)
+        self.assertAlmostEqual(clock_offset_ms(stamps, sent, _epoch("2026-01-01T00:00:00.470Z"), 0.0), -200.0, delta=0.5)
 
 
 def _epoch(value):

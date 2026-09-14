@@ -28,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, estimateRemaining, shortLabel } from "@/lib/protocol";
 import { ARTIFACT_TYPES, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, type MetadataField } from "@/lib/rig";
+import { startTicker } from "@/lib/ticker";
 import { SCREENING_QUESTIONS, screeningComplete, skippedSafetySteps } from "@/lib/safety";
 import type { CohortOverview } from "@/lib/cohort";
 import type { DeviceConfig, ProtocolOptions, ProtocolStep, SensorChannel, SessionSnapshot } from "@/lib/types";
@@ -585,18 +586,6 @@ function subjectMediaLabel(snapshot: SessionSnapshot) {
   if (!media) return "Subject display not connected";
   if (media.ready) return `Loaded ${media.total} of ${media.total}`;
   return `Loading ${media.loaded} of ${media.total}${media.failed ? `, ${media.failed} failed` : ""}`;
-}
-
-function startTicker(intervalMs: number, tick: () => void) {
-  try {
-    const source = URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${intervalMs});`], { type: "text/javascript" }));
-    const worker = new Worker(source);
-    worker.onmessage = tick;
-    return () => { worker.terminate(); URL.revokeObjectURL(source); };
-  } catch {
-    const timer = window.setInterval(tick, intervalMs);
-    return () => window.clearInterval(timer);
-  }
 }
 
 function GatePhysiology({ gate }: { gate: SessionSnapshot["gate"] }) {

@@ -38,6 +38,35 @@ def numeric_columns(path: Path, probe_rows: int = 50) -> list[str]:
     return usable
 
 
+def csi_amplitude_columns(path: Path, names: list[str], columns: dict | None):
+    """ESP32 CSI rows keep subcarrier amplitudes inside raw_line; expand them into amp_0..amp_N columns."""
+    import csv
+    times: list[int] = []
+    rssi: list[float] = []
+    amplitudes: list[list[float]] = []
+    with path.open(newline="", encoding="utf-8", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            line = row.get("raw_line") or ""
+            parts = (line[9:] if line.startswith("CSI_DATA,") else line).split(",")
+            try:
+                values = [abs(float(value)) for value in parts[6:]]
+                times.append(int(row["host_epoch_ns"]))
+                rssi.append(float(row["rssi"]))
+            except (KeyError, ValueError):
+                continue
+            amplitudes.append(values)
+    if not amplitudes:
+        return columns, names
+    width = min(len(values) for values in amplitudes)
+    order = np.argsort(np.asarray(times), kind="stable")
+    result = {"host_epoch_ns": np.asarray(times, dtype=float)[order], "rssi": np.asarray(rssi)[order]}
+    matrix = np.asarray([values[:width] for values in amplitudes])[order]
+    for index in range(width):
+        result[f"amp_{index}"] = matrix[:, index]
+    return result, ["rssi"] + [f"amp_{index}" for index in range(width)]
+
+
 def write_bids(out: Path, export: dict, session_dir: Path, artifacts: list[dict], origin_ns: int | None, events: list[list], participants_dir: Path) -> Path:
     subject = f"sub-{int(export.get('participantId') or 0):03d}"
     session = f"ses-{str(export.get('sessionCode') or 'unknown').lower()}"
@@ -88,6 +117,8 @@ def write_bids(out: Path, export: dict, session_dir: Path, artifacts: list[dict]
             continue
         names = numeric_columns(path)
         columns = read_numeric_columns(path, names) if names else None
+        if sensor in ("csi", "csi2"):
+            columns, names = csi_amplitude_columns(path, names, columns)
         if not columns or columns["host_epoch_ns"].size < 2:
             continue
         times = columns["host_epoch_ns"]

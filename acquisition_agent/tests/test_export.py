@@ -1,4 +1,5 @@
 import csv
+import numpy as np
 import json
 import tempfile
 import unittest
@@ -154,6 +155,19 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(result["summary"]["matched"], 2)
         self.assertAlmostEqual(result["rows"][0]["latencyMs"], 30, delta=2)
         self.assertAlmostEqual(result["summary"]["maxAbsLatencyMs"], 30, delta=2)
+
+    def test_photodiode_edges_with_rare_flashes(self):
+        path = self.root / "rare.csv"
+        rng = np.random.default_rng(1)
+        with path.open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["host_epoch_ns", "monotonic_s", "device_t_us", "raw"])
+            flashes = [100.0, 400.0, 650.0]
+            for ms in range(0, 700_000, 1):
+                seconds = ms / 1000
+                lit = any(start <= seconds < start + 0.2 for start in flashes)
+                writer.writerow([ns(seconds), seconds, ms * 1000, int((3900 if lit else 140) + rng.normal(0, 6))])
+        self.assertEqual(len(photodiode_edges(path)), 3)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { QUESTIONNAIRES } from "@/lib/questionnaires";
+import { startTicker } from "@/lib/ticker";
 import { BREATH_HOLD_MAX_SEC, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
@@ -163,9 +164,9 @@ export function SubjectPortal() {
     }
   },[acceptSnapshot,code]);
 
-  useEffect(() => { if(!code)return; const first=window.setTimeout(refresh,0); const id=window.setInterval(refresh,850); return()=>{clearTimeout(first);clearInterval(id)}; },[code,refresh]);
+  useEffect(() => { if(!code)return; const first=window.setTimeout(refresh,0); const stop=startTicker(850,()=>void refresh()); return()=>{clearTimeout(first);stop()}; },[code,refresh]);
   const act = useCallback(async (action:string,payload:Record<string,unknown>={}) => { if(!code)return;const requestedCode=code;const next=await sessionRequest(requestedCode,action,payload);if(activeCode.current===requestedCode)acceptSnapshot(next); },[acceptSnapshot,code]);
-  useEffect(()=>{if(!code||snapshot?.status==="complete"||snapshot?.status==="aborted")return;const requestedCode=code;const beat=()=>sessionRequest(requestedCode,"subjectHeartbeat",{media:mediaProgress.current}).then(next=>{if(activeCode.current===requestedCode)acceptSnapshot(next)}).catch(()=>undefined);const first=window.setTimeout(beat,0);const id=window.setInterval(beat,5000);return()=>{clearTimeout(first);clearInterval(id)}},[acceptSnapshot,code,snapshot?.status,mediaProgressVersion]);
+  useEffect(()=>{if(!code||snapshot?.status==="complete"||snapshot?.status==="aborted")return;const requestedCode=code;const beat=()=>sessionRequest(requestedCode,"subjectHeartbeat",{media:mediaProgress.current}).then(next=>{if(activeCode.current===requestedCode)acceptSnapshot(next)}).catch(()=>undefined);const first=window.setTimeout(beat,0);const stop=startTicker(5000,()=>void beat());return()=>{clearTimeout(first);stop()}},[acceptSnapshot,code,snapshot?.status,mediaProgressVersion]);
   useMediaPreload(snapshot?.mediaManifest,onMediaProgress);
   const displayedStep = snapshot?.status === "running" && snapshot.step ? `${snapshot.step.id}|${snapshot.attempt}` : "";
   useEffect(()=>{
@@ -274,7 +275,7 @@ function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>Prom
       // Keep asking until the server moves on; a dropped request must not leave the subject stuck on a finished timer.
       if(value<=0 && onDone && Date.now()-lastAttempt.current>=1000){lastAttempt.current=Date.now();onDone().catch(()=>undefined);}
     };
-    tick(); const id=window.setInterval(tick,100); return()=>clearInterval(id);
+    tick(); return startTicker(100,tick);
   },[onDone,snapshot.status,snapshot.stepStartedAt,step.durationSec]);
   return remaining;
 }

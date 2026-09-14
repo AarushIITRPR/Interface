@@ -10,6 +10,7 @@ import socket
 import sys
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
@@ -53,6 +54,29 @@ def clock_offset_ms(command: dict, sent_at: float, received_at: float, previous:
     return round((((received - sent_at) + (replied - received_at)) / 2) * 1000,2)
 
 
+class ClockEstimator:
+    """Server-minus-host offset from the recent exchange with the shortest round trip.
+
+    A single exchange can be delayed on either side (for example while sensor threads hold the interpreter), which
+    skews that one estimate; the fastest recent exchange bounds the error most tightly.
+    """
+
+    def __init__(self, keep: int = 16):
+        self.samples: deque[tuple[float, float]] = deque(maxlen=keep)
+        self.offset_ms = 0.0
+
+    def add(self, command: dict, sent_at: float, received_at: float) -> float:
+        try:
+            replied = _parse_server_time(command.get("serverTime",""))
+            received = _parse_server_time(command["serverReceivedAt"]) if command.get("serverReceivedAt") else replied
+        except (ValueError,TypeError,KeyError):
+            return self.offset_ms
+        round_trip = (received_at - sent_at) - (replied - received)
+        self.samples.append((round_trip, clock_offset_ms(command,sent_at,received_at,self.offset_ms)))
+        self.offset_ms = min(self.samples)[1]
+        return self.offset_ms
+
+
 class MeridianHttpError(RuntimeError):
     pass
 
@@ -85,6 +109,7 @@ class MeridianAgent:
         self.device_config: dict[str,str] = {}
         self.config_revision = -1
         self.clock_offset_ms = 0.0
+        self.clock = ClockEstimator()
         self.recording_started = False
         self.preview: PreviewServer | None = None
         self.preflight_started_mono = 0.0
@@ -112,7 +137,7 @@ class MeridianAgent:
         if "command" not in data:
             raise RuntimeError(data.get("error","Meridian returned no command"))
         command = data["command"]
-        self.clock_offset_ms = clock_offset_ms(command,sent_at,time.time(),self.clock_offset_ms)
+        self.clock_offset_ms = self.clock.add(command,sent_at,time.time())
         return command
 
     def agent_payload(self) -> dict:
@@ -245,10 +270,12 @@ class MeridianAgent:
                 sensor.start_side_capture(f"{sensor.sensor_id}/empty_room_{stamp}.csv",header)
         calibration = self.calibration
         if calibration and calibration["status"] == "running" and time.monotonic() - calibration["started"] >= calibration["seconds"]:
-            rows = sum(sensor.stop_side_capture() for sensor in calibration["receivers"])
+            counts = {sensor.sensor_id: sensor.stop_side_capture() for sensor in calibration["receivers"]}
+            rows = sum(counts.values())
+            silent = [sensor_id for sensor_id, count in counts.items() if count == 0]
             calibration["rows"] = rows
             calibration["status"] = "done" if rows else "failed"
-            calibration["detail"] = f"{rows} packets from {len(calibration['receivers'])} receiver(s)" if rows else "No CSI packets arrived during the baseline"
+            calibration["detail"] = (", ".join(f"{sensor_id} {count} packets" for sensor_id, count in counts.items()) + (f"; no packets from {', '.join(silent)}" if silent else "")) if rows else "No CSI packets arrived during the baseline"
 
     def write_marker(self, command: dict) -> None:
         step = command.get("step") or {}
@@ -293,7 +320,7 @@ class MeridianAgent:
             data = json.loads(response.read().decode("utf-8"))
         if "export" not in data:
             raise RuntimeError(data.get("error","Meridian returned no export"))
-        self.clock_offset_ms = clock_offset_ms(data.get("command") or {},sent_at,time.time(),self.clock_offset_ms)
+        self.clock_offset_ms = self.clock.add(data.get("command") or {},sent_at,time.time())
         return data["export"]
 
     def export_only(self) -> int:

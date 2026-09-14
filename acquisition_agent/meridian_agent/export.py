@@ -193,10 +193,14 @@ def photodiode_edges(path: Path) -> list[int]:
                 continue
     if len(rows) < 10:
         return []
-    levels = sorted(level for _, level in rows)
-    dark = levels[len(levels) // 10]
-    bright = levels[min(len(levels) - 1, (len(levels) * 99) // 100)]
-    if bright - dark < 20:
+    import numpy as np
+    levels = np.asarray([level for _, level in rows], dtype=float)
+    # Flashes may occupy well under 1% of samples, so the bright level is the top of the distribution, and a flash
+    # must stand far above the dark level's own noise.
+    dark = float(np.median(levels))
+    noise = float(np.median(np.abs(levels - dark))) * 1.4826
+    bright = float(np.percentile(levels, 99.99))
+    if bright - dark < max(20.0, 10 * noise):
         return []
     high = dark + 0.6 * (bright - dark)
     low = dark + 0.4 * (bright - dark)
