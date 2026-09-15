@@ -19,10 +19,11 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from .models import RecordingArtifact, SensorReport
+from .derivatives import csi_amplitudes
 from .rppg import LiveRppg
 
 
-TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0}
+TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0,"face2":30.0}
 
 FRONTIERX_SCALE_PER_COUNT = 0.0000038146972
 FRONTIERX_SAMPLE_RATE_HZ = 125.0
@@ -153,7 +154,8 @@ class Sensor:
         current = time.monotonic()
         with self._lock:
             target = self._report.targetRateHz or 0.0
-            if self._previous_sample_mono and target:
+            # Like record_dropped, gaps only count as lost samples while recording; setup streams have no recorded denominator.
+            if self._previous_sample_mono and target and self._recording.is_set():
                 gap = current - self._previous_sample_mono
                 expected = max(0.001, sample_count / target)
                 if gap > max(0.5, expected * 5):
@@ -269,7 +271,7 @@ class UnavailableSensor(Sensor):
 
 
 class SimulatedSensor(Sensor):
-    RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":50.0,"ecg":500.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0}
+    RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":50.0,"ecg":500.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0,"face2":30.0}
 
     def __init__(self, sensor_id: str, session_dir: Path, origin_mono: float):
         super().__init__(sensor_id,"simulator",session_dir,origin_mono)
@@ -307,9 +309,9 @@ class SimulatedSensor(Sensor):
                 elif self.sensor_id == "audio":
                     point = 38 + 24 * abs(math.sin(phase * 1.8))
                     metrics = {"levelPct":round(point),"sampleRate":48000}
-                elif self.sensor_id in ("face","thermal"):
-                    metrics = {"width":1280 if self.sensor_id == "face" else 640,"height":720 if self.sensor_id == "face" else 480,"fps":rate,"droppedFrames":0}
-                    if self.sensor_id == "face":
+                elif self.sensor_id in ("face","face2","thermal"):
+                    metrics = {"width":640 if self.sensor_id == "thermal" else 1280,"height":480 if self.sensor_id == "thermal" else 720,"fps":rate,"droppedFrames":0}
+                    if self.sensor_id in ("face","face2"):
                         metrics.update({"faceDetected":True,"rppgHeartRate":round(71.5 + 1.5 * math.sin(phase / 9),1),"rppgQuality":0.52})
                 elif self.sensor_id == "resp":
                     point = 2048 + 600 * math.sin(phase / 1.6)
@@ -554,15 +556,9 @@ class CsiSensor(SerialLineSensor):
         return [timestamp, packet_id, rssi, line], f"RSSI {rssi:g} dBm"
 
     def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
-        rssi = float(values[2]); raw_line = str(values[3]); parts = raw_line[9:].split(",") if raw_line.startswith("CSI_DATA,") else raw_line.split(",")
-        amplitudes: list[float] = []
-        for value in parts[6:58]:
-            try:
-                amplitudes.append(abs(float(value)))
-            except ValueError:
-                continue
+        rssi = float(values[2]); amplitudes = csi_amplitudes(str(values[3]))
         if amplitudes:
-            self._series.clear(); self._series.extend(amplitudes[:52])
+            self._series.clear(); self._series.extend(amplitudes[:64])
         return rssi,{"rssi":rssi,"subcarriers":len(amplitudes) or 52},["Hardware detected","CSI packet format valid","Samples arriving"]
 
 
@@ -1037,7 +1033,7 @@ class CameraSensor(Sensor):
             if file_source:
                 settings["lock"] = {"locked": False, "reason": "video file source"}
             file_frames = 0
-            rppg = LiveRppg() if self.sensor_id == "face" and not self.radiometric else None
+            rppg = LiveRppg() if self.sensor_id in ("face","face2") and not self.radiometric else None
             frame_times: deque[float] = deque(maxlen=90)
             last_preview = 0.0
             dropped = 0
@@ -1143,13 +1139,16 @@ class AudioSensor(Sensor):
 
         target = None
         try:
-            with sd.RawInputStream(samplerate=self.sample_rate,channels=1,dtype="int16",device=self.audio_device,callback=callback):
-                self.set_state("connected",f"Mono {self.sample_rate} Hz")
+            # Stereo inputs are averaged to mono: a mic on one side of a camera's jack would be lost if only the first channel were read.
+            channels = max(1, min(2, int(sd.query_devices(self.audio_device, "input")["max_input_channels"])))
+            with sd.RawInputStream(samplerate=self.sample_rate,channels=channels,dtype="int16",device=self.audio_device,callback=callback):
+                self.set_state("connected",f"Mono {self.sample_rate} Hz" + (" (stereo input averaged)" if channels == 2 else ""))
                 while not self._stop.is_set():
                     try:
                         chunk, silence_frames = chunks.get(timeout=0.25)
                     except queue.Empty:
                         continue
+                    chunk = downmix_int16(chunk, channels)
                     if self._recording.is_set() and target is None:
                         self.path.parent.mkdir(parents=True,exist_ok=True)
                         target = wave.open(str(self.path),"wb")
@@ -1168,6 +1167,16 @@ class AudioSensor(Sensor):
         finally:
             if target is not None:
                 target.close()
+
+
+def downmix_int16(chunk: bytes, channels: int) -> bytes:
+    """Average interleaved int16 PCM channels into mono."""
+    if channels <= 1:
+        return chunk
+    import numpy as np
+    usable = len(chunk) // (2 * channels) * (2 * channels)
+    frames = np.frombuffer(chunk[:usable], dtype=np.int16).reshape(-1, channels).astype(np.int32)
+    return (frames.sum(axis=1) // channels).astype(np.int16).tobytes()
 
 
 def audio_level_pct(chunk: bytes) -> float:
@@ -1191,41 +1200,75 @@ def auto_oximeter_port() -> str:
     return ""
 
 
+def stable_links(directory: Path, suffix: str = "") -> dict[str,str]:
+    """Map resolved device nodes to their stable /dev/.../by-id links, which survive replugging."""
+    links: dict[str,str] = {}
+    try:
+        for link in sorted(directory.iterdir()):
+            if suffix and not link.name.endswith(suffix):
+                continue
+            links.setdefault(os.path.realpath(link), str(link))
+    except OSError:
+        pass
+    return links
+
+
+def serial_inventory(ports, by_id: dict[str,str]) -> list[dict]:
+    """USB serial adapters only: legacy on-board ttyS ports have no USB vendor id and would crowd out the real devices."""
+    items = []
+    for port in ports:
+        if getattr(port, "vid", None) is None:
+            continue
+        device = by_id.get(os.path.realpath(port.device), port.device)
+        description = port.description or "Serial device"
+        items.append({"id":device,"label":f"{port.device} | {description}","kind":"serial","description":description})
+    return items
+
+
+def audio_inventory(devices) -> list[dict]:
+    """Audio inputs by name without the ALSA card number, which changes when USB devices are replugged."""
+    inputs = [(index, str(item.get("name", f"Input {index}")), item) for index, item in enumerate(devices) if int(item.get("max_input_channels", 0)) >= 1]
+    stems = [name.split(" (hw:")[0] for _, name, _ in inputs]
+    items = []
+    for (index, name, item), stem in zip(inputs, stems):
+        unique = stems.count(stem) == 1
+        description = f"{name} | {int(item.get('max_input_channels', 0))} channel | {round(float(item.get('default_samplerate', 0)))} Hz"
+        items.append({"id":stem if unique else str(index),"label":description,"kind":"audio","description":description})
+    return items
+
+
 def discover_device_inventory() -> dict[str,list[dict]]:
     inventory: dict[str,list[dict]] = {"video":[],"audio":[],"serial":[]}
     try:
         from serial.tools import list_ports
-        for port in list_ports.comports():
-            description = port.description or "Serial device"
-            inventory["serial"].append({"id":port.device,"label":f"{port.device} | {description}","kind":"serial","description":description})
+        inventory["serial"] = serial_inventory(list_ports.comports(), stable_links(Path("/dev/serial/by-id")))
     except Exception:
         pass
-    try:
-        import cv2
-        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_V4L2 if platform.system() == "Linux" else cv2.CAP_ANY
-        for index in range(5):
-            capture = cv2.VideoCapture(index,backend)
-            if not capture.isOpened():
+    cameras = stable_links(Path("/dev/v4l/by-id"), "-video-index0") if platform.system() == "Linux" else {}
+    if cameras:
+        for link in sorted(cameras.values()):
+            name = Path(link).name.removeprefix("usb-").removesuffix("-video-index0").replace("_", " ")
+            inventory["video"].append({"id":link,"label":f"{name} ({os.path.basename(os.path.realpath(link))})","kind":"video","description":name})
+    else:
+        try:
+            import cv2
+            backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_V4L2 if platform.system() == "Linux" else cv2.CAP_ANY
+            for index in range(5):
+                capture = cv2.VideoCapture(index,backend)
+                if not capture.isOpened():
+                    capture.release()
+                    continue
+                width=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
+                height=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
+                fps=capture.get(cv2.CAP_PROP_FPS) or 0
                 capture.release()
-                continue
-            width=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
-            height=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
-            fps=capture.get(cv2.CAP_PROP_FPS) or 0
-            capture.release()
-            description=f"Camera {index} | {width}x{height} at {fps:.0f} fps"
-            inventory["video"].append({"id":str(index),"label":description,"kind":"video","description":description})
-    except Exception:
-        pass
+                description=f"Camera {index} | {width}x{height} at {fps:.0f} fps"
+                inventory["video"].append({"id":str(index),"label":description,"kind":"video","description":description})
+        except Exception:
+            pass
     try:
         import sounddevice as sd
-        for index,item in enumerate(sd.query_devices()):
-            channels=int(item.get("max_input_channels",0))
-            if channels < 1:
-                continue
-            name=str(item.get("name",f"Input {index}"))
-            rate=round(float(item.get("default_samplerate",0)))
-            description=f"{name} | {channels} channel | {rate} Hz"
-            inventory["audio"].append({"id":str(index),"label":description,"kind":"audio","description":description})
+        inventory["audio"] = audio_inventory(sd.query_devices())
     except Exception:
         pass
     return inventory
@@ -1362,7 +1405,7 @@ def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin
         return SimulatedSensor(sensor_id,session_dir,origin_mono)
     if value in ("", "none"):
         return UnavailableSensor(sensor_id,"Not configured",session_dir,origin_mono)
-    if sensor_id == "face" or sensor_id == "thermal":
+    if sensor_id in ("face","face2","thermal"):
         return CameraSensor(sensor_id,"0" if value == "auto" else value,session_dir,origin_mono,camera_options)
     if sensor_id == "audio":
         return AudioSensor(value,session_dir,origin_mono)

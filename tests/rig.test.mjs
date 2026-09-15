@@ -42,11 +42,44 @@ test("open artifact spans follow start and end events", () => {
   assert.equal(new Set(rig.ARTIFACT_TYPES.map((type) => type.key)).size, rig.ARTIFACT_TYPES.length);
 });
 
-test("consent requires every answer and participation", () => {
-  const all = Object.fromEntries(rig.CONSENT_FIELDS.map((field) => [field.id, "No"]));
-  assert.equal(rig.consentReady({ ...all, participation: "Yes" }), true);
-  assert.equal(rig.consentReady(all), false);
-  const { shareAudio, ...missing } = { ...all, participation: "Yes" };
-  void shareAudio;
-  assert.equal(rig.consentReady(missing), false);
+test("consent needs only participation; unanswered sharing defaults to No", () => {
+  assert.equal(rig.consentReady({ participation: "Yes" }), true);
+  assert.equal(rig.consentReady({ participation: "No", shareAudio: "Yes" }), false);
+  const filled = rig.withConsentDefaults({ participation: "Yes", shareFaceVideo: "Yes" });
+  assert.equal(filled.shareFaceVideo, "Yes");
+  assert.equal(filled.shareAudio, "No");
+  assert.equal(rig.CONSENT_FIELDS.filter((field) => field.required).map((field) => field.id).join(), "participation");
+});
+
+test("only camera-relevant participant details are required", () => {
+  assert.deepEqual(rig.missingParticipantFields({}), ["fitzpatrick", "ageBand", "sex", "eyewear"]);
+});
+
+test("start checks name every reason recording cannot start", () => {
+  const at = Date.parse("2026-09-15T12:00:00Z");
+  const fresh = "2026-09-15T11:59:58Z";
+  const sensor = (id, label, quality = "good") => ({ id, label, quality, dataDetected: true, updatedAt: fresh });
+  const snapshot = {
+    hardwareGateOverride: false, consent: null, screening: null,
+    requiredSensors: ["face", "ecg", "thermal"], deviceConfig: { face: "/dev/v4l/by-id/cam", ecg: "https://liveecg.frontierxapp.com/1/x", thermal: "none" },
+    sensors: [sensor("face", "Face camera"), sensor("ecg", "ECG", "waiting"), sensor("thermal", "Thermal camera")],
+    acquisition: { lastSeenAt: fresh }, preflightTest: { status: "fail", detail: "Check: ecg" }, subjectMedia: null,
+  };
+  const failing = Object.fromEntries(rig.startChecks(snapshot, at).filter((check) => !check.ok).map((check) => [check.id, check.detail]));
+  assert.deepEqual(Object.keys(failing), ["consent", "screening", "assigned", "streaming", "preflight", "subject"]);
+  assert.match(failing.assigned, /Thermal camera/);
+  assert.match(failing.streaming, /ECG/);
+  assert.doesNotMatch(failing.streaming, /Face camera/);
+  const ready = { ...snapshot, requiredSensors: ["face"], consent: { values: { participation: "Yes" } }, preflightTest: { status: "pass", detail: "" },
+    screening: { answers: { cardiac: false, respiratory: false, fainting: false, mobility: false, pregnancy: false, unwell: false } }, subjectMedia: { ready: true, loaded: 8, total: 8 } };
+  assert.ok(rig.startChecks(ready, at).every((check) => check.ok));
+});
+
+test("a result from before the current preflight started cannot end it", () => {
+  const running = { status: "running", startedAt: "2026-09-15T00:30:00.000Z" };
+  assert.equal(rig.stalePreflightReport(running, "fail", "2026-09-15T00:20:23.905533Z"), true);
+  assert.equal(rig.stalePreflightReport(running, "idle", null), true);
+  assert.equal(rig.stalePreflightReport(running, "running", null), false);
+  assert.equal(rig.stalePreflightReport(running, "pass", "2026-09-15T00:30:11.000Z"), false);
+  assert.equal(rig.stalePreflightReport({ status: "fail", startedAt: null }, "pass", "2026-09-15T00:40:00Z"), false);
 });

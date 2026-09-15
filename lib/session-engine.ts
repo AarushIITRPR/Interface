@@ -3,7 +3,7 @@ import { summarizeSession } from "./cohort";
 import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel } from "./protocol";
 import { QUESTIONNAIRES, scoreQuestionnaire, validAnswers } from "./questionnaires";
 import { STIMULI, stimulusById } from "./stimuli";
-import { ARTIFACT_TYPES, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, consentReady, heartRateAgreement, missingParticipantFields, openArtifactSpans, sanitizeFields } from "./rig";
+import { ARTIFACT_TYPES, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, requiredSensorsReady, sanitizeFields, stalePreflightReport, startChecks, withConsentDefaults } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
 import { SAM_POINTS } from "./tasks";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
@@ -17,8 +17,8 @@ const OPERATOR_LEASE_MS = 12_000;
 const AUTO_ADVANCE_TOLERANCE_MS = 1_500;
 const SAVE_ATTEMPTS = 6;
 export const ACQUISITION_LEASE_MS = 10_000;
-const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9,photodiode:1000,csi2:100,resp:50,environment:1 };
-const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none",photodiode:"none",csi2:"none",resp:"none",environment:"none" };
+const TARGET_RATES: Record<string,number> = { face:30,audio:48000,oximeter:60,csi:100,emg:1000,gsr:20,ecg:125,thermal:9,photodiode:1000,csi2:100,resp:50,environment:1,face2:30 };
+const DEFAULT_DEVICE_CONFIG: DeviceConfig = { face:"auto",audio:"auto",oximeter:"auto",csi:"none",emg:"none",gsr:"none",ecg:"none",thermal:"none",photodiode:"none",csi2:"none",resp:"none",environment:"none",face2:"none" };
 /** Streams the acquisition agent can record; the rest of SENSOR_CATALOG is reserved for future devices. */
 const AGENT_SENSOR_IDS = Object.keys(DEFAULT_DEVICE_CONFIG);
 
@@ -259,7 +259,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   if (current?.title === "Box breathing") mediaSrc = snapshot.media.boxBreathing;
 
   const operatorConnected = Boolean(snapshot.operatorLastSeenAt && Date.now() - Date.parse(snapshot.operatorLastSeenAt) <= OPERATOR_LEASE_MS);
-  const acquisitionReady = snapshot.hardwareGateOverride || requiredSensorsReady(snapshot,{recording:true});
+  const acquisitionReady = snapshot.hardwareGateOverride || requiredSensorsReady(snapshot,Date.now(),{recording:true});
   return {
     serverTime: now(),
     // A photodiode on the screen corner needs the sync patch; without one the patch stays hidden from the subject.
@@ -333,13 +333,6 @@ function skipScreenedSteps(snapshot: SessionSnapshot, plan: readonly ProtocolSte
  * Before starting, streams must also be of good quality; once running, the subject display only needs them recording,
  * so a brief quality dip does not interrupt the protocol.
  */
-function requiredSensorsReady(snapshot: SessionSnapshot, options: { recording?: boolean } = {}) {
-  const fresh = (timestamp: string | null) => Boolean(timestamp && Date.now()-Date.parse(timestamp)<=ACQUISITION_LEASE_MS);
-  return fresh(snapshot.acquisition.lastSeenAt) && snapshot.requiredSensors.every((id)=>{
-    const sensor=snapshot.sensors.find((item)=>item.id===id);
-    return Boolean(sensor && fresh(sensor.updatedAt) && sensor.dataDetected && (options.recording ? sensor.status==="recording" : sensor.quality==="good"));
-  });
-}
 
 type ActionPayload = Record<string, unknown>;
 export async function mutateSession(code: string, action: string, payload: ActionPayload) {
@@ -433,7 +426,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
       appendEvent(current,{eventType:"device_refresh",label:"Hardware discovery requested",source:"operator"});
     }
     if (action === "startPreflight" && current.status === "setup") {
-      current.preflightTest={status:"running",detail:"Validating selected devices for 10 seconds",completedAt:null};
+      current.preflightTest={status:"running",detail:"Validating selected devices for 10 seconds",completedAt:null,startedAt:now()};
       appendEvent(current,{eventType:"preflight_started",label:"Preflight test started",source:"operator"});
     }
     if (action === "protocolOptions" && current.status === "setup" && current.stepIndex === 0) {
@@ -452,7 +445,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
     }
     if (action === "consent") {
       // Consent can be updated at any time, including a later withdrawal of sharing permission.
-      const values = sanitizeFields(CONSENT_FIELDS, payload.values);
+      const values = withConsentDefaults(sanitizeFields(CONSENT_FIELDS, payload.values));
       current.consent = { values, updatedAt:now() };
       appendEvent(current,{ eventType:"consent_recorded", label:"Data-sharing consent saved", detail:Object.entries(values).map(([key,value]) => `${key}=${value}`).join(", "), source:"operator", metadata:{ values } });
     }
@@ -487,10 +480,8 @@ export async function mutateSession(code: string, action: string, payload: Actio
       appendEvent(current,{ eventType:"screening_recorded", label:"Safety screening recorded", detail:Object.keys(skipped).length ? `Skipping: ${Object.keys(skipped).join(", ")}` : "No steps skipped", source:"operator", metadata:{ answers, skipped } });
     }
     if (action === "startSession" && current.status === "setup") {
-      if (!screeningComplete(current.screening?.answers)) throw new Error("Complete the safety screening before starting the session.");
-      if (!consentReady(current.consent?.values)) throw new Error("Record participation and data-sharing consent before starting the session.");
-      if (!current.hardwareGateOverride && (!requiredSensorsReady(current) || current.preflightTest.status!=="pass")) throw new Error("Complete a successful preflight before starting the session.");
-      if (!current.hardwareGateOverride && !current.subjectMedia?.ready) throw new Error("Wait for the subject display to finish loading the study media.");
+      const blocked = startChecks(current, Date.now()).filter((check) => !check.ok);
+      if (blocked.length) throw new Error(`Cannot start yet: ${blocked.map((check) => `${check.label} (${check.detail})`).join("; ")}`);
       current.status="running";
       current.configurationLocked=true;
       current.recordingStartedAt=now();
@@ -624,9 +615,9 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
     const test=payload.preflightTest as Record<string,unknown>;
     const status=["idle","running","pass","fail"].includes(String(test.status)) ? String(test.status) as SessionSnapshot["preflightTest"]["status"] : "idle";
     const completedAt=clean(test.completedAt,40)||null;
-    if (!(snapshot.preflightTest.status==="running"&&status==="idle")) {
+    if (!stalePreflightReport(snapshot.preflightTest,status,completedAt)) {
       const changed=status!==snapshot.preflightTest.status || completedAt!==snapshot.preflightTest.completedAt;
-      snapshot.preflightTest={status,detail:clean(test.detail,220),completedAt};
+      snapshot.preflightTest={status,detail:clean(test.detail,220),completedAt,startedAt:snapshot.preflightTest.startedAt ?? null};
       if(changed&&["pass","fail"].includes(status)) appendEvent(snapshot,{eventType:"preflight_completed",label:`Preflight ${status}`,detail:snapshot.preflightTest.detail,severity:status==="fail"?"error":"info",source:"sensor"});
     }
   }
@@ -670,8 +661,8 @@ function finiteOrNull(value: unknown, min: number, max: number) { const number=N
 function validSensorStatus(value: unknown): SensorStatus { const status=String(value) as SensorStatus; return ["connected","recording","delayed","missing","error","unknown"].includes(status)?status:"unknown"; }
 function validSensorQuality(value: unknown): SensorQuality { const quality=String(value) as SensorQuality; return ["disabled","waiting","good","degraded","bad"].includes(quality)?quality:"waiting"; }
 function sanitizeMetrics(value: unknown) { const result:Record<string,number|string|boolean>={}; if(!value||typeof value!=="object")return result; for(const [key,raw] of Object.entries(value as Record<string,unknown>).slice(0,24)){const safeKey=clean(key,40);if(typeof raw==="number"&&Number.isFinite(raw))result[safeKey]=Math.round(raw*1000)/1000;else if(typeof raw==="boolean")result[safeKey]=raw;else if(typeof raw==="string")result[safeKey]=clean(raw,100)}return result; }
-function sanitizeInventory(value: unknown):DeviceInventory { const result:DeviceInventory={video:[],audio:[],serial:[]};if(!value||typeof value!=="object")return result;for(const kind of ["video","audio","serial"] as const){const items=(value as Record<string,unknown>)[kind];if(!Array.isArray(items))continue;result[kind]=items.slice(0,24).flatMap((raw)=>{if(!raw||typeof raw!=="object")return[];const item=raw as Record<string,unknown>;return[{id:clean(item.id,180),label:clean(item.label,220),kind,description:clean(item.description,220)}]})}return result; }
-function sanitizePreviewUrls(value: unknown){const result:Record<string,string>={};if(!value||typeof value!=="object")return result;for(const id of ["face","thermal"]){const url=clean((value as Record<string,unknown>)[id],300);if(/^http:\/\/(127\.0\.0\.1|localhost):\d+\/preview\//.test(url))result[id]=url}return result;}
+function sanitizeInventory(value: unknown):DeviceInventory { const result:DeviceInventory={video:[],audio:[],serial:[]};if(!value||typeof value!=="object")return result;for(const kind of ["video","audio","serial"] as const){const items=(value as Record<string,unknown>)[kind];if(!Array.isArray(items))continue;result[kind]=items.slice(0,64).flatMap((raw)=>{if(!raw||typeof raw!=="object")return[];const item=raw as Record<string,unknown>;return[{id:clean(item.id,180),label:clean(item.label,220),kind,description:clean(item.description,220)}]})}return result; }
+function sanitizePreviewUrls(value: unknown){const result:Record<string,string>={};if(!value||typeof value!=="object")return result;for(const id of ["face","thermal","face2"]){const url=clean((value as Record<string,unknown>)[id],300);if(/^http:\/\/(127\.0\.0\.1|localhost):\d+\/preview\//.test(url))result[id]=url}return result;}
 
 export function acquisitionCommand(snapshot: SessionSnapshot) {
   const step = buildPlan(snapshot.assignment)[snapshot.stepIndex] ?? null;

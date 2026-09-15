@@ -202,7 +202,7 @@ export type SessionSnapshot = {
   configRevision: number;
   configurationLocked: boolean;
   recordingStartedAt: string | null;
-  preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null };
+  preflightTest: { status:"idle"|"running"|"pass"|"fail"; detail:string; completedAt:string | null; startedAt?:string | null };
   createdAt: string;
   updatedAt: string;
   /** Participation and per-modality data-sharing consent. */
@@ -295,4 +295,5 @@ export const SENSOR_CATALOG: Array<Pick<SensorChannel, "id" | "label" | "group">
   { id: "interaction", label: "Interaction log", group: "interaction" },
   { id: "csi2", label: "WiFi CSI receiver 2", group: "physio" },
   { id: "environment", label: "Room environment", group: "environment" },
+  { id: "face2", label: "Face camera 2", group: "video" },
 ];

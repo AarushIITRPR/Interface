@@ -23,7 +23,7 @@ from .sensors import CameraOptions, CameraSensor, Sensor, SimulatedSensor, Unava
 
 
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
-SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode","csi2","resp","environment")
+SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode","csi2","resp","environment","face2")
 CSI_SENSOR_IDS = ("csi","csi2")
 
 
@@ -184,6 +184,7 @@ class MeridianAgent:
             "csi2":self.args.csi2,
             "resp":self.args.resp,
             "environment":self.args.environment,
+            "face2":self.args.camera2,
         }
         values = {sensor_id:("simulate" if self.args.simulate_all else str((requested or {}).get(sensor_id,defaults[sensor_id]))) for sensor_id in SENSOR_IDS}
         bauds = {"csi":self.args.csi_baud,"emg":self.args.emg_baud,"gsr":self.args.gsr_baud,"ecg":self.args.ecg_baud,"photodiode":self.args.photodiode_baud,"csi2":self.args.csi_baud,"resp":self.args.resp_baud,"environment":self.args.environment_baud}
@@ -398,6 +399,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--interval",type=float,default=1.0,help="Seconds between heartbeats; also bounds how quickly recording starts after the protocol starts")
     result.add_argument("--timeout",type=float,default=10.0)
     result.add_argument("--camera",default="auto",help="Camera index/path, none, or simulate")
+    result.add_argument("--camera2",default="none",help="Second face camera index/path (e.g. a mirrorless camera over USB streaming), or none")
     result.add_argument("--audio",default="auto",help="Audio input index/name, none, or simulate")
     result.add_argument("--oximeter",default="auto",help="CMS50E serial port, auto, none, or simulate")
     result.add_argument("--csi",default="auto",help="ESP32 CSI receiver serial port, auto, or none")
@@ -435,7 +437,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     if args.simulate_all:
-        for name in ("camera","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode","csi2","resp","environment"):
+        for name in ("camera","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode","csi2","resp","environment","camera2"):
             setattr(args,name,"simulate")
     if not args.code or not args.token:
         print("Session code and acquisition token are required",file=sys.stderr)

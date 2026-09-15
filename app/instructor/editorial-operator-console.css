@@ -272,3 +272,15 @@
 .live-coverage { border-collapse: collapse; margin: 8px 0; font-size: .74rem; }.live-coverage th, .live-coverage td { width: 30px; height: 26px; border: 1px solid #d5cbbf; text-align: center; }
 .live-distribution { margin: 8px 0 0; padding: 0; list-style: none; font-size: .78rem; }.live-distribution li { display: grid; grid-template-columns: 7.5em 1fr 2em; align-items: center; gap: 8px; padding: 2px 0; }.live-distribution i { height: 8px; background: #a8543a; }.live-distribution b { text-align: right; }
 .live-cohort-table { margin-top: 13px; }.live-cohort-table header { display: flex; justify-content: space-between; align-items: center; }.live-cohort-table > div { overflow-x: auto; }.live-cohort-table table { width: 100%; border-collapse: collapse; font-size: .76rem; }.live-cohort-table th, .live-cohort-table td { padding: 5px 8px; border-bottom: 1px solid #e0d7cc; text-align: left; white-space: nowrap; }.live-cohort-table .attention { color: #9a4f2f; }
+
+.live-start-checklist { margin: 12px 0 18px; padding: 12px 16px; border: 1px solid rgba(31, 42, 54, 0.14); background: rgba(255, 255, 255, 0.6); font-size: 13px; }
+.live-start-checklist p { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin: 0 0 8px; }
+.live-start-checklist ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.live-start-checklist li { display: flex; gap: 8px; align-items: baseline; overflow-wrap: anywhere; }
+.live-start-checklist li span { width: 1em; flex: none; font-weight: 700; }
+.live-start-checklist li b { flex: none; }
+.live-start-checklist li.good span { color: #3d6b45; }
+.live-start-checklist li.attention span, .live-start-checklist li.attention b { color: #a8543a; }
+.live-save-state { margin-left: 6px; font-weight: 600; }
+.live-save-state.good { color: #3d6b45; }
+.live-save-state.attention { color: #a8543a; }

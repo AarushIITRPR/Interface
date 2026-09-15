@@ -3,7 +3,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from meridian_agent.sensors import _probe_serial_protocol, discover_serial_assignments
+from meridian_agent.sensors import _probe_serial_protocol, audio_inventory, discover_serial_assignments, serial_inventory
 
 
 class LinePort:
@@ -126,3 +126,20 @@ class SerialAssignmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InventoryTest(unittest.TestCase):
+    def test_serial_inventory_lists_usb_adapters_by_stable_path(self):
+        ports = [types.SimpleNamespace(device=f"/dev/ttyS{index}", vid=None, description="n/a") for index in range(32)]
+        ports += [types.SimpleNamespace(device="/dev/ttyUSB1", vid=0x10C4, description="CP2102N"),
+                  types.SimpleNamespace(device="/dev/ttyACM0", vid=0x303A, description="USB JTAG/serial")]
+        with patch("meridian_agent.sensors.os.path.realpath", side_effect=lambda path: path):
+            items = serial_inventory(ports, {"/dev/ttyUSB1": "/dev/serial/by-id/usb-Silicon_Labs_CP2102N-if00-port0"})
+        self.assertEqual([item["id"] for item in items], ["/dev/serial/by-id/usb-Silicon_Labs_CP2102N-if00-port0", "/dev/ttyACM0"])
+
+    def test_audio_inventory_ids_ignore_card_numbers(self):
+        devices = [{"name": "HDA Intel PCH: ALC256 Analog (hw:1,0)", "max_input_channels": 2, "default_samplerate": 44100},
+                   {"name": "HDMI 0 (hw:1,3)", "max_input_channels": 0, "default_samplerate": 44100},
+                   {"name": "ILCE-6700: USB Audio (hw:2,0)", "max_input_channels": 2, "default_samplerate": 48000},
+                   {"name": "default", "max_input_channels": 64, "default_samplerate": 44100}]
+        self.assertEqual([item["id"] for item in audio_inventory(devices)], ["HDA Intel PCH: ALC256 Analog", "ILCE-6700: USB Audio", "default"])

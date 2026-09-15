@@ -270,7 +270,7 @@ def _write_tsv(path: Path, header: list[str], rows: list[list]) -> None:
             handle.write("\t".join(_cell(value) for value in row) + "\n")
 
 
-CONSENT_BY_SENSOR = {"face": "shareFaceVideo", "thermal": "shareThermalVideo", "audio": "shareAudio", "oximeter": "sharePhysiology", "ecg": "sharePhysiology",
+CONSENT_BY_SENSOR = {"face": "shareFaceVideo", "face2": "shareFaceVideo", "thermal": "shareThermalVideo", "audio": "shareAudio", "oximeter": "sharePhysiology", "ecg": "sharePhysiology",
                      "emg": "sharePhysiology", "gsr": "sharePhysiology", "resp": "sharePhysiology", "csi": "shareWifi", "csi2": "shareWifi"}
 RESPONSE_FILES = {"ratings.tsv", "tasks.tsv", "stroop_trials.tsv", "nback_trials.tsv", "questionnaire_items.tsv", "questionnaire_scores.tsv", "annotations.tsv"}
 

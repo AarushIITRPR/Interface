@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .derivatives import header_of, read_numeric_columns
+from .derivatives import csi_amplitudes, header_of, read_numeric_columns
 
 NOMINAL_RATES = {"oximeter": 60.0, "csi": 100.0, "csi2": 100.0, "emg": 1000.0, "gsr": 20.0, "ecg": 125.0, "photodiode": 1000.0, "resp": 50.0, "environment": 1.0}
 SKIP_COLUMNS = {"host_epoch_ns", "monotonic_s", "device_t_us", "device_t_ms", "device_timestamp", "packet_id", "sequence", "packet_no", "session_start_ms", "sample_time_ms", "sample_index", "sample_count"}
@@ -48,9 +48,10 @@ def csi_amplitude_columns(path: Path, names: list[str], columns: dict | None):
         reader = csv.DictReader(handle)
         for row in reader:
             line = row.get("raw_line") or ""
-            parts = (line[9:] if line.startswith("CSI_DATA,") else line).split(",")
+            values = csi_amplitudes(line)
+            if not values:
+                continue
             try:
-                values = [abs(float(value)) for value in parts[6:]]
                 times.append(int(row["host_epoch_ns"]))
                 rssi.append(float(row["rssi"]))
             except (KeyError, ValueError):

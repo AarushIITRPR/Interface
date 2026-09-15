@@ -15,6 +15,24 @@ from pathlib import Path
 import numpy as np
 
 
+def csi_amplitudes(line: str) -> list[float]:
+    """Subcarrier amplitudes from one ESP32 CSI line.
+
+    Two layouts are accepted. Raw I/Q firmware prints `timestamp,packet,rssi,noise,count` followed by `count` I/Q
+    pairs, so amplitudes are sqrt(I^2 + Q^2). Amplitude firmware (and the emulator) prints
+    `timestamp,packet,rssi,rate,noise,channel` followed by ready-made amplitudes.
+    """
+    parts = (line[9:] if line.startswith("CSI_DATA,") else line).split(",")
+    try:
+        count = int(parts[4]) if len(parts) > 4 else -1
+        if count > 0 and len(parts) == 5 + 2 * count:
+            values = [float(value) for value in parts[5:]]
+            return [math.hypot(values[2 * index], values[2 * index + 1]) for index in range(count)]
+        return [abs(float(value)) for value in parts[6:]]
+    except ValueError:
+        return []
+
+
 def read_numeric_columns(path: Path, names: list[str]) -> dict[str, np.ndarray] | None:
     """host_epoch_ns plus the requested numeric columns; rows with any unparsable value are dropped."""
     with path.open(newline="", encoding="utf-8", errors="replace") as handle:

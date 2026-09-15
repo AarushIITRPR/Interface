@@ -75,6 +75,14 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(artifact_report.droppedSamples, 480)
         self.assertEqual(sensor._gap_count, 1)
 
+    def test_stream_gaps_before_recording_are_not_dropout(self):
+        sensor = SimulatedSensor("thermal", self.root, time.monotonic())
+        sensor.sample("640x480", 0, 1, 9.0)
+        sensor._previous_sample_mono -= 2.0  # a flat-field correction pause while only previewing
+        sensor.sample("640x480", 0, 1, 9.0)
+        report = sensor.report()
+        self.assertEqual((report.droppedSamples, report.dropoutPct), (0, 0.0))
+
     def test_artifact_quality_is_judged_when_recording_stops(self):
         sensor = SimulatedSensor("gsr", self.root, time.monotonic())
         sensor.path.parent.mkdir(parents=True, exist_ok=True)

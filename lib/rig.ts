@@ -1,3 +1,6 @@
+import { screeningComplete } from "./safety";
+import type { SessionSnapshot } from "./types";
+
 /**
  * Dataset-rig metadata: participant descriptors needed to interpret contactless sensing, operator artifact labels,
  * and the WiFi CSI room setup. Values are categorical bands, never free text, to keep the dataset de-identified.
@@ -16,12 +19,12 @@ export const PARTICIPANT_FIELDS: readonly MetadataField[] = [
   { id: "handedness", label: "Handedness", kind: "choice", options: ["Right", "Left", "Both"] },
   { id: "bmiBand", label: "BMI band", kind: "choice", options: ["Under 18.5", "18.5-24.9", "25-29.9", "30 or over", "Not recorded"] },
   { id: "eyewear", label: "Eyewear during recording", kind: "choice", options: ["None", "Glasses", "Contact lenses"], required: true },
-  { id: "facialHair", label: "Facial hair", kind: "choice", options: ["None", "Stubble", "Beard"], required: true },
-  { id: "makeup", label: "Face makeup", kind: "choice", options: YES_NO, required: true },
-  { id: "caffeine2h", label: "Caffeine in the last 2 hours", kind: "choice", options: YES_NO, required: true },
-  { id: "nicotine2h", label: "Nicotine in the last 2 hours", kind: "choice", options: YES_NO, required: true },
-  { id: "exercise2h", label: "Exercise in the last 2 hours", kind: "choice", options: YES_NO, required: true },
-  { id: "heartRateMedication", label: "Medication affecting heart rate", kind: "choice", options: ["No", "Yes", "Prefer not to say"], required: true },
+  { id: "facialHair", label: "Facial hair", kind: "choice", options: ["None", "Stubble", "Beard"] },
+  { id: "makeup", label: "Face makeup", kind: "choice", options: YES_NO },
+  { id: "caffeine2h", label: "Caffeine in the last 2 hours", kind: "choice", options: YES_NO },
+  { id: "nicotine2h", label: "Nicotine in the last 2 hours", kind: "choice", options: YES_NO },
+  { id: "exercise2h", label: "Exercise in the last 2 hours", kind: "choice", options: YES_NO },
+  { id: "heartRateMedication", label: "Medication affecting heart rate", kind: "choice", options: ["No", "Yes", "Prefer not to say"] },
   { id: "cameraDistanceCm", label: "Face camera to face", kind: "number", unit: "cm", min: 20, max: 400 },
   { id: "thermalDistanceCm", label: "Thermal camera to face", kind: "number", unit: "cm", min: 20, max: 400 },
 ];
@@ -125,16 +128,77 @@ export function heartRateAgreement(sensors: readonly HeartRateSensor[], nowMs: n
  */
 export const CONSENT_FIELDS: readonly ChoiceField[] = [
   { id: "participation", label: "Signed consent to take part in this recording", kind: "choice", options: ["Yes", "No"], required: true },
-  { id: "shareFaceVideo", label: "Share identifiable face video", kind: "choice", options: ["Yes", "No"], required: true },
-  { id: "shareThermalVideo", label: "Share thermal face video", kind: "choice", options: ["Yes", "No"], required: true },
-  { id: "shareAudio", label: "Share voice recordings", kind: "choice", options: ["Yes", "No"], required: true },
-  { id: "sharePhysiology", label: "Share physiological signals (ECG, PPG, EDA, EMG, respiration)", kind: "choice", options: ["Yes", "No"], required: true },
-  { id: "shareWifi", label: "Share WiFi CSI recordings", kind: "choice", options: ["Yes", "No"], required: true },
-  { id: "shareResponses", label: "Share ratings, questionnaires, and task responses", kind: "choice", options: ["Yes", "No"], required: true },
-  { id: "shareDerived", label: "Share de-identified features when raw data is withheld", kind: "choice", options: ["Yes", "No"], required: true },
-  { id: "futureResearch", label: "Data may be reused in future studies", kind: "choice", options: ["Yes", "No"], required: true },
+  { id: "shareFaceVideo", label: "Share identifiable face video", kind: "choice", options: ["Yes", "No"] },
+  { id: "shareThermalVideo", label: "Share thermal face video", kind: "choice", options: ["Yes", "No"] },
+  { id: "shareAudio", label: "Share voice recordings", kind: "choice", options: ["Yes", "No"] },
+  { id: "sharePhysiology", label: "Share physiological signals (ECG, PPG, EDA, EMG, respiration)", kind: "choice", options: ["Yes", "No"] },
+  { id: "shareWifi", label: "Share WiFi CSI recordings", kind: "choice", options: ["Yes", "No"] },
+  { id: "shareResponses", label: "Share ratings, questionnaires, and task responses", kind: "choice", options: ["Yes", "No"] },
+  { id: "shareDerived", label: "Share de-identified features when raw data is withheld", kind: "choice", options: ["Yes", "No"] },
+  { id: "futureResearch", label: "Data may be reused in future studies", kind: "choice", options: ["Yes", "No"] },
 ];
 
+/** Sharing answers not given default to "No", the most private choice, so only participation must be chosen. */
+export function withConsentDefaults(values: Record<string, string | number> | undefined) {
+  const result: Record<string, string | number> = { ...(values ?? {}) };
+  for (const field of CONSENT_FIELDS) if (field.id !== "participation" && !result[field.id]) result[field.id] = "No";
+  return result;
+}
+
 export function consentReady(values: Record<string, string | number> | undefined) {
-  return CONSENT_FIELDS.every((field) => Boolean(values?.[field.id])) && values?.participation === "Yes";
+  return values?.participation === "Yes";
+}
+
+/**
+ * While a preflight is running, a heartbeat that left the agent before the operator started it still carries the previous
+ * result. Accepting it would end the new test before the agent ever receives the command.
+ */
+export function stalePreflightReport(current: { status: string; startedAt?: string | null }, status: string, completedAt: string | null) {
+  if (current.status !== "running") return false;
+  if (status === "idle") return true;
+  if (status === "running" || !current.startedAt) return false;
+  const completed = completedAt ? Date.parse(completedAt) : Number.NaN;
+  return !Number.isFinite(completed) || completed < Date.parse(current.startedAt);
+}
+
+export const START_LEASE_MS = 10_000;
+
+/** A required stream counts as ready when the agent and the stream reported recently and the stream is good. */
+export function requiredSensorsReady(snapshot: Pick<SessionSnapshot, "acquisition" | "requiredSensors" | "sensors">, now: number, options: { recording?: boolean } = {}) {
+  const fresh = (timestamp: string | null | undefined) => Boolean(timestamp && now - Date.parse(timestamp) <= START_LEASE_MS);
+  return fresh(snapshot.acquisition.lastSeenAt) && snapshot.requiredSensors.every((id) => {
+    const sensor = snapshot.sensors.find((item) => item.id === id);
+    return Boolean(sensor && fresh(sensor.updatedAt) && sensor.dataDetected && (options.recording ? sensor.status === "recording" : sensor.quality === "good"));
+  });
+}
+
+export type StartCheck = { id: string; label: string; ok: boolean; detail: string };
+
+/** Everything that must be true before recording can start, with the reason for each item that is not. */
+export function startChecks(snapshot: SessionSnapshot, now: number): StartCheck[] {
+  const override = snapshot.hardwareGateOverride;
+  const unassigned = snapshot.requiredSensors.filter((id) => !snapshot.deviceConfig[id] || snapshot.deviceConfig[id] === "none");
+  const notStreaming = snapshot.requiredSensors.filter((id) => {
+    const sensor = snapshot.sensors.find((item) => item.id === id);
+    return !unassigned.includes(id) && !(sensor && sensor.dataDetected && sensor.quality === "good" && now - Date.parse(sensor.updatedAt) <= START_LEASE_MS);
+  });
+  const agentOnline = Boolean(snapshot.acquisition.lastSeenAt && now - Date.parse(snapshot.acquisition.lastSeenAt) <= START_LEASE_MS);
+  const label = (id: string) => snapshot.sensors.find((sensor) => sensor.id === id)?.label ?? id;
+  const media = snapshot.subjectMedia;
+  const checks: StartCheck[] = [
+    { id: "consent", label: "Consent", ok: consentReady(snapshot.consent?.values), detail: !snapshot.consent ? "Not saved. Choose participation in Consent." : snapshot.consent.values.participation !== "Yes" ? "Participation consent is not Yes." : "Saved" },
+    { id: "screening", label: "Safety screening", ok: screeningComplete(snapshot.screening?.answers), detail: snapshot.screening ? "Saved" : "Not saved. Answer all six questions." },
+  ];
+  if (override) {
+    checks.push({ id: "override", label: "Hardware checks", ok: true, detail: "Skipped by hardware override" });
+    return checks;
+  }
+  checks.push(
+    { id: "agent", label: "Acquisition agent", ok: agentOnline, detail: agentOnline ? "Connected" : "Not connected. Start the acquisition agent." },
+    { id: "assigned", label: "Required devices assigned", ok: unassigned.length === 0, detail: unassigned.length ? `Required but no device: ${unassigned.map(label).join(", ")}` : "All assigned" },
+    { id: "streaming", label: "Required streams live", ok: agentOnline && notStreaming.length === 0, detail: notStreaming.length ? `No good data: ${notStreaming.map(label).join(", ")}` : agentOnline ? "All live" : "Waiting for the agent" },
+    { id: "preflight", label: "Preflight", ok: snapshot.preflightTest.status === "pass", detail: snapshot.preflightTest.status === "pass" ? "Passed" : snapshot.preflightTest.status === "fail" ? `Failed. ${snapshot.preflightTest.detail}` : snapshot.preflightTest.status === "running" ? "Running" : "Not run since the last hardware change" },
+    { id: "subject", label: "Subject display", ok: Boolean(media?.ready), detail: !media ? "Not connected. Open /subject and enter the session code." : media.ready ? `Loaded ${media.total} of ${media.total}` : `Loading ${media.loaded} of ${media.total}` },
+  );
+  return checks;
 }

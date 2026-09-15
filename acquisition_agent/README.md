@@ -70,6 +70,8 @@ Face video is recorded losslessly by default (`--video-codec ffv1`, `.mkv`): JPE
 
 About two seconds after the camera opens, the agent locks auto exposure, white balance, and gain at their settled values and writes `face/camera_settings.json`. The Setup view shows whether the camera accepted the lock; some webcams ignore it. `--no-camera-lock` leaves automatic control on. `--camera-fps 60` requests a higher frame rate.
 
+A second face camera (for example a mirrorless camera in USB streaming mode) is recorded as `face2` with `--camera2 PATH`, using the same lossless recorder, frame timestamps, and live rPPG. On Linux prefer stable paths such as `/dev/v4l/by-id/usb-...-video-index0`, because `/dev/videoN` numbers change when devices are replugged. Stereo audio inputs are averaged to mono, so a microphone wired into one side of a camera jack is still recorded.
+
 For radiometric thermal cameras that expose 16-bit frames over UVC (for example FLIR Lepton on a PureThermal board), use `--thermal-format y16`. Frames are written as `thermal/thermal_y16.raw` (little-endian uint16) with `thermal_y16.json`; in the default `--thermal-units centikelvin`, degrees Celsius are `value / 100 - 273.15`. Every frame timestamp file has a `repeated` column that marks identical consecutive frames, such as a thermal camera's flat-field correction freeze.
 
 The Overview shows heart rate from the ECG, the pulse oximeter, and a live face-video estimate (POS method on the face region) and warns when they differ by more than 8 bpm. The face-video estimate is operator feedback only, not a recorded reference.
