@@ -33,7 +33,8 @@ Stimuli use the six-row Williams-style sequence. Stroop, N-back, and conversatio
 - Every response, task completion, operator intervention, sensor state change, note, pause, resume, repeat, and timing transition produces a structured event.
 - Session mutations use optimistic revision checks to reduce conflicting writes.
 - Both portals reject stale polling responses so a slower heartbeat cannot roll the UI back to an older task revision.
-- A subject tab attached to an ended session automatically follows the newest active session for the same participant. Participant IDs can also be entered directly on the subject connection screen.
+- A subject tab attached to an ended session automatically follows the newest session prepared for the same participant. Participant IDs can also be entered directly on the subject connection screen while that session is still in setup; once the protocol starts, the subject display must use the session code.
+- Subject requests can only complete steps the subject controls: ratings on rating steps, tasks on task steps, clips, and timers that have actually elapsed on the server. Gates and operator checks can only be advanced from the instructor console.
 - The instructor can recover a saved session by code without restarting the protocol.
 
 ## Local development
@@ -66,4 +67,40 @@ See `acquisition_agent/README.md` for installation, device configuration, Linux 
 
 The registered protocol media is stored in `public/protocol-media`. New and restored sessions receive the six emotion clips, the guided body-scan video, and the relaxing nature video used behind the box-breathing pacer by default. The neutral washout remains an unlabelled grey fixation screen so it does not introduce another affective stimulus.
 
-The subject portal resolves media through the session snapshot and logs emotion-clip onset, offset, completion, and playback failure events. Instructor-supplied media can still replace any default through the existing session media configuration.
+All registered stimuli are normalized with `scripts/normalize-media.sh`: H.264 1280x720 (aspect preserved with black bars), 30 fps constant, faststart, and AAC 48 kHz stereo at -23 LUFS integrated (EBU R128, true peak at most -2 dBTP). Clip content and duration are unchanged (happy 93 s, fear 95 s, sad 148 s, anger 151 s, disgust 151 s, surprise 183 s), so duration should be kept as a covariate. Replacement media should go through the same script.
+
+The subject display downloads every stimulus before the protocol starts and plays from memory; Start is blocked until loading finishes. Clip onset is logged when the video actually starts playing, with the display's server-corrected time and the load delay. Pauses pause the video in place and are logged with the media time. Every step also logs `step_displayed` when it appears on screen.
+
+## Protocol v8 design
+
+- **Counterbalancing:** emotion order follows the six-row Williams square by participant; task order (Stroop, N-back, conversation) cycles through its six permutations every sixth participant, so all 36 pairings balance across 36 participants.
+- **Ratings after each clip:** 9-point SAM valence, arousal, and dominance, then the main felt emotion (six emotions or neutral) with 9-point intensity, then whether the clip was seen before.
+- **Stroop:** 30 seeded trials, 15 congruent and 15 incongruent, congruency runs of at most 3, 400 ms fixation, 2 s deadline; per-trial data and congruent/incongruent RT with interference.
+- **N-back:** 8-trial practice with feedback, then 20 scored trials with exactly 30% targets and no accidental matches; per-trial outcomes and d'. The level locks when practice starts.
+- **Safety screening (`lib/safety.ts`):** six yes/no questions must be answered in Recording setup before starting. A yes skips the mapped physical steps (breath hold, standing, exertion), logged as `step_skipped`. Breath hold stops automatically at 60 s. The questions are study defaults for the research team to review.
+- **Return-to-baseline gate:** heart rate and skin conductance recorded during the resting baselines define the reference. A gate is ready when each signal stays within max(2 SD, 5 bpm / 10%) of baseline for 15 s. Advancing earlier requires an override reason; outcomes are logged as `gate_verified`, `gate_override`, or `gate_unverified`.
+- **Automatic pause:** while running, losing the instructor console or a required stream pauses the session with `operator_lost` or `sensor_lost`.
+- **Photodiode sync:** assigning a photodiode port shows a 56 px screen-corner patch that flashes on clip start, clip end, and each step. The agent records the photodiode and the export reports the measured display latency for every flash.
+
+## Dataset rig features
+
+- **Participant details** (Recording setup): categorical descriptors that affect contactless sensing, including Fitzpatrick skin type, age band, sex, eyewear, facial hair, makeup, recent caffeine, nicotine, or exercise, heart-rate medication, and camera distances. No names or dates. Exported as BIDS-style `participants.tsv` and `participants.json`.
+- **Artifact labels**: buttons in the Overview and keyboard shortcuts in every tab while the protocol runs. T talking, L left seat, and O operator in view toggle on and off; C cough, M movement, D door or other person, and P phone mark the 3 seconds before the press to 1 second after. Exported as `artifacts.tsv`; the QA report lists artifact seconds per step.
+- **WiFi CSI setup**: channel, bandwidth, packet rate, and transmitter/receiver geometry, plus a 60-second empty-room baseline recorded during setup. A second CSI receiver is supported.
+- **Heart rate agreement**: live comparison of ECG, pulse oximeter, and a face-video rPPG estimate, with a warning when they differ by more than 8 bpm.
+- **Lossless face video, locked camera settings, radiometric thermal, respiration belt, and room environment sensor**: see `acquisition_agent/README.md`.
+
+## Protocol v9 options and dataset tools
+
+Chosen per session in Recording setup and fixed once recording starts (sessions created before v9 keep their original plan):
+
+- **Questionnaires** (`lib/questionnaires.ts`): PANAS at the start and end, TIPI at the start (before the resting baselines), and raw NASA-TLX after the Stroop and N-back tasks. Only instruments usable without licence fees are included; confirm the terms for your institution. Exported as `questionnaire_items.tsv` and `questionnaire_scores.tsv`.
+- **Paced breathing**: 60 seconds each at 6, 10, 15, and 20 breaths per minute, a reference for breathing-rate estimation from video, thermal, and CSI. **Longer exertion** runs 60 seconds instead of 20.
+- **Stimulus registry** (`lib/stimuli.ts`): register alternative clips per emotion and a neutral control clip. Each session stores its assigned exemplars, rotated evenly across participants. The **neutral control** block appears only once a neutral clip is registered.
+- **Continuous rating replay** (off by default; adds the clip durations): each clip replays while the participant moves a valence-arousal marker, sampled every 50 ms. Exported as `annotations.tsv`.
+
+Also in Recording setup: **consent and data sharing** (participation is required to start; per-modality sharing drives `share_manifest.json`, and withheld face video or voice can be replaced by a face colour trace or audio envelope when derived features are allowed). The **Cohort** tab shows session status, the 6 x 6 counterbalancing coverage, skin type, sex, and age balance among completed sessions, and per-session pauses, overrides, skips, and missing details, with a TSV export.
+
+## Analysis bundle
+
+When a session ends (or with `python -m meridian_agent --code CODE --token TOKEN --export-to RECORDING_DIR`), the agent writes `export/` next to the raw recordings. It includes `derivatives/physio_summary.tsv` (per-step ECG heart rate and RMSSD, oximeter heart rate and SpO2, skin conductance level and SCR count, belt breathing rate; `--derive-video` adds offline face-video rPPG), a BIDS-style copy in `export/bids/`, `consent.json`, `share_manifest.json`, and: `events.tsv`, `steps.tsv`, `ratings.tsv`, `tasks.tsv`, `stroop_trials.tsv`, `nback_trials.tsv`, `sync_check.tsv` (with a photodiode), `session.json`, and `qa_report.json` / `qa_report.md`. Onsets are on the acquisition host clock, matching the `host_epoch_ns` column of every sensor CSV. The QA report flags per-step coverage gaps in required streams, pauses, interrupted or restarted stimuli, repeats, timer steps that ran long or short, skipped steps, and gate outcomes.

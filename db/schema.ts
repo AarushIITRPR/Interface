@@ -35,3 +35,21 @@ export const mediaAssets = sqliteTable("media_assets", {
   size: integer("size").notNull(),
   createdAt: text("created_at").notNull(),
 }, (table) => [index("idx_media_created").on(table.createdAt)]);
+
+export const sessionTelemetry = sqliteTable("session_telemetry", {
+  code: text("code").primaryKey(),
+  sensorsJson: text("sensors_json"),
+  acquisitionJson: text("acquisition_json"),
+  operatorLastSeenAt: text("operator_last_seen_at"),
+  subjectLastSeenAt: text("subject_last_seen_at"),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const annotations = sqliteTable("annotations", {
+  id: text("id").primaryKey(),
+  code: text("code").notNull(),
+  stepId: text("step_id").notNull(),
+  chunk: integer("chunk").notNull(),
+  samplesJson: text("samples_json").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [index("idx_annotations_code").on(table.code, table.stepId, table.chunk)]);

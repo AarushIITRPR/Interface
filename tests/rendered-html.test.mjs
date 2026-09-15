@@ -29,7 +29,7 @@ test("server renders the Meridian portal choice", async () => {
 test("keeps the experiences separate and copy free of em dashes", async () => {
   const [subject, instructor, protocol, hosting] = await Promise.all([
     readFile(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/instructor/instructor-console.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/instructor/editorial-operator-console.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/protocol.ts", import.meta.url), "utf8"),
     readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8"),
   ]);
@@ -37,31 +37,23 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(subject, /removeItem\("meridian\.subject\.code"\)/);
   assert.match(subject, /role="alert"/);
   assert.match(subject, /Code shown by instructor/);
-  assert.match(subject, /operatorConnected/);
+  assert.match(subject, /useMediaPreload/);
+  assert.match(subject, /onPlaying=\{onPlaying\}/);
   assert.match(subject, /Change session/);
   assert.match(subject, /participantSessionRequest/);
   assert.match(subject, /next\.revision > current\.revision/);
   assert.match(subject, /\["complete","aborted"\]/);
   assert.match(instructor, /Recording health/);
   assert.match(instructor, /Subject code/);
-  assert.match(instructor, /Acquisition token/);
-  assert.match(instructor, /Acquisition agent offline/);
-  assert.match(instructor, /Sensor CSV/);
-  assert.match(instructor, /Recording manifest/);
-  assert.match(subject, /acquisitionReady/);
-  assert.match(instructor, /Previous task/);
-  assert.match(instructor, /Next task/);
-  assert.match(instructor, /Live event log/);
-  assert.match(instructor, /Session report/);
-  assert.match(instructor, /Connect, detect, validate/);
-  assert.match(instructor, /Hardware detected/);
-  assert.match(instructor, /Data detected/);
-  assert.match(instructor, /Quality acceptable/);
-  assert.match(instructor, /Test all selected devices/);
-  assert.match(instructor, /Start recording and protocol/);
-  assert.match(instructor, /Short rolling quality windows/);
-  assert.match(instructor, /Session quality report/);
-  for (const mode of ["setup","monitor","protocol","review"]) assert.match(instructor,new RegExp(`"${mode}"`));
+  assert.match(instructor, /--token \{snapshot\.acquisitionToken\}/);
+  assert.match(instructor, /Recording setup/);
+  assert.match(instructor, /RUN PREFLIGHT/);
+  assert.match(instructor, /START SESSION/);
+  assert.match(instructor, /Session ledger/);
+  assert.match(instructor, /EXPORT MANIFEST/);
+  assert.match(instructor, /isNewerSnapshot/);
+  assert.match(subject, /serverNow\(\)/);
+  for (const mode of ["overview","protocol","review"]) assert.match(instructor,new RegExp(`"${mode}"`));
   assert.match(protocol, /WILLIAMS6/);
   assert.match(protocol, /Guided body scan/);
   assert.match(hosting, /"d1": "DB"/);
@@ -83,7 +75,7 @@ test("ships every registered protocol stimulus", async () => {
   assert.match(subject, /className="breathing-video"/);
 });
 
-test("keeps the legacy SAM questions with discrete ten-point responses", async () => {
+test("uses nine-point SAM questions with discrete emotion and familiarity checks", async () => {
   const [subject, protocol, route] = await Promise.all([
     readFile(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/protocol.ts", import.meta.url), "utf8"),
@@ -95,8 +87,10 @@ test("keeps the legacy SAM questions with discrete ten-point responses", async (
   for (const anchor of ["Unpleasant", "Pleasant", "Calm", "Excited", "Controlled", "In control"]) {
     assert.match(subject, new RegExp(anchor));
   }
-  assert.match(subject, /Array\.from\(\{length:10\}/);
+  assert.match(subject, /points\(SAM_POINTS\)/);
+  assert.match(subject, /Which emotion did you mainly feel\?/);
+  assert.match(subject, /Have you seen this video before\?/);
   assert.doesNotMatch(subject, /type="range"/);
   assert.match(protocol, /Valence, arousal, and dominance/);
-  assert.match(route, /Math\.min\(10,/);
+  assert.match(route, /scale\(payload\.valence,SAM_POINTS\)/);
 });

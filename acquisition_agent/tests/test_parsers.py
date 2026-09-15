@@ -49,6 +49,25 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed[0][2],-47.0)
         self.assertEqual(parsed[1],"RSSI -47 dBm")
 
+    def test_csi_amplitudes_from_iq_and_amplitude_lines(self):
+        from meridian_agent.derivatives import csi_amplitudes
+        self.assertEqual(csi_amplitudes("218034440,29793,-38,-94,3,3,4,0,0,-6,8"),[5.0,0.0,10.0])
+        self.assertEqual(csi_amplitudes("CSI_DATA,1000,42,-47,11,-92,6,1.5,-2.5,3"),[1.5,2.5,3.0])
+
+    def test_second_face_camera_uses_lossless_recorder(self):
+        from meridian_agent.sensors import CameraSensor, make_sensor
+        sensor = make_sensor("face2","/dev/v4l/by-id/usb-Sony_ILCE-6700-video-index0",115200,self.root,0)
+        self.assertIsInstance(sensor,CameraSensor)
+        self.assertEqual(sensor.path.relative_to(self.root).as_posix(),"face2/face2.mkv")
+
+    def test_stereo_downmix_keeps_one_sided_microphone(self):
+        import numpy as np
+        from meridian_agent.sensors import downmix_int16
+        stereo = np.array([[0,1000],[0,-2000],[10,32767],[-32768,-32768]],dtype=np.int16).tobytes()
+        mono = np.frombuffer(downmix_int16(stereo,2),dtype=np.int16).tolist()
+        self.assertEqual(mono,[500,-1000,16388,-32768])
+        self.assertEqual(downmix_int16(b"\x01\x02",1),b"\x01\x02")
+
     def test_gsr_json(self):
         sensor = GsrSensor("gsr","COM7",115200,self.root,0)
         parsed = sensor.parse('{"uS":2.34,"raw":1856,"stress":42,"zScore":0.87}')

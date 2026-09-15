@@ -13,14 +13,17 @@ import time
 import wave
 from collections import deque
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
 from .models import RecordingArtifact, SensorReport
+from .derivatives import csi_amplitudes
+from .rppg import LiveRppg
 
 
-TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0}
+TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":20.0,"ecg":125.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0,"face2":30.0}
 
 FRONTIERX_SCALE_PER_COUNT = 0.0000038146972
 FRONTIERX_SAMPLE_RATE_HZ = 125.0
@@ -66,6 +69,11 @@ class Sensor:
         self._total_gap_s = 0.0
         self._longest_gap_s = 0.0
         self._previous_sample_mono = 0.0
+        self._side_capture: tuple | None = None
+        self._final_report: SensorReport | None = None
+        # Optional callback (sensor_id, rate_hz, value, monotonic_s), used for Lab Streaming Layer output.
+        self.sample_listener: Callable[[str, float | None, float, float], None] | None = None
+        self._side_rows = 0
         self._report.targetRateHz = TARGET_RATES.get(sensor_id)
 
     def start(self) -> None:
@@ -87,8 +95,45 @@ class Sensor:
             self.started_at = iso_now()
             self._recording.set()
 
+    def start_side_capture(self, relative_path: str, header: list[str]) -> Path:
+        """Write rows to a separate file outside the main recording, e.g. an empty-room CSI baseline during setup."""
+        path = self.session_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("w", newline="", buffering=1)
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        with self._lock:
+            self._side_capture = (handle, writer)
+            self._side_rows = 0
+        return path
+
+    def stop_side_capture(self) -> int:
+        with self._lock:
+            capture, self._side_capture = self._side_capture, None
+            rows = self._side_rows
+        if capture:
+            capture[0].close()
+        return rows
+
+    def _side_write(self, row: list[object]) -> None:
+        with self._lock:
+            if self._side_capture is None:
+                return
+            self._side_capture[1].writerow(row)
+            self._side_rows += 1
+
+    def record_dropped(self, sample_count: int) -> None:
+        """Count samples lost before they reached the recorder, such as a full audio or video queue."""
+        if sample_count <= 0 or not self._recording.is_set():
+            return
+        with self._lock:
+            self._dropped_samples += sample_count
+            self._gap_count += 1
+
     def stop_recording(self) -> None:
         if self._recording.is_set():
+            # Judge stream health when recording ends; later checks would count the finalization time as a stall.
+            self._final_report = self.report()
             self._recording_ended_mono = time.monotonic()
             self.ended_at = iso_now()
             self._recording.clear()
@@ -109,7 +154,8 @@ class Sensor:
         current = time.monotonic()
         with self._lock:
             target = self._report.targetRateHz or 0.0
-            if self._previous_sample_mono and target:
+            # Like record_dropped, gaps only count as lost samples while recording; setup streams have no recorded denominator.
+            if self._previous_sample_mono and target and self._recording.is_set():
                 gap = current - self._previous_sample_mono
                 expected = max(0.001, sample_count / target)
                 if gap > max(0.5, expected * 5):
@@ -138,6 +184,12 @@ class Sensor:
                 self._metrics.update(metrics)
             if validation is not None:
                 self._validation = validation[:8]
+        listener = self.sample_listener
+        if listener is not None and point is not None and math.isfinite(float(point)):
+            try:
+                listener(self.sensor_id, rate_hz, float(point), current)
+            except Exception:
+                self.sample_listener = None
 
     def report(self) -> SensorReport:
         with self._lock:
@@ -181,7 +233,7 @@ class Sensor:
     def artifact(self) -> RecordingArtifact | None:
         if not self.path or not self.path.exists():
             return None
-        report = self.report()
+        report = self._final_report or self.report()
         duration = max(0.0,(self._recording_ended_mono or time.monotonic()) - self._recording_started_mono) if self._recording_started_mono else 0.0
         average_rate = self._recorded_samples / duration if duration else 0.0
         quality = "pass" if self._recorded_samples > 0 and report.status not in ("error", "missing") else "fail"
@@ -219,7 +271,7 @@ class UnavailableSensor(Sensor):
 
 
 class SimulatedSensor(Sensor):
-    RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":50.0,"ecg":500.0,"thermal":9.0}
+    RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":1000.0,"gsr":50.0,"ecg":500.0,"thermal":9.0,"photodiode":1000.0,"csi2":100.0,"resp":50.0,"environment":1.0,"face2":30.0}
 
     def __init__(self, sensor_id: str, session_dir: Path, origin_mono: float):
         super().__init__(sensor_id,"simulator",session_dir,origin_mono)
@@ -257,10 +309,24 @@ class SimulatedSensor(Sensor):
                 elif self.sensor_id == "audio":
                     point = 38 + 24 * abs(math.sin(phase * 1.8))
                     metrics = {"levelPct":round(point),"sampleRate":48000}
-                elif self.sensor_id in ("face","thermal"):
-                    metrics = {"width":1280 if self.sensor_id == "face" else 640,"height":720 if self.sensor_id == "face" else 480,"fps":rate,"droppedFrames":0}
+                elif self.sensor_id in ("face","face2","thermal"):
+                    metrics = {"width":640 if self.sensor_id == "thermal" else 1280,"height":480 if self.sensor_id == "thermal" else 720,"fps":rate,"droppedFrames":0}
+                    if self.sensor_id in ("face","face2"):
+                        metrics.update({"faceDetected":True,"rppgHeartRate":round(71.5 + 1.5 * math.sin(phase / 9),1),"rppgQuality":0.52})
+                elif self.sensor_id == "resp":
+                    point = 2048 + 600 * math.sin(phase / 1.6)
+                    latest = "15 breaths/min"
+                    metrics = {"breathingRate":15.0,"raw":round(point)}
+                elif self.sensor_id == "environment":
+                    latest = "23.4 C, 48% RH, 310 lux"
+                    metrics = {"tempC":23.4,"humidityPct":48.0,"lux":310.0}
+                elif self.sensor_id == "csi2":
+                    latest = "RSSI -52 dBm"
+                    metrics = {"rssi":-52,"lostPackets":0,"subcarriers":52}
+                row = [time.time_ns(),f"{time.monotonic()-self.origin_mono:.6f}",batch,latest]
                 if self._recording.is_set():
-                    writer.writerow([time.time_ns(),f"{time.monotonic()-self.origin_mono:.6f}",batch,latest])
+                    writer.writerow(row)
+                self._side_write(row)
                 self.sample(latest,32 if self._recording.is_set() else 0,batch,rate,point,metrics,validation)
 
 
@@ -321,6 +387,7 @@ class SerialLineSensor(Sensor):
                         row = [time.time_ns(), f"{time.monotonic() - self.origin_mono:.6f}", *values]
                         if self._recording.is_set():
                             writer.writerow(row)
+                        self._side_write(row)
                         point,metrics,validation = self.telemetry(values)
                         self.sample(latest,len(raw) if self._recording.is_set() else 0,point=point,metrics=metrics,validation=validation)
                 except Exception as exc:
@@ -363,6 +430,113 @@ class EmgSensor(SerialLineSensor):
         return float(centered),{"raw":raw,"rms":round(abs(centered)/2048,3),"clippingPct":100.0 if raw in (0,4095) else 0.0},["Hardware detected","EMG packet format valid","Samples arriving"]
 
 
+class AdcLineSensor(SerialLineSensor):
+    """ESP32 analogue channel sent as `t_us,raw` or `t_us,seq,raw` lines."""
+
+    header = ["host_epoch_ns", "monotonic_s", "device_t_us", "raw"]
+
+    def parse(self, line: str) -> tuple[list[object], str] | None:
+        if line.startswith("#"):
+            return None
+        parts = line.split(",")
+        if len(parts) not in (2, 3):
+            return None
+        try:
+            device_t, raw = int(parts[0]), int(parts[-1])
+        except ValueError:
+            return None
+        return [device_t, raw], f"Level {raw}"
+
+
+class PhotodiodeSensor(AdcLineSensor):
+    """Light sensor on the subject screen's sync patch."""
+
+    def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
+        raw = int(values[1])
+        low = min(raw, int(self._metrics.get("minLevel", raw)))
+        high = max(raw, int(self._metrics.get("maxLevel", raw)))
+        return float(raw),{"level":raw,"minLevel":low,"maxLevel":high},["Hardware detected","Photodiode line format valid","Samples arriving"]
+
+
+def breathing_rate_bpm(times_s: list[float], values: list[float]) -> float | None:
+    """Breaths per minute from a respiration belt trace: smoothed, mean-removed, upward zero crossings with hysteresis."""
+    if len(values) < 20 or times_s[-1] - times_s[0] < 10:
+        return None
+    window = max(1, len(values) // max(1, round(times_s[-1] - times_s[0])) // 2)
+    smoothed = [sum(values[max(0, i - window):i + window + 1]) / len(values[max(0, i - window):i + window + 1]) for i in range(len(values))]
+    mean = sum(smoothed) / len(smoothed)
+    centred = [value - mean for value in smoothed]
+    spread = (max(centred) - min(centred)) or 1.0
+    band = 0.1 * spread
+    crossings = []
+    state = centred[0] > 0
+    for stamp, value in zip(times_s, centred):
+        if not state and value > band:
+            crossings.append(stamp)
+            state = True
+        elif state and value < -band:
+            state = False
+    if len(crossings) < 2:
+        return None
+    return round(60 * (len(crossings) - 1) / (crossings[-1] - crossings[0]), 1)
+
+
+class RespirationSensor(AdcLineSensor):
+    """Chest respiration belt (strain gauge or conductive rubber) on an ESP32 ADC, the breathing-rate reference."""
+
+    def __init__(self, sensor_id: str, port: str, baud: int, session_dir: Path, origin_mono: float):
+        super().__init__(sensor_id, port, baud, session_dir, origin_mono)
+        self._trace: deque[tuple[float, float]] = deque(maxlen=3000)
+        self._last_rate_mono = 0.0
+
+    def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
+        raw = float(values[1])
+        current = time.monotonic()
+        self._trace.append((current, raw))
+        while self._trace and current - self._trace[0][0] > 30:
+            self._trace.popleft()
+        metrics: dict = {"raw": raw}
+        if current - self._last_rate_mono >= 2:
+            self._last_rate_mono = current
+            rate = breathing_rate_bpm([t for t, _ in self._trace], [v for _, v in self._trace])
+            if rate is not None:
+                metrics["breathingRate"] = rate
+        return raw,metrics,["Hardware detected","Respiration line format valid","Samples arriving"]
+
+
+class EnvironmentSensor(SerialLineSensor):
+    """Room temperature, humidity, light at the face, and pressure (e.g. BME280 + light sensor), about 1 Hz.
+
+    Accepts `t_ms,temp_c,humidity_pct,lux[,pressure_hpa]` or JSON with the same keys (`rh` for humidity).
+    """
+
+    header = ["host_epoch_ns", "monotonic_s", "device_t_ms", "temp_c", "humidity_pct", "lux", "pressure_hpa"]
+
+    def parse(self, line: str) -> tuple[list[object], str] | None:
+        if line.startswith("#"):
+            return None
+        try:
+            if line.startswith("{"):
+                data = json.loads(line)
+                values = [data.get("t_ms", ""), data.get("temp_c"), data.get("humidity_pct", data.get("rh")), data.get("lux"), data.get("pressure_hpa", "")]
+            else:
+                parts = line.split(",")
+                if len(parts) not in (4, 5):
+                    return None
+                values = parts + ([""] if len(parts) == 4 else [])
+            temp, humidity, lux = float(values[1]), float(values[2]), float(values[3])
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return None
+        pressure = "" if values[4] in ("", None) else float(values[4])
+        return [values[0], temp, humidity, lux, pressure], f"{temp:.1f} C, {humidity:.0f}% RH, {lux:.0f} lux"
+
+    def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
+        metrics = {"tempC": float(values[1]), "humidityPct": float(values[2]), "lux": float(values[3])}
+        if values[4] != "":
+            metrics["pressureHpa"] = float(values[4])
+        return float(values[3]),metrics,["Hardware detected","Environment line format valid","Samples arriving"]
+
+
 class CsiSensor(SerialLineSensor):
     header = ["host_epoch_ns", "monotonic_s", "device_timestamp", "packet_id", "rssi", "raw_line"]
 
@@ -382,15 +556,9 @@ class CsiSensor(SerialLineSensor):
         return [timestamp, packet_id, rssi, line], f"RSSI {rssi:g} dBm"
 
     def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
-        rssi = float(values[2]); raw_line = str(values[3]); parts = raw_line[9:].split(",") if raw_line.startswith("CSI_DATA,") else raw_line.split(",")
-        amplitudes: list[float] = []
-        for value in parts[6:58]:
-            try:
-                amplitudes.append(abs(float(value)))
-            except ValueError:
-                continue
+        rssi = float(values[2]); amplitudes = csi_amplitudes(str(values[3]))
         if amplitudes:
-            self._series.clear(); self._series.extend(amplitudes[:52])
+            self._series.clear(); self._series.extend(amplitudes[:64])
         return rssi,{"rssi":rssi,"subcarriers":len(amplitudes) or 52},["Hardware detected","CSI packet format valid","Samples arriving"]
 
 
@@ -513,7 +681,8 @@ class FrontierXEcgSensor(Sensor):
                 server_number = random.randint(1,FRONTIERX_SERVER_COUNTS[self.domain])
                 try:
                     self.set_state("unknown",f"Connecting to Frontier X server {server_number}")
-                    socket_url = f"wss://liveecgwsapi.{self.domain}/server{server_number}?Authorization=token"
+                    # MERIDIAN_FRONTIERX_WS_URL points at a local emulator for testing (tools/emulate_devices.py).
+                    socket_url = os.environ.get("MERIDIAN_FRONTIERX_WS_URL") or f"wss://liveecgwsapi.{self.domain}/server{server_number}?Authorization=token"
                     socket_client = websocket.create_connection(socket_url,timeout=10)
                     socket_client.settimeout(1)
                     socket_client.send(frontierx_subscribe_payload(self.user_id,server_number))
@@ -655,11 +824,159 @@ class OximeterSensor(Sensor):
                             pass
 
 
+def _frames_equal(left, right) -> bool:
+    try:
+        import numpy as np
+        return bool(np.array_equal(left, right))
+    except Exception:
+        return False
+
+
+VIDEO_CODECS = {
+    # fourcc, file extension, rough compressed size as a share of raw frames (for disk estimates)
+    "ffv1": ("FFV1", ".mkv", 0.5),
+    "mjpg": ("MJPG", ".avi", 0.08),
+}
+
+
+@dataclass
+class CameraOptions:
+    codec: str = "ffv1"
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    lock_settings: bool = True
+    thermal_format: str = "rgb"
+    thermal_units: str = "centikelvin"
+
+
+def gb_per_hour(width: int, height: int, fps: float, bytes_per_pixel: float, share: float) -> float:
+    return width * height * bytes_per_pixel * fps * share * 3600 / 1e9
+
+
+class Y16Writer:
+    """Lossless 16-bit thermal frames: little-endian uint16 concatenated, described by a JSON sidecar."""
+
+    def __init__(self, path: str, fps: float, size: tuple[int, int], units: str):
+        self.path = Path(path)
+        self.size = size
+        self.handle = self.path.open("wb")
+        meta = {"format": "uint16le frames, row-major", "width": size[0], "height": size[1], "nominalFps": fps, "units": units,
+                "celsius": "value / 100 - 273.15" if units == "centikelvin" else "camera specific",
+                "frameTimestamps": self.path.with_name(f"{self.path.stem}_frames.csv").name}
+        self.path.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    def write(self, frame) -> None:
+        import numpy as np
+        self.handle.write(np.ascontiguousarray(frame, dtype="<u2").tobytes())
+
+    def release(self) -> None:
+        self.handle.close()
+
+
+def to_y16(frame, width: int, height: int):
+    """Normalize what OpenCV returns for Y16 capture (2-D uint16, or a flat byte buffer) to a height x width uint16 array."""
+    import numpy as np
+    array = np.asarray(frame)
+    if array.dtype == np.uint16 and array.ndim == 2:
+        return array
+    flat = array.reshape(-1)
+    if flat.dtype == np.uint8 and flat.size >= width * height * 2:
+        return flat[: width * height * 2].view("<u2").reshape(height, width)
+    raise ValueError(f"Unexpected Y16 frame {array.dtype} {array.shape}")
+
+
+def lock_camera_settings(capture, cv2, system: str) -> dict:
+    """Freeze auto exposure, white balance, and gain at their settled values so brightness does not drift under rPPG."""
+    props = {"exposure": cv2.CAP_PROP_EXPOSURE, "gain": cv2.CAP_PROP_GAIN, "wbTemperature": cv2.CAP_PROP_WB_TEMPERATURE}
+    settled = {name: capture.get(prop) for name, prop in props.items()}
+    manual_exposure = 0.25 if system == "Windows" else 1.0
+    capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, manual_exposure)
+    capture.set(cv2.CAP_PROP_AUTO_WB, 0)
+    for name, prop in props.items():
+        if settled[name] not in (None, -1, 0) or name == "gain":
+            capture.set(prop, settled[name])
+    readback = {name: capture.get(prop) for name, prop in props.items()}
+    auto_exposure = capture.get(cv2.CAP_PROP_AUTO_EXPOSURE)
+    auto_wb = capture.get(cv2.CAP_PROP_AUTO_WB)
+    locked = abs(auto_exposure - manual_exposure) < 1e-6 and auto_wb == 0
+    return {"locked": bool(locked), "settled": settled, "readback": readback, "autoExposure": auto_exposure, "autoWhiteBalance": auto_wb}
+
+
+class FrameRecorder:
+    """Writes video frames on a background thread and logs one timestamp row per frame actually written.
+
+    The video container only stores a nominal frame rate, so `<sensor>_frames.csv` is the source of truth for
+    aligning video with the other streams.
+    """
+
+    def __init__(self, video_path: Path, fps: float, origin_mono: float, open_writer: Callable, max_queue: int = 60):
+        self.video_path = video_path
+        self.timestamps_path = video_path.with_name(f"{video_path.stem}_frames.csv")
+        self.fps = fps
+        self.origin_mono = origin_mono
+        self.open_writer = open_writer
+        self.frames: queue.Queue = queue.Queue(maxsize=max_queue)
+        self.written = 0
+        self.dropped = 0
+        self.error = ""
+        self._thread = threading.Thread(target=self._run, name=f"meridian-writer-{video_path.stem}", daemon=True)
+        self._thread.start()
+
+    def submit(self, frame, host_epoch_ns: int, monotonic: float) -> bool:
+        try:
+            self.frames.put_nowait((frame, host_epoch_ns, monotonic))
+            return True
+        except queue.Full:
+            self.dropped += 1
+            return False
+
+    def close(self, timeout: float = 10.0) -> None:
+        self.frames.put(None)
+        self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        writer = None
+        try:
+            with self.timestamps_path.open("a", newline="", buffering=1) as handle:
+                stamps = csv.writer(handle)
+                if self.timestamps_path.stat().st_size == 0:
+                    stamps.writerow(["frame_index","host_epoch_ns","monotonic_s","repeated"])
+                previous = None
+                while True:
+                    item = self.frames.get()
+                    if item is None:
+                        break
+                    frame, host_epoch_ns, monotonic = item
+                    if writer is None:
+                        height, width = frame.shape[:2]
+                        writer = self.open_writer(str(self.video_path), self.fps, (width, height))
+                        if writer is None:
+                            raise RuntimeError("Cannot create camera recording")
+                    writer.write(frame)
+                    # Identical consecutive frames mark a frozen stream, e.g. a thermal camera's flat-field correction.
+                    repeated = previous is not None and getattr(frame, "shape", None) == getattr(previous, "shape", None) and _frames_equal(frame, previous)
+                    stamps.writerow([self.written, host_epoch_ns, f"{monotonic-self.origin_mono:.6f}", int(repeated)])
+                    previous = frame
+                    self.written += 1
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {str(exc)[:120]}"
+        finally:
+            if writer is not None:
+                writer.release()
+
+
 class CameraSensor(Sensor):
-    def __init__(self, sensor_id: str, source: str, session_dir: Path, origin_mono: float):
+    WARMUP_SEC = 2.0
+
+    def __init__(self, sensor_id: str, source: str, session_dir: Path, origin_mono: float, options: CameraOptions | None = None):
         super().__init__(sensor_id, source, session_dir, origin_mono)
         self.source = int(source) if source.isdigit() else source
-        self.path = session_dir / sensor_id / f"{sensor_id}.avi"
+        self.options = options or CameraOptions()
+        self.radiometric = sensor_id == "thermal" and self.options.thermal_format == "y16"
+        codec = VIDEO_CODECS.get(self.options.codec, VIDEO_CODECS["ffv1"])
+        self.path = session_dir / sensor_id / (f"{sensor_id}_y16.raw" if self.radiometric else f"{sensor_id}{codec[1]}")
+        self.estimated_gb_per_hour = 18.0
         self._preview_lock = threading.Lock()
         self._preview_frame: bytes | None = None
 
@@ -670,60 +987,122 @@ class CameraSensor(Sensor):
     def run(self) -> None:
         try:
             import cv2
+            import numpy as np
         except Exception as exc:
             self.set_state("error",f"Camera support unavailable: {type(exc).__name__}")
             return
 
+        fourcc, _, share = VIDEO_CODECS.get(self.options.codec, VIDEO_CODECS["ffv1"])
+        options = self.options
+
+        def open_writer(path: str, fps: float, size: tuple[int,int]):
+            if self.radiometric:
+                return Y16Writer(path, fps, size, options.thermal_units)
+            writer = cv2.VideoWriter(path,cv2.VideoWriter_fourcc(*fourcc),fps,size)
+            return writer if writer.isOpened() else None
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         capture = None
-        writer = None
+        recorder: FrameRecorder | None = None
+        system = platform.system()
+        # A video file can stand in for a camera when testing without hardware; it is replayed in real time and looped.
+        file_source = isinstance(self.source, str) and Path(self.source).is_file()
         try:
-            backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_V4L2 if platform.system() == "Linux" else cv2.CAP_ANY
+            backend = cv2.CAP_ANY if file_source else cv2.CAP_DSHOW if system == "Windows" else cv2.CAP_V4L2 if system == "Linux" else cv2.CAP_ANY
             capture = cv2.VideoCapture(self.source,backend)
             if not capture.isOpened():
                 raise RuntimeError(f"Cannot open camera {self.source}")
+            if self.radiometric:
+                capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"Y16 "))
+                capture.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+            if options.width and options.height:
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, options.width)
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, options.height)
+            if options.fps:
+                capture.set(cv2.CAP_PROP_FPS, options.fps)
             width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
             height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
             requested_fps = capture.get(cv2.CAP_PROP_FPS)
-            fps = requested_fps if 1 <= requested_fps <= 120 else 30.0
-            self.set_state("connected",f"{width}x{height} at {fps:.1f} fps")
+            fps = requested_fps if 1 <= requested_fps <= 240 else 30.0
+            self.estimated_gb_per_hour = gb_per_hour(width, height, fps, 2 if self.radiometric else 3, 1.0 if self.radiometric else share)
+            self.set_state("connected",f"{width}x{height} at {fps:.1f} fps, {'Y16 raw' if self.radiometric else options.codec}")
+            settings: dict = {"sensor": self.sensor_id, "codec": "y16-raw" if self.radiometric else options.codec, "width": width, "height": height,
+                              "fps": fps, "requested": {"width": options.width, "height": options.height, "fps": options.fps}, "lock": None}
+            started = time.monotonic()
+            lock_pending = options.lock_settings and not self.radiometric and not file_source
+            if file_source:
+                settings["lock"] = {"locked": False, "reason": "video file source"}
+            file_frames = 0
+            rppg = LiveRppg() if self.sensor_id in ("face","face2") and not self.radiometric else None
             frame_times: deque[float] = deque(maxlen=90)
             last_preview = 0.0
             dropped = 0
             while not self._stop.is_set():
                 ok, frame = capture.read()
+                if file_source:
+                    if not ok:
+                        capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
+                    file_frames += 1
+                    self._stop.wait(max(0.0, started + file_frames / fps - time.monotonic()))
                 if not ok:
                     dropped += 1
                     self.set_state("delayed","Camera frame unavailable")
                     self._stop.wait(0.05)
                     continue
+                if self.radiometric:
+                    frame = to_y16(frame, width, height)
+                host_epoch_ns = time.time_ns()
                 current = time.monotonic(); frame_times.append(current)
                 measured = (len(frame_times)-1)/max(0.001,frame_times[-1]-frame_times[0]) if len(frame_times)>1 else fps
+                if lock_pending and current - started >= self.WARMUP_SEC:
+                    lock_pending = False
+                    settings["lock"] = lock_camera_settings(capture, cv2, system)
+                if (settings["lock"] is not None or not lock_pending) and not settings.get("written"):
+                    settings["source"] = "file" if file_source else "camera"
+                    settings["written"] = True
+                    (self.path.parent / "camera_settings.json").write_text(json.dumps({k: v for k, v in settings.items() if k != "written"}, indent=2), encoding="utf-8")
                 if current-last_preview >= 0.2:
                     preview = frame
-                    if width > 640:
-                        preview = cv2.resize(frame,(640,max(1,round(height*640/width))))
+                    if self.radiometric:
+                        low, high = float(frame.min()), float(frame.max())
+                        scaled = ((frame.astype(np.float32) - low) * (255.0 / max(1.0, high - low))).astype(np.uint8)
+                        preview = cv2.applyColorMap(scaled, cv2.COLORMAP_INFERNO)
+                    if preview.shape[1] > 640:
+                        preview = cv2.resize(preview,(640,max(1,round(preview.shape[0]*640/preview.shape[1]))))
                     encoded,jpeg = cv2.imencode(".jpg",preview,[cv2.IMWRITE_JPEG_QUALITY,65])
                     if encoded:
                         with self._preview_lock:
                             self._preview_frame = jpeg.tobytes()
                     last_preview=current
-                if self._recording.is_set() and writer is None:
-                    self.path.parent.mkdir(parents=True,exist_ok=True)
-                    writer = cv2.VideoWriter(str(self.path),cv2.VideoWriter_fourcc(*"MJPG"),fps,(width,height))
-                    if not writer.isOpened():
-                        writer=None
-                        raise RuntimeError("Cannot create camera recording")
-                if not self._recording.is_set() and writer is not None:
-                    writer.release(); writer=None
-                if writer is not None:
-                    writer.write(frame)
-                self.sample(f"{width}x{height}",int(frame.nbytes) if writer is not None else 0,rate_hz=round(measured,2),point=float(measured),metrics={"width":width,"height":height,"fps":round(measured,2),"droppedFrames":dropped},validation=["Hardware detected","Frames arriving","Preview available","Frame rate measured"])
+                if self._recording.is_set() and recorder is None:
+                    recorder = FrameRecorder(self.path,fps,self.origin_mono,open_writer)
+                if not self._recording.is_set() and recorder is not None:
+                    recorder.close(); recorder=None
+                queued = False
+                if recorder is not None:
+                    if recorder.error:
+                        raise RuntimeError(recorder.error)
+                    queued = recorder.submit(frame,host_epoch_ns,current)
+                    if not queued:
+                        self.record_dropped(1)
+                locked = (settings["lock"] or {}).get("locked")
+                metrics = {"width":width,"height":height,"fps":round(measured,2),"droppedFrames":dropped+(recorder.dropped if recorder else 0),"codec":settings["codec"]}
+                validation = ["Hardware detected","Frames arriving","Preview available","Frame rate measured"]
+                if settings["lock"] is not None:
+                    metrics["settingsLocked"] = bool(locked)
+                    validation.append("Exposure and white balance locked" if locked else "Exposure or white balance could not be locked")
+                if rppg is not None:
+                    metrics.update(rppg.update(frame, current, cv2))
+                if self.radiometric and options.thermal_units == "centikelvin":
+                    metrics["minTempC"] = round(float(frame.min()) / 100 - 273.15, 2)
+                    metrics["maxTempC"] = round(float(frame.max()) / 100 - 273.15, 2)
+                self.sample(f"{width}x{height}",int(frame.nbytes) if queued else 0,rate_hz=round(measured,2),point=float(measured),metrics=metrics,validation=validation)
         except Exception as exc:
             self.set_state("error",f"{type(exc).__name__}: {str(exc)[:120]}")
         finally:
-            if writer is not None:
-                writer.release()
+            if recorder is not None:
+                recorder.close()
             if capture is not None:
                 capture.release()
 
@@ -743,26 +1122,33 @@ class AudioSensor(Sensor):
             return
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        chunks: queue.Queue[bytes] = queue.Queue(maxsize=256)
+        chunks: queue.Queue[tuple[bytes,int]] = queue.Queue(maxsize=256)
+        missed = {"frames":0}
 
         def callback(indata, frames, timing, status):
             del timing
             if status:
                 self.set_state("delayed",str(status))
             try:
-                chunks.put_nowait(bytes(indata))
+                chunks.put_nowait((bytes(indata),missed["frames"]))
+                missed["frames"] = 0
             except queue.Full:
+                missed["frames"] += frames
+                self.record_dropped(frames)
                 self.set_state("delayed","Audio writer queue full")
 
         target = None
         try:
-            with sd.RawInputStream(samplerate=self.sample_rate,channels=1,dtype="int16",device=self.audio_device,callback=callback):
-                self.set_state("connected",f"Mono {self.sample_rate} Hz")
+            # Stereo inputs are averaged to mono: a mic on one side of a camera's jack would be lost if only the first channel were read.
+            channels = max(1, min(2, int(sd.query_devices(self.audio_device, "input")["max_input_channels"])))
+            with sd.RawInputStream(samplerate=self.sample_rate,channels=channels,dtype="int16",device=self.audio_device,callback=callback):
+                self.set_state("connected",f"Mono {self.sample_rate} Hz" + (" (stereo input averaged)" if channels == 2 else ""))
                 while not self._stop.is_set():
                     try:
-                        chunk = chunks.get(timeout=0.25)
+                        chunk, silence_frames = chunks.get(timeout=0.25)
                     except queue.Empty:
                         continue
+                    chunk = downmix_int16(chunk, channels)
                     if self._recording.is_set() and target is None:
                         self.path.parent.mkdir(parents=True,exist_ok=True)
                         target = wave.open(str(self.path),"wb")
@@ -770,18 +1156,37 @@ class AudioSensor(Sensor):
                     if not self._recording.is_set() and target is not None:
                         target.close(); target=None
                     if target is not None:
+                        if silence_frames:
+                            target.writeframesraw(bytes(silence_frames*2))
                         target.writeframesraw(chunk)
                     frames = len(chunk) // 2
-                    from array import array
-                    samples = array("h"); samples.frombytes(chunk)
-                    rms = math.sqrt(sum(value*value for value in samples)/max(1,len(samples)))
-                    level = min(100,round(rms/32768*240,1))
+                    level = audio_level_pct(chunk)
                     self.sample("Audio signal detected" if level>1 else "Audio connected",len(chunk) if target is not None else 0,frames,float(self.sample_rate),point=level,metrics={"levelPct":level,"sampleRate":self.sample_rate},validation=["Hardware detected","Audio stream open",("Signal detected" if level>1 else "Waiting for sound")])
         except Exception as exc:
             self.set_state("error",f"{type(exc).__name__}: {str(exc)[:120]}")
         finally:
             if target is not None:
                 target.close()
+
+
+def downmix_int16(chunk: bytes, channels: int) -> bytes:
+    """Average interleaved int16 PCM channels into mono."""
+    if channels <= 1:
+        return chunk
+    import numpy as np
+    usable = len(chunk) // (2 * channels) * (2 * channels)
+    frames = np.frombuffer(chunk[:usable], dtype=np.int16).reshape(-1, channels).astype(np.int32)
+    return (frames.sum(axis=1) // channels).astype(np.int16).tobytes()
+
+
+def audio_level_pct(chunk: bytes) -> float:
+    """RMS level of mono int16 PCM, scaled to 0-100 for the operator meter."""
+    import numpy as np
+    samples = np.frombuffer(chunk[:len(chunk)//2*2], dtype=np.int16)
+    if samples.size == 0:
+        return 0.0
+    rms = float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
+    return min(100.0, round(rms/32768*240, 1))
 
 
 def auto_oximeter_port() -> str:
@@ -795,41 +1200,75 @@ def auto_oximeter_port() -> str:
     return ""
 
 
+def stable_links(directory: Path, suffix: str = "") -> dict[str,str]:
+    """Map resolved device nodes to their stable /dev/.../by-id links, which survive replugging."""
+    links: dict[str,str] = {}
+    try:
+        for link in sorted(directory.iterdir()):
+            if suffix and not link.name.endswith(suffix):
+                continue
+            links.setdefault(os.path.realpath(link), str(link))
+    except OSError:
+        pass
+    return links
+
+
+def serial_inventory(ports, by_id: dict[str,str]) -> list[dict]:
+    """USB serial adapters only: legacy on-board ttyS ports have no USB vendor id and would crowd out the real devices."""
+    items = []
+    for port in ports:
+        if getattr(port, "vid", None) is None:
+            continue
+        device = by_id.get(os.path.realpath(port.device), port.device)
+        description = port.description or "Serial device"
+        items.append({"id":device,"label":f"{port.device} | {description}","kind":"serial","description":description})
+    return items
+
+
+def audio_inventory(devices) -> list[dict]:
+    """Audio inputs by name without the ALSA card number, which changes when USB devices are replugged."""
+    inputs = [(index, str(item.get("name", f"Input {index}")), item) for index, item in enumerate(devices) if int(item.get("max_input_channels", 0)) >= 1]
+    stems = [name.split(" (hw:")[0] for _, name, _ in inputs]
+    items = []
+    for (index, name, item), stem in zip(inputs, stems):
+        unique = stems.count(stem) == 1
+        description = f"{name} | {int(item.get('max_input_channels', 0))} channel | {round(float(item.get('default_samplerate', 0)))} Hz"
+        items.append({"id":stem if unique else str(index),"label":description,"kind":"audio","description":description})
+    return items
+
+
 def discover_device_inventory() -> dict[str,list[dict]]:
     inventory: dict[str,list[dict]] = {"video":[],"audio":[],"serial":[]}
     try:
         from serial.tools import list_ports
-        for port in list_ports.comports():
-            description = port.description or "Serial device"
-            inventory["serial"].append({"id":port.device,"label":f"{port.device} | {description}","kind":"serial","description":description})
+        inventory["serial"] = serial_inventory(list_ports.comports(), stable_links(Path("/dev/serial/by-id")))
     except Exception:
         pass
-    try:
-        import cv2
-        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_V4L2 if platform.system() == "Linux" else cv2.CAP_ANY
-        for index in range(5):
-            capture = cv2.VideoCapture(index,backend)
-            if not capture.isOpened():
+    cameras = stable_links(Path("/dev/v4l/by-id"), "-video-index0") if platform.system() == "Linux" else {}
+    if cameras:
+        for link in sorted(cameras.values()):
+            name = Path(link).name.removeprefix("usb-").removesuffix("-video-index0").replace("_", " ")
+            inventory["video"].append({"id":link,"label":f"{name} ({os.path.basename(os.path.realpath(link))})","kind":"video","description":name})
+    else:
+        try:
+            import cv2
+            backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_V4L2 if platform.system() == "Linux" else cv2.CAP_ANY
+            for index in range(5):
+                capture = cv2.VideoCapture(index,backend)
+                if not capture.isOpened():
+                    capture.release()
+                    continue
+                width=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
+                height=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
+                fps=capture.get(cv2.CAP_PROP_FPS) or 0
                 capture.release()
-                continue
-            width=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
-            height=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
-            fps=capture.get(cv2.CAP_PROP_FPS) or 0
-            capture.release()
-            description=f"Camera {index} | {width}x{height} at {fps:.0f} fps"
-            inventory["video"].append({"id":str(index),"label":description,"kind":"video","description":description})
-    except Exception:
-        pass
+                description=f"Camera {index} | {width}x{height} at {fps:.0f} fps"
+                inventory["video"].append({"id":str(index),"label":description,"kind":"video","description":description})
+        except Exception:
+            pass
     try:
         import sounddevice as sd
-        for index,item in enumerate(sd.query_devices()):
-            channels=int(item.get("max_input_channels",0))
-            if channels < 1:
-                continue
-            name=str(item.get("name",f"Input {index}"))
-            rate=round(float(item.get("default_samplerate",0)))
-            description=f"{name} | {channels} channel | {rate} Hz"
-            inventory["audio"].append({"id":str(index),"label":description,"kind":"audio","description":description})
+        inventory["audio"] = audio_inventory(sd.query_devices())
     except Exception:
         pass
     return inventory
@@ -961,13 +1400,13 @@ def _probe_serial_protocol(serial_module, port: str, baud: int, sensor_id: str) 
     return False
 
 
-def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin_mono: float) -> Sensor:
+def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin_mono: float, camera_options: CameraOptions | None = None) -> Sensor:
     if value == "simulate":
         return SimulatedSensor(sensor_id,session_dir,origin_mono)
     if value in ("", "none"):
         return UnavailableSensor(sensor_id,"Not configured",session_dir,origin_mono)
-    if sensor_id == "face" or sensor_id == "thermal":
-        return CameraSensor(sensor_id,"0" if value == "auto" else value,session_dir,origin_mono)
+    if sensor_id in ("face","face2","thermal"):
+        return CameraSensor(sensor_id,"0" if value == "auto" else value,session_dir,origin_mono,camera_options)
     if sensor_id == "audio":
         return AudioSensor(value,session_dir,origin_mono)
     if sensor_id == "oximeter":
@@ -979,6 +1418,18 @@ def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin
         return EmgSensor(sensor_id,value,baud,session_dir,origin_mono)
     if sensor_id == "gsr":
         return GsrSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id in ("resp", "environment", "csi2") and value == "auto":
+        return UnavailableSensor(sensor_id,"Select the serial port in Recording setup",session_dir,origin_mono)
+    if sensor_id == "resp":
+        return RespirationSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id == "environment":
+        return EnvironmentSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id == "csi2":
+        return CsiSensor(sensor_id,value,baud,session_dir,origin_mono)
+    if sensor_id == "photodiode":
+        if value == "auto":
+            return UnavailableSensor(sensor_id,"Select the photodiode serial port in Recording setup",session_dir,origin_mono)
+        return PhotodiodeSensor(sensor_id,value,baud,session_dir,origin_mono)
     if sensor_id == "ecg":
         if value == "auto":
             return UnavailableSensor(sensor_id,"Paste a Frontier X live ECG link in Recording setup",session_dir,origin_mono)

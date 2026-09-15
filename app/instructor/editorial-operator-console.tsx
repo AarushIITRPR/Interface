@@ -26,10 +26,14 @@ import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { buildPlan, shortLabel } from "@/lib/protocol";
-import type { DeviceConfig, ProtocolStep, SensorChannel, SessionSnapshot } from "@/lib/types";
+import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, estimateRemaining, shortLabel } from "@/lib/protocol";
+import { ARTIFACT_TYPES, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, startChecks, withConsentDefaults, type MetadataField, type StartCheck } from "@/lib/rig";
+import { startTicker } from "@/lib/ticker";
+import { SCREENING_QUESTIONS, screeningComplete, skippedSafetySteps } from "@/lib/safety";
+import type { CohortOverview } from "@/lib/cohort";
+import type { DeviceConfig, ProtocolOptions, ProtocolStep, SensorChannel, SessionSnapshot } from "@/lib/types";
 
-type WorkspaceTab = "overview" | "protocol" | "review";
+type WorkspaceTab = "overview" | "protocol" | "review" | "cohort";
 type Act = (action: string, payload?: Record<string, unknown>) => Promise<SessionSnapshot | null>;
 type HistoryItem = {
   code: string;
@@ -43,7 +47,7 @@ type HistoryItem = {
 };
 
 const CANNED_MESSAGES = ["Please wait a moment.", "Keep still.", "You can continue.", "Please look at the screen."];
-const SETUP_SENSORS = ["face", "audio", "oximeter", "csi", "emg", "gsr", "ecg", "thermal"];
+const SETUP_SENSORS = ["face", "face2", "audio", "oximeter", "csi", "csi2", "emg", "gsr", "resp", "ecg", "thermal", "photodiode", "environment"];
 
 async function api(body: Record<string, unknown>) {
   const response = await fetch("/api/sessions", {
@@ -80,10 +84,12 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
   const [error, setError] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const activeCode = useRef("");
+  const snapshotStatus = useRef<string | null>(null);
+  useEffect(() => { snapshotStatus.current = snapshot?.status ?? null; }, [snapshot?.status]);
 
   const accept = useCallback((next: SessionSnapshot) => {
     if (next.code !== activeCode.current) return;
-    setSnapshot((current) => !current || current.code !== next.code || next.revision > current.revision ? next : current);
+    setSnapshot((current) => !current || current.code !== next.code || isNewerSnapshot(next, current) ? next : current);
   }, []);
 
   const openSession = useCallback((next: SessionSnapshot) => {
@@ -120,9 +126,42 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
   useEffect(() => {
     if (!code) return;
     const first = window.setTimeout(heartbeat, 0);
-    const timer = window.setInterval(heartbeat, 5000);
-    return () => { window.clearTimeout(first); window.clearInterval(timer); };
+    // Browsers throttle main-thread timers in background tabs, which would auto-pause the protocol. Worker timers are
+    // not throttled the same way, so presence keeps flowing while the operator looks at another window.
+    const stop = startTicker(5000, () => void heartbeat());
+    return () => { window.clearTimeout(first); stop(); };
   }, [code, heartbeat]);
+
+  const hiddenSince = useRef<number | null>(null);
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) { hiddenSince.current = Date.now(); return; }
+      const away = hiddenSince.current ? Date.now() - hiddenSince.current : 0;
+      hiddenSince.current = null;
+      if (away > 10_000 && snapshotStatus.current && ["running", "paused"].includes(snapshotStatus.current)) {
+        setNotice(`This tab was in the background for ${Math.round(away / 1000)} s. Keep the instructor console visible during the protocol.`);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
+  const actRef = useRef<Act | null>(null);
+  useEffect(() => {
+    // Artifact hotkeys work in every workspace tab while the protocol runs, but never while typing in a field.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
+      if (!snapshotStatus.current || !["running", "paused"].includes(snapshotStatus.current)) return;
+      const type = ARTIFACT_TYPES.find((item) => item.key === event.key.toLowerCase());
+      if (!type || !actRef.current) return;
+      event.preventDefault();
+      void actRef.current("artifact", { type: type.id });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const act = useCallback<Act>(async (action, payload = {}) => {
     if (!code) return null;
@@ -139,6 +178,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
       return null;
     }
   }, [accept, code]);
+  useEffect(() => { actRef.current = act; }, [act]);
 
   const navigateTo = useCallback(async (target: number) => {
     if (!snapshot || snapshot.status === "setup") return;
@@ -184,6 +224,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
               <SidebarButton active={tab === "overview"} icon={Monitor} label="Study overview" onClick={() => changeTab("overview")} />
               <SidebarButton active={tab === "protocol"} icon={ClipboardList} label="Protocol workspace" onClick={() => changeTab("protocol")} />
               <SidebarButton active={tab === "review"} icon={ScanLine} label="Recording review" onClick={() => changeTab("review")} />
+              <SidebarButton active={tab === "cohort"} icon={Activity} label="Cohort" onClick={() => changeTab("cohort")} />
             </nav>
             <div className="live-sidebar-footer">
               <span className={running ? "is-live" : "is-paused"}><Circle size={8} fill="currentColor" /> {statusText(snapshot.status)}</span>
@@ -199,6 +240,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
                 {tab === "overview" ? <Overview snapshot={snapshot} step={step} plan={plan} running={running} health={health} readyCount={readyCount} required={required} agentOnline={agentOnline} subjectOnline={subjectOnline} now={now} act={act} onSettings={() => setSettingsOpen(true)} /> : null}
                 {tab === "protocol" ? <Protocol snapshot={snapshot} step={step} plan={plan} running={running} subjectOnline={subjectOnline} act={act} navigateTo={navigateTo} /> : null}
                 {tab === "review" ? <Review snapshot={snapshot} required={required} now={now} onLedger={() => setLedgerOpen(true)} /> : null}
+                {tab === "cohort" ? <CohortDashboard /> : null}
               </motion.div>
             </AnimatePresence>
           </section>
@@ -273,11 +315,12 @@ function EditorialSessionEntry({ operatorName, onOpen }: { operatorName: string;
 }
 
 function Overview({ snapshot, step, plan, running, health, readyCount, required, agentOnline, subjectOnline, now, act, onSettings }: {
-  snapshot: SessionSnapshot; step: ProtocolStep; plan: ProtocolStep[]; running: boolean; health: number; readyCount: number; required: SensorChannel[]; agentOnline: boolean; subjectOnline: boolean; now: number; act: Act; onSettings: () => void;
+  snapshot: SessionSnapshot; step: ProtocolStep; plan: readonly ProtocolStep[]; running: boolean; health: number; readyCount: number; required: SensorChannel[]; agentOnline: boolean; subjectOnline: boolean; now: number; act: Act; onSettings: () => void;
 }) {
   const [message, setMessage] = useState("");
   const progress = Math.round(((snapshot.stepIndex + 0.35) / plan.length) * 100);
-  const setupReady = agentOnline && readyCount === required.length && snapshot.preflightTest.status === "pass";
+  const checks = startChecks(snapshot, now);
+  const setupReady = checks.every((check) => check.ok);
   const requiredIds = new Set(required.map((sensor) => sensor.id));
   const optionalActive = snapshot.sensors.filter((sensor) => !requiredIds.has(sensor.id) && (sensor.hardwareDetected || sensor.dataDetected || Boolean(sensor.device && sensor.device !== "none") || Boolean(snapshot.acquisition.previewUrls[sensor.id])));
   const monitored = [...required, ...optionalActive];
@@ -299,10 +342,12 @@ function Overview({ snapshot, step, plan, running, health, readyCount, required,
           <button disabled={snapshot.status !== "running" || snapshot.stepIndex >= plan.length - 1} onClick={() => void act("advance")}>ADVANCE <ChevronRight size={14} /></button>
         </div>
       </section>
+      {snapshot.status === "setup" ? <StartChecklist checks={checks} onSettings={onSettings} /> : null}
 
       <div className="live-overview-cards">
         <article><WorkspaceLabel>Protocol progress</WorkspaceLabel><div className="live-progress-number"><b>{String(snapshot.stepIndex + 1).padStart(2, "0")}</b><span>of {String(plan.length).padStart(2, "0")}<br />stages</span></div><div className="live-progress-line"><i style={{ width: `${progress}%` }} /></div><small>Current: {shortLabel(step)} · {durationLabel(step)}</small></article>
         <article className="live-subject-card"><div><WorkspaceLabel>Subject display</WorkspaceLabel><b>One quiet task<br />at a time.</b><p>{step.subjectPrompt || "The subject display is waiting for the next instruction."}</p></div><Link href={`/subject?session=${snapshot.code}`} target="_blank">OPEN SUBJECT VIEW <ArrowUpRight size={14} /></Link><small className={subjectOnline ? "connected" : "waiting"}>{subjectOnline ? "DISPLAY CONNECTED" : "DISPLAY WAITING"}</small></article>
+        <HeartRateAgreementCard snapshot={snapshot} />
         <article className="live-health-card"><WorkspaceLabel>Recording health</WorkspaceLabel><div><b>{health}</b><span>%<small>{health === 100 ? "stable" : "ready"}</small></span></div><p className={health === 100 ? "good" : "attention"}>{health === 100 ? <Check size={14} /> : <Circle size={9} fill="currentColor" />} {readyCount} of {required.length} required streams ready.</p></article>
       </div>
 
@@ -316,29 +361,35 @@ function Overview({ snapshot, step, plan, running, health, readyCount, required,
           <footer className="live-sensor-monitor-footer"><span>{monitored.length} {monitored.length === 1 ? "channel" : "channels"} monitored</span><span>{optionalActive.length ? `${optionalActive.length} optional active` : "Required channels prioritized"}</span></footer>
         </section>
         <div className="live-interventions"><header><div><WorkspaceLabel>Interventions</WorkspaceLabel><h3>Operator channel</h3></div><span>SESSION CONTROLS</span></header><div className="live-intervention-actions"><button onClick={() => void act("log", { eventType: "comfort_check", label: "Comfort check requested", source: "operator" })}><HeartPulse size={15} /> COMFORT CHECK</button><button onClick={() => void act("log", { eventType: "operator_marker", label: "Protocol marker inserted", source: "operator" })}><Circle size={12} fill="currentColor" /> INSERT MARKER</button><button className="review" onClick={() => void act("log", { eventType: "review_flag", label: "Operator review requested", severity: "warn", source: "operator" })}>FLAG REVIEW</button></div><div className="live-message"><input value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") sendMessage(); }} placeholder="Short instruction to subject" aria-label="Send a subject message" /><button onClick={sendMessage} aria-label="Send subject message"><Send size={16} /></button></div><div className="live-message-presets">{CANNED_MESSAGES.map((text) => <button key={text} onClick={() => void act("message", { text })}>{text}</button>)}</div></div>
+        <ArtifactPanel snapshot={snapshot} act={act} />
       </section>
     </section>
   );
 }
 
-function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateTo }: { snapshot: SessionSnapshot; step: ProtocolStep; plan: ProtocolStep[]; running: boolean; subjectOnline: boolean; act: Act; navigateTo: (index: number) => Promise<void> }) {
-  const [checks, setChecks] = useState([false, false, false]);
+function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateTo }: { snapshot: SessionSnapshot; step: ProtocolStep; plan: readonly ProtocolStep[]; running: boolean; subjectOnline: boolean; act: Act; navigateTo: (index: number) => Promise<void> }) {
+  const [settled, setSettled] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
   const [sys, setSys] = useState("");
   const [dia, setDia] = useState("");
   const [pulse, setPulse] = useState("");
-  const gateReady = step.type !== "gate" || checks.every(Boolean);
+  const gate = step.type === "gate" ? snapshot.gate : null;
+  const needsOverride = gate?.status === "not_ready";
+  const gateReady = step.type !== "gate" || (settled && (!needsOverride || overrideReason.trim().length > 0));
   const canAdvance = running && ["operator", "gate"].includes(step.advance) && gateReady;
+  const skipped = skippedSafetySteps(snapshot.screening?.answers);
+  const advanceStage = () => void act("advance", needsOverride ? { override: true, reason: overrideReason.trim() } : {}).then((next) => { if (next) { setSettled(false); setOverrideReason(""); } });
 
   return (
     <section className="live-workspace-content">
       <div className="live-content-heading"><div><WorkspaceLabel>Protocol workspace</WorkspaceLabel><h2>Make each<br /><i>stage matter.</i></h2></div><div><span>{snapshot.protocolVersion.toUpperCase()}</span><p>A composed operational view for the live research sequence.</p></div></div>
       <div className="live-protocol-layout">
-        <section className="live-protocol-list"><header><WorkspaceLabel>Session sequence</WorkspaceLabel><span>{String(snapshot.stepIndex + 1).padStart(2, "0")} / {String(plan.length).padStart(2, "0")}</span></header><div>{plan.map((item, index) => <button key={item.id} className={index === snapshot.stepIndex ? "current" : index < snapshot.stepIndex ? "complete" : ""} disabled={snapshot.status === "setup"} onClick={() => void navigateTo(index)}><span>{index < snapshot.stepIndex ? <Check size={14} /> : String(index + 1).padStart(2, "0")}</span><strong>{shortLabel(item)}</strong><small>{index === snapshot.stepIndex ? "Live now" : index < snapshot.stepIndex ? "Recorded" : "Queued"}</small></button>)}</div></section>
+        <section className="live-protocol-list"><header><WorkspaceLabel>Session sequence</WorkspaceLabel><span>{String(snapshot.stepIndex + 1).padStart(2, "0")} / {String(plan.length).padStart(2, "0")}</span></header><div>{plan.map((item, index) => <button key={item.id} className={index === snapshot.stepIndex ? "current" : index < snapshot.stepIndex ? "complete" : ""} disabled={snapshot.status === "setup"} onClick={() => void navigateTo(index)}><span>{index < snapshot.stepIndex ? <Check size={14} /> : String(index + 1).padStart(2, "0")}</span><strong>{shortLabel(item)}</strong><small>{item.safetyKey && skipped[item.safetyKey] ? "Skipped by screening" : index === snapshot.stepIndex ? "Live now" : index < snapshot.stepIndex ? "Recorded" : "Queued"}</small></button>)}</div></section>
         <section className="live-stage-detail"><div><span>STAGE {String(snapshot.stepIndex + 1).padStart(2, "0")}</span><span>EST. {durationLabel(step)}</span></div><h3>{shortLabel(step)}</h3><p>{step.operatorScript}</p><blockquote><span>SUBJECT CUE</span>“{step.subjectPrompt || "Please wait for the instructor."}”</blockquote>
-          {step.type === "gate" ? <fieldset className="live-context-control"><legend>Return-to-baseline check</legend>{["GSR near resting reference", "Heart rate near resting reference", "Subject settled and breathing regularly"].map((label, index) => <label key={label}><input type="checkbox" checked={checks[index]} onChange={(event) => setChecks((current) => current.map((value, item) => item === index ? event.target.checked : value))} />{label}</label>)}</fieldset> : null}
+          {step.type === "gate" ? <fieldset className="live-context-control"><legend>Return-to-baseline check</legend><GatePhysiology gate={gate ?? null} /><label><input type="checkbox" checked={settled} onChange={(event) => setSettled(event.target.checked)} />Subject settled and breathing regularly</label>{needsOverride ? <label className="live-gate-override">Override reason<input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} placeholder="Why continue before physiology has recovered?" /></label> : null}</fieldset> : null}
           {step.type === "nback" ? <fieldset className="live-context-control inline"><legend>N-back difficulty</legend>{[1, 2, 3].map((level) => <button className={snapshot.nbackLevel === level ? "selected" : ""} key={level} onClick={() => void act("nbackLevel", { level })}>{level}-back</button>)}</fieldset> : null}
           {step.bp ? <fieldset className="live-context-control bp"><legend>Blood pressure · {step.bpLabel}</legend><label>Systolic<input inputMode="numeric" value={sys} onChange={(event) => setSys(event.target.value.replace(/\D/g, ""))} /></label><label>Diastolic<input inputMode="numeric" value={dia} onChange={(event) => setDia(event.target.value.replace(/\D/g, ""))} /></label><label>Pulse<input inputMode="numeric" value={pulse} onChange={(event) => setPulse(event.target.value.replace(/\D/g, ""))} /></label><button disabled={!sys || !dia} onClick={() => { void act("bp", { label: step.bpLabel, systolic: Number(sys), diastolic: Number(dia), pulse: pulse ? Number(pulse) : null }); setSys(""); setDia(""); setPulse(""); }}>SAVE READING</button></fieldset> : null}
-          <footer><button onClick={() => void act(running ? "pause" : "resume", running ? { reason: "Paused by operator" } : {})}>{running ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}{running ? " PAUSE SESSION" : " RESUME SESSION"}</button><button disabled={!canAdvance} onClick={() => void act("advance")}>ADVANCE <ChevronRight size={14} /></button></footer>
+          <footer><button onClick={() => void act(running ? "pause" : "resume", running ? { reason: "Paused by operator" } : {})}>{running ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}{running ? " PAUSE SESSION" : " RESUME SESSION"}</button><button disabled={!canAdvance} onClick={advanceStage}>{needsOverride ? "ADVANCE WITH OVERRIDE" : "ADVANCE"} <ChevronRight size={14} /></button></footer>
           <div className="live-stage-lower"><button disabled={snapshot.stepIndex === 0 || snapshot.status === "setup"} onClick={() => void act("navigate", { direction: -1 })}>PREVIOUS STAGE</button><span className={subjectOnline ? "connected" : "waiting"}>{subjectOnline ? "SUBJECT DISPLAY CONNECTED" : "SUBJECT DISPLAY WAITING"}</span></div>
         </section>
       </div>
@@ -364,13 +415,14 @@ function Review({ snapshot, required, now, onLedger }: { snapshot: SessionSnapsh
 
 function SettingsDialog({ snapshot, now, act, onClose }: { snapshot: SessionSnapshot; now: number; act: Act; onClose: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  const [devices, setDevices] = useState<DeviceConfig>(snapshot.deviceConfig);
-  const [required, setRequired] = useState(snapshot.requiredSensors);
+  const [devices, setDevices, clearDevices] = useDraft<DeviceConfig>(`${snapshot.code}:devices`, snapshot.deviceConfig);
+  const [required, setRequired, clearRequired] = useDraft<string[]>(`${snapshot.code}:required`, snapshot.requiredSensors);
+  const checks = startChecks(snapshot, now);
   useEffect(() => { closeRef.current?.focus(); const listener = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); }; window.addEventListener("keydown", listener); return () => window.removeEventListener("keydown", listener); }, [onClose]);
   const online = isAgentOnline(snapshot, now);
   const setupSensors = snapshot.sensors.filter((sensor) => SETUP_SENSORS.includes(sensor.id));
-  const save = async () => { await act("deviceConfig", { devices }); await act("requiredSensors", { ids: required }); };
-  return <motion.div className="live-modal-overlay" role="presentation" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><section className="live-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><div><WorkspaceLabel>Workspace settings</WorkspaceLabel><h2 id="settings-title">Recording setup</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close workspace settings"><X size={19} /></button></header><div className="live-settings-body"><section><h3>Acquisition computer</h3><div className="live-setting-status"><i className={online ? "good" : "bad"} /><span><strong>{online ? "Connected" : "Not connected"}</strong><small>{online ? snapshot.acquisition.host : "Start the local acquisition agent"}</small></span></div><dl><div><dt>Subject code</dt><dd>{snapshot.code}</dd></div><div><dt>Preflight</dt><dd>{snapshot.preflightTest.status}</dd></div><div><dt>Disk</dt><dd>{snapshot.acquisition.diskFreeGb == null ? "Not measured" : `${snapshot.acquisition.diskFreeGb.toFixed(1)} GB free`}</dd></div></dl><div className="live-settings-actions"><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("refreshDevices")}><RefreshCw size={14} /> REFRESH DEVICES</button><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("startPreflight")}>RUN PREFLIGHT</button>{snapshot.status === "setup" ? <button className="primary" disabled={snapshot.preflightTest.status !== "pass"} onClick={() => void act("startSession")}>START SESSION</button> : null}</div><details><summary>Technical connection</summary><code>python -m meridian_agent --server http://localhost:3000 --code {snapshot.code} --token {snapshot.acquisitionToken}</code></details></section><section><h3>Recording devices</h3><div className="live-device-settings">{setupSensors.map((sensor) => { const kind = sensor.group === "video" ? "video" : sensor.group === "audio" ? "audio" : "serial"; const options = snapshot.acquisition.inventory[kind]; const isRequired = required.includes(sensor.id); const selected = devices[sensor.id] || "none"; return <article key={sensor.id}><label className="live-required-toggle"><input aria-label={`Require ${sensor.label}`} type="checkbox" checked={isRequired} disabled={snapshot.configurationLocked} onChange={(event) => setRequired((items) => event.target.checked ? [...new Set([...items, sensor.id])] : items.filter((id) => id !== sensor.id))} /><span><strong>{sensor.label}</strong><small>{sensor.latestValue || sensor.detail}</small></span></label>{sensor.id === "ecg" ? <label className="live-api-device"><span>Frontier X live link</span><input aria-label="Frontier X live ECG link" value={selected === "none" || selected === "auto" ? "" : selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, ecg: event.target.value || "none" }))} placeholder="Paste live ECG share link or user ID" /></label> : <select aria-label={`${sensor.label} device`} value={selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, [sensor.id]: event.target.value }))}><option value="none">Not assigned</option><option value="auto">Auto-detect</option>{options.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>}</article>; })}</div><button className="live-save-settings" disabled={snapshot.configurationLocked} onClick={() => void save()}>SAVE RECORDING SETUP</button></section></div><footer><button className="danger" onClick={() => { if (window.confirm(snapshot.status === "setup" ? "Discard this session?" : "End and finalize this session?")) void act(snapshot.status === "setup" ? "abort" : "complete"); }}>{snapshot.status === "setup" ? "DISCARD SESSION" : "END SESSION"}</button><span>Settings stay outside the normal operator workflow.</span></footer></section></motion.div>;
+  const save = async () => { if (await act("deviceConfig", { devices })) clearDevices(); if (await act("requiredSensors", { ids: required })) clearRequired(); };
+  return <motion.div className="live-modal-overlay" role="presentation" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><section className="live-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><div><WorkspaceLabel>Workspace settings</WorkspaceLabel><h2 id="settings-title">Recording setup</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close workspace settings"><X size={19} /></button></header><div className="live-settings-body"><section><h3>Acquisition computer</h3><div className="live-setting-status"><i className={online ? "good" : "bad"} /><span><strong>{online ? "Connected" : "Not connected"}</strong><small>{online ? snapshot.acquisition.host : "Start the local acquisition agent"}</small></span></div><dl><div><dt>Subject code</dt><dd>{snapshot.code}</dd></div><div><dt>Preflight</dt><dd>{snapshot.preflightTest.status}</dd></div><div><dt>Subject media</dt><dd>{subjectMediaLabel(snapshot)}</dd></div><div><dt>Disk</dt><dd>{snapshot.acquisition.diskFreeGb == null ? "Not measured" : `${snapshot.acquisition.diskFreeGb.toFixed(1)} GB free`}</dd></div></dl><div className="live-settings-actions"><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("refreshDevices")}><RefreshCw size={14} /> REFRESH DEVICES</button><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("startPreflight")}>RUN PREFLIGHT</button>{snapshot.status === "setup" ? <button className="primary" disabled={!checks.every((check) => check.ok)} onClick={() => void act("startSession")}>START SESSION</button> : null}</div>{snapshot.status === "setup" ? <StartChecklist checks={checks} /> : null}<details><summary>Technical connection</summary><code>python -m meridian_agent --server {window.location.origin} --code {snapshot.code} --token {snapshot.acquisitionToken}</code></details></section><ProtocolOptionsSection snapshot={snapshot} act={act} /><ConsentSection snapshot={snapshot} act={act} /><ParticipantSection snapshot={snapshot} act={act} /><ScreeningSection snapshot={snapshot} act={act} /><CsiSection snapshot={snapshot} act={act} /><section><h3>Recording devices</h3><div className="live-device-settings">{setupSensors.map((sensor) => { const kind = sensor.group === "video" ? "video" : sensor.group === "audio" ? "audio" : "serial"; const options = snapshot.acquisition.inventory[kind]; const isRequired = required.includes(sensor.id); const selected = devices[sensor.id] || "none"; return <article key={sensor.id}><label className="live-required-toggle"><input aria-label={`Require ${sensor.label}`} type="checkbox" checked={isRequired} disabled={snapshot.configurationLocked} onChange={(event) => setRequired((items) => event.target.checked ? [...new Set([...items, sensor.id])] : items.filter((id) => id !== sensor.id))} /><span><strong>{sensor.label}</strong><small>{sensor.latestValue || sensor.detail}</small></span></label>{sensor.id === "ecg" ? <label className="live-api-device"><span>Frontier X live link</span><input aria-label="Frontier X live ECG link" value={selected === "none" || selected === "auto" ? "" : selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, ecg: event.target.value || "none" }))} placeholder="Paste live ECG share link or user ID" /></label> : <select aria-label={`${sensor.label} device`} value={selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, [sensor.id]: event.target.value }))}><option value="none">Not assigned</option><option value="auto">Auto-detect</option>{selected !== "none" && selected !== "auto" && !options.some((item) => item.id === selected) ? <option value={selected}>Current: {selected}</option> : null}{options.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>}</article>; })}</div><button className="live-save-settings" disabled={snapshot.configurationLocked} onClick={() => void save()}>SAVE RECORDING SETUP</button></section></div><footer><button className="danger" onClick={() => { if (window.confirm(snapshot.status === "setup" ? "Discard this session?" : "End and finalize this session?")) void act(snapshot.status === "setup" ? "abort" : "complete"); }}>{snapshot.status === "setup" ? "DISCARD SESSION" : "END SESSION"}</button><span>Settings stay outside the normal operator workflow.</span></footer></section></motion.div>;
 }
 
 function LedgerDialog({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose: () => void }) {
@@ -526,3 +578,180 @@ function formatRate(value: number) { return value >= 1000 ? `${(value / 1000).to
 function formatBytes(value: number) { if (!value) return "0 MB"; if (value < 1048576) return `${(value / 1024).toFixed(1)} KB`; if (value < 1073741824) return `${(value / 1048576).toFixed(1)} MB`; return `${(value / 1073741824).toFixed(2)} GB`; }
 function safeSnapshot(snapshot: SessionSnapshot) { const { acquisitionToken: omitted, ...safe } = snapshot; void omitted; return safe; }
 function download(name: string, content: string, type: string) { const url = URL.createObjectURL(new Blob([content], { type })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url); }
+/** Newer protocol revision wins; within one revision, the later server read carries fresher telemetry. */
+function isNewerSnapshot(next: SessionSnapshot, current: SessionSnapshot) {
+  if (next.revision !== current.revision) return next.revision > current.revision;
+  return Date.parse(next.serverTime ?? "") >= Date.parse(current.serverTime ?? "");
+}
+
+function subjectMediaLabel(snapshot: SessionSnapshot) {
+  const media = snapshot.subjectMedia;
+  if (!media) return "Subject display not connected";
+  if (media.ready) return `Loaded ${media.total} of ${media.total}`;
+  return `Loading ${media.loaded} of ${media.total}${media.failed ? `, ${media.failed} failed` : ""}`;
+}
+
+function GatePhysiology({ gate }: { gate: SessionSnapshot["gate"] }) {
+  if (!gate) return <p className="live-gate-status">Waiting for physiology.</p>;
+  if (gate.status === "unavailable") return <p className="live-gate-status">No heart rate or skin conductance baseline was recorded, so recovery cannot be measured. Advancing will be logged as unverified.</p>;
+  return <div className="live-gate-status">{gate.signals.map((signal) => <p key={signal.id} className={signal.within ? "good" : "attention"}><strong>{signal.label}</strong> {signal.current == null ? "no recent samples" : `${signal.current} ${signal.unit}`} · baseline {signal.baselineMean} ± {signal.tolerance} · {signal.within ? `within for ${Math.floor(Math.min(signal.heldSec, gate.holdSec))} of ${gate.holdSec} s` : "outside range"}</p>)}<p className={gate.status === "ready" ? "good" : "attention"}>{gate.status === "ready" ? "Returned to baseline." : "Not yet at baseline."}</p></div>;
+}
+
+/** Form entries survive closing the dialog or reloading the page until the server has them. */
+function useDraft<T>(key: string, saved: T) {
+  const storageKey = `meridian-draft:${key}`;
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const raw = typeof window === "undefined" ? null : window.localStorage.getItem(storageKey);
+      if (raw) return JSON.parse(raw) as T;
+    } catch { /* storage unavailable: fall back to the saved copy */ }
+    return saved;
+  });
+  const update = useCallback((next: T | ((current: T) => T)) => {
+    setValue((current) => {
+      const resolved = typeof next === "function" ? (next as (current: T) => T)(current) : next;
+      try { window.localStorage.setItem(storageKey, JSON.stringify(resolved)); } catch { /* storage unavailable */ }
+      return resolved;
+    });
+  }, [storageKey]);
+  const clear = useCallback(() => { try { window.localStorage.removeItem(storageKey); } catch { /* storage unavailable */ } }, [storageKey]);
+  return [value, update, clear] as const;
+}
+
+function useAutoSave(enabled: boolean, save: () => Promise<SessionSnapshot | null>, onSaved: () => void, watch: unknown) {
+  const saveRef = useRef(save);
+  const savedRef = useRef(onSaved);
+  useEffect(() => { saveRef.current = save; savedRef.current = onSaved; });
+  const signature = JSON.stringify(watch);
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = window.setTimeout(() => { void saveRef.current().then((next) => { if (next) savedRef.current(); }); }, 800);
+    return () => window.clearTimeout(timer);
+  }, [enabled, signature]);
+}
+
+function savedMatches(saved: Record<string, unknown> | undefined, draft: Record<string, unknown>) {
+  if (!saved) return false;
+  const keys = new Set([...Object.keys(saved), ...Object.keys(draft)].filter((key) => draft[key] !== "" && draft[key] !== undefined));
+  return [...keys].every((key) => String(saved[key] ?? "") === String(draft[key] ?? ""));
+}
+
+function SaveState({ saved, pending }: { saved: boolean; pending: boolean }) {
+  return <span className={`live-save-state ${saved ? "good" : "attention"}`}>{saved ? " Saved." : pending ? " Saving..." : " Not saved yet."}</span>;
+}
+
+function StartChecklist({ checks, onSettings }: { checks: StartCheck[]; onSettings?: () => void }) {
+  const blocked = checks.filter((check) => !check.ok);
+  return <div className="live-start-checklist" role="status"><p><strong>{blocked.length ? `Before START SESSION: ${blocked.length} item${blocked.length === 1 ? "" : "s"} left` : "Ready to start"}</strong>{blocked.length && onSettings ? <button onClick={onSettings}>OPEN RECORDING SETUP</button> : null}</p><ul>{checks.map((check) => <li key={check.id} className={check.ok ? "good" : "attention"}><span aria-hidden="true">{check.ok ? "✓" : "✗"}</span><b>{check.label}</b> {check.detail}</li>)}</ul></div>;
+}
+
+function ScreeningSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
+  const [answers, setAnswers, clearDraft] = useDraft<Record<string, boolean>>(`${snapshot.code}:screening`, snapshot.screening?.answers ?? {});
+  const locked = snapshot.status !== "setup";
+  const complete = screeningComplete(answers);
+  const saved = savedMatches(snapshot.screening?.answers, answers);
+  // Saves by itself once every question has an answer, so nothing is lost if the dialog closes.
+  const pending = complete && !locked && !saved;
+  useAutoSave(pending, () => act("screening", { answers }), clearDraft, answers);
+  const skipped = Object.keys(skippedSafetySteps(answers)).map((key) => key.replace("_", " "));
+  return <section className="live-screening"><h3>Participant screening</h3><p>Ask each question before recording. A yes skips the related physical steps for this participant.</p>{SCREENING_QUESTIONS.map((item) => <fieldset key={item.id} disabled={locked}><legend>{item.question} *</legend>{[true, false].map((value) => <label key={String(value)}><input type="radio" name={`screening-${item.id}`} checked={answers[item.id] === value} onChange={() => setAnswers((current) => ({ ...current, [item.id]: value }))} />{value ? "Yes" : "No"}</label>)}</fieldset>)}<p className={complete ? "good" : "attention"}>{!complete ? "Answer every question." : skipped.length ? `Will skip: ${skipped.join(", ")}.` : "No steps will be skipped."}<SaveState saved={saved} pending={pending} /></p><button disabled={locked || !complete} onClick={() => void act("screening", { answers })}>SAVE SCREENING</button></section>;
+}
+
+function ArtifactPanel({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
+  const active = ["running", "paused"].includes(snapshot.status);
+  const open = openArtifactSpans(snapshot.events);
+  const recent = snapshot.events.filter((event) => event.eventType === "artifact").slice(-3).reverse();
+  return <div className="live-artifacts"><header><div><WorkspaceLabel>Signal artifacts</WorkspaceLabel><h3>Label what you see</h3></div><span>KEYBOARD SHORTCUTS</span></header><div className="live-artifact-buttons">{ARTIFACT_TYPES.map((type) => <button key={type.id} disabled={!active} className={open.has(type.id) ? "open" : ""} onClick={() => void act("artifact", { type: type.id })} title={type.kind === "span" ? "Press to start, press again to end" : "Marks the last 3 s"}><kbd>{type.key.toUpperCase()}</kbd>{type.label}{type.kind === "span" ? (open.has(type.id) ? " · ON" : " · span") : ""}</button>)}</div>{recent.length ? <p>{recent.map((event) => `${timeLabel(event.createdAt)} ${event.label.replace("Artifact: ", "")}`).join("  ·  ")}</p> : <p>No artifacts labelled yet.</p>}</div>;
+}
+
+function FieldInputs({ fields, values, setValues, disabled, prefix }: { fields: readonly MetadataField[]; values: Record<string, string | number>; setValues: (update: (current: Record<string, string | number>) => Record<string, string | number>) => void; disabled: boolean; prefix: string }) {
+  return <div className="live-field-grid">{fields.map((field) => <label key={field.id}><span>{field.label}{field.kind === "choice" && field.required ? " *" : ""}</span>{field.kind === "choice"
+    ? <select aria-label={field.label} value={String(values[field.id] ?? "")} disabled={disabled} onChange={(event) => setValues((current) => ({ ...current, [field.id]: event.target.value }))}><option value="">Not set</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>
+    : <span className="live-number-field"><input id={`${prefix}-${field.id}`} aria-label={field.label} inputMode="numeric" value={String(values[field.id] ?? "")} disabled={disabled} onChange={(event) => setValues((current) => ({ ...current, [field.id]: event.target.value.replace(/[^0-9]/g, "") }))} />{field.unit ? <small>{field.unit}</small> : null}</span>}</label>)}</div>;
+}
+
+function ParticipantSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
+  const [values, setValues, clearDraft] = useDraft<Record<string, string | number>>(`${snapshot.code}:participant`, snapshot.participantMetadata?.values ?? {});
+  const locked = ["complete", "aborted"].includes(snapshot.status);
+  const missing = missingParticipantFields(values);
+  const saved = savedMatches(snapshot.participantMetadata?.values, values);
+  const pending = !locked && !saved && Object.keys(values).length > 0;
+  useAutoSave(pending, () => act("participantMetadata", { values }), clearDraft, values);
+  return <section className="live-rig-section"><h3>Participant details</h3><p>Categories only, no names or dates. Skin type and eyewear strongly affect camera and thermal signals.</p><FieldInputs fields={PARTICIPANT_FIELDS} values={values} setValues={setValues} disabled={locked} prefix="participant" /><p className={missing.length ? "attention" : "good"}>{missing.length ? `${missing.length} required fields (*) not set.` : "All required fields set."}<SaveState saved={saved} pending={pending} /></p><button disabled={locked} onClick={() => void act("participantMetadata", { values }).then((next) => next && clearDraft())}>SAVE PARTICIPANT DETAILS</button></section>;
+}
+
+function CsiSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
+  const [values, setValues, clearDraft] = useDraft<Record<string, string | number>>(`${snapshot.code}:csi`, snapshot.csiSetup?.values ?? {});
+  const locked = ["complete", "aborted"].includes(snapshot.status);
+  const saved = savedMatches(snapshot.csiSetup?.values, values);
+  const pending = !locked && !saved && Object.keys(values).length > 0;
+  useAutoSave(pending, () => act("csiSetup", { values }), clearDraft, values);
+  const calibration = snapshot.csiCalibration;
+  const csiAssigned = ["csi", "csi2"].some((id) => snapshot.deviceConfig[id] && snapshot.deviceConfig[id] !== "none");
+  const status = !calibration ? "Not recorded" : calibration.status === "running" ? `Recording (${CSI_CALIBRATION_SEC} s)...` : calibration.status === "done" ? `Recorded ${calibration.rows} packets` : `Failed: ${calibration.detail}`;
+  return <section className="live-rig-section"><h3>WiFi CSI setup</h3><p>Radio settings and geometry are needed to reproduce CSI results. Record the empty room before the participant sits down.</p><FieldInputs fields={CSI_SETUP_FIELDS} values={values} setValues={setValues} disabled={locked} prefix="csi" /><button disabled={locked} onClick={() => void act("csiSetup", { values }).then((next) => next && clearDraft())}>SAVE CSI SETUP</button><SaveState saved={saved} pending={pending} /><div className="live-calibration"><span className={calibration?.status === "done" ? "good" : calibration?.status === "failed" ? "attention" : ""}>Empty-room baseline: {status}</span><button disabled={snapshot.status !== "setup" || !csiAssigned || calibration?.status === "running"} onClick={() => void act("csiCalibration")}>RECORD EMPTY ROOM</button></div></section>;
+}
+
+function HeartRateAgreementCard({ snapshot }: { snapshot: SessionSnapshot }) {
+  const agreement = snapshot.heartRateAgreement;
+  const status = agreement?.status ?? "insufficient";
+  const headline = status === "agree" ? `Within ${agreement?.spreadBpm} bpm` : status === "disagree" ? `${agreement?.spreadBpm} bpm apart` : "Need two sources";
+  const advice = status === "disagree" ? "Check the finger clip, ECG strap contact, and that the face is lit and in view." : status === "agree" ? "Contact and contactless heart rate agree." : "Connect at least two of ECG, oximeter, or a visible face.";
+  return <article className={`live-hr-card ${status}`}><WorkspaceLabel>Heart rate agreement</WorkspaceLabel><b>{headline}</b><ul>{(agreement?.sources ?? []).map((source) => <li key={source.id}><span>{source.label}</span><strong>{Math.round(source.bpm)} bpm</strong></li>)}</ul><p>{advice}</p></article>;
+}
+
+const PROTOCOL_OPTION_LABELS: Array<{ key: keyof ProtocolOptions; label: string; help: string }> = [
+  { key: "questionnaires", label: "Questionnaires", help: "PANAS at start and end, TIPI at start, NASA-TLX after Stroop and N-back" },
+  { key: "pacedBreathing", label: "Paced breathing", help: "60 s each at 6, 10, 15, and 20 breaths per minute" },
+  { key: "extendedExertion", label: "Longer exertion", help: "60 s instead of 20 s, for a wider heart-rate range" },
+  { key: "neutralClip", label: "Neutral control clip", help: "Clip, rating, and washout before Part 1, if a neutral clip is registered" },
+  { key: "annotationReplay", label: "Continuous rating replay", help: "Replays every clip at the end with a valence-arousal marker (adds the clip durations)" },
+];
+
+function ProtocolOptionsSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
+  const saved = snapshot.assignment.options;
+  const [options, setOptions] = useState<ProtocolOptions>(saved ?? DEFAULT_PROTOCOL_OPTIONS);
+  const editable = snapshot.status === "setup" && snapshot.stepIndex === 0 && Boolean(saved);
+  const preview = buildPlan({ ...snapshot.assignment, options });
+  const neutralMissing = options.neutralClip && !snapshot.assignment.stimuli?.neutral;
+  return <section className="live-rig-section"><h3>Protocol options</h3><p>{saved ? "Choose the optional blocks for this session. They are fixed once recording starts." : "This session uses the earlier protocol without optional blocks."}</p>{PROTOCOL_OPTION_LABELS.map((item) => <label key={item.key} className="live-option"><input type="checkbox" checked={options[item.key]} disabled={!editable} onChange={(event) => setOptions((current) => ({ ...current, [item.key]: event.target.checked }))} /><span><strong>{item.label}</strong><small>{item.help}</small></span></label>)}{neutralMissing ? <p className="attention">No neutral clip is registered in lib/stimuli.ts, so the neutral block will be left out.</p> : null}<p className={editable ? "" : "attention"}>{preview.length} steps, about {Math.round(estimateRemaining(preview, 0) / 60)} minutes.</p><button disabled={!editable} onClick={() => void act("protocolOptions", { options })}>SAVE PROTOCOL OPTIONS</button></section>;
+}
+
+function ConsentSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
+  const [values, setValues, clearDraft] = useDraft<Record<string, string | number>>(`${snapshot.code}:consent`, withConsentDefaults(snapshot.consent?.values));
+  const ready = consentReady(values);
+  const saved = savedMatches(snapshot.consent?.values, withConsentDefaults(values));
+  // Sharing answers left unset are saved as "No"; saving starts as soon as participation is chosen.
+  const pending = Boolean(values.participation) && !saved;
+  useAutoSave(pending, () => act("consent", { values }), clearDraft, values);
+  return <section className="live-rig-section"><h3>Consent and data sharing</h3><p>Record what the signed consent form allows. This can be updated later if the participant withdraws sharing permission.</p><FieldInputs fields={CONSENT_FIELDS} values={values} setValues={setValues} disabled={false} prefix="consent" /><p className={ready ? "good" : "attention"}>{!values.participation ? "Choose participation (*). Sharing answers default to No." : !ready ? "Recording is not allowed without participation consent." : "Consent recorded for this session."}<SaveState saved={saved} pending={pending} /></p><button onClick={() => void act("consent", { values }).then((next) => next && clearDraft())}>SAVE CONSENT</button></section>;
+}
+
+function CohortDashboard() {
+  const [cohort, setCohort] = useState<CohortOverview | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => fetch("/api/sessions?cohort=1", { cache: "no-store" }).then((response) => response.json()).then((data) => { if (!cancelled) { if (data.cohort) setCohort(data.cohort); else setError(data.error || "Unable to load the cohort."); } }).catch(() => !cancelled && setError("Unable to load the cohort."));
+    void load();
+    const timer = window.setInterval(load, 30_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
+  if (!cohort) return <section className="live-workspace-content"><p>{error || "Loading cohort..."}</p></section>;
+  const maxCell = Math.max(1, ...cohort.coverage.flat());
+  const download = () => {
+    const header = Object.keys(cohort.sessions[0] ?? {});
+    const rows = cohort.sessions.map((session) => header.map((key) => String((session as Record<string, unknown>)[key] ?? "")).join("\t"));
+    const url = URL.createObjectURL(new Blob([[header.join("\t"), ...rows].join("\n")], { type: "text/tab-separated-values" }));
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = "meridian-cohort.tsv"; anchor.click(); URL.revokeObjectURL(url);
+  };
+  return <section className="live-workspace-content live-cohort">
+    <div className="live-content-heading"><div><WorkspaceLabel>Cohort</WorkspaceLabel><h2>The dataset<br /><i>so far.</i></h2></div><div><span>{cohort.completedParticipants} PARTICIPANTS COMPLETE</span><p>Recruitment balance, counterbalancing coverage, and session quality across all sessions.</p></div></div>
+    <div className="live-cohort-stats">{Object.entries(cohort.statusCounts).map(([status, total]) => <article key={status}><b>{total}</b><span>{status}</span></article>)}{cohort.duplicateParticipants.length ? <article className="attention"><b>{cohort.duplicateParticipants.length}</b><span>participants with repeat sessions: {cohort.duplicateParticipants.join(", ")}</span></article> : null}</div>
+    <div className="live-cohort-grid">
+      <article><WorkspaceLabel>Counterbalancing coverage</WorkspaceLabel><p>Completed sessions per emotion order (rows) and task order (columns). Aim for every cell.</p><table className="live-coverage"><thead><tr><th />{[1, 2, 3, 4, 5, 6].map((column) => <th key={column}>T{column}</th>)}</tr></thead><tbody>{cohort.coverage.map((row, index) => <tr key={index}><th>E{index + 1}</th>{row.map((value, column) => <td key={column} style={{ background: value ? `rgba(61,107,69,${0.2 + 0.8 * value / maxCell})` : undefined }}>{value || ""}</td>)}</tr>)}</tbody></table><small>{cohort.coverage.flat().filter((value) => value === 0).length} of 36 cells still empty.</small></article>
+      {(["skinType", "sex", "ageBand"] as const).map((key) => <article key={key}><WorkspaceLabel>{key === "skinType" ? "Skin type (Fitzpatrick)" : key === "sex" ? "Sex" : "Age band"}</WorkspaceLabel><ul className="live-distribution">{Object.entries(cohort.distributions[key]).map(([label, total]) => <li key={label}><span>{label}</span><i style={{ width: `${Math.min(100, total * 100 / Math.max(1, cohort.completedParticipants))}%` }} /><b>{total}</b></li>)}</ul></article>)}
+    </div>
+    <article className="live-cohort-table"><header><WorkspaceLabel>Sessions</WorkspaceLabel><button onClick={download}><Download size={14} /> EXPORT TSV</button></header><div><table><thead><tr><th>Code</th><th>P</th><th>Status</th><th>Protocol</th><th>Min</th><th>Order</th><th>Skin</th><th>Details</th><th>Consent</th><th>Pauses</th><th>Overrides</th><th>Skipped</th><th>Artifacts</th><th>CSI baseline</th></tr></thead><tbody>{cohort.sessions.map((session) => <tr key={session.code}><td>{session.code}</td><td>{session.participantId}</td><td>{session.status}</td><td>{session.protocolVersion}</td><td>{session.durationMin ?? ""}</td><td>E{session.emotionRow}{session.taskRow ? `/T${session.taskRow}` : ""}</td><td>{session.skinType ?? ""}</td><td className={session.missingDetails ? "attention" : ""}>{session.missingDetails ? `${session.missingDetails} missing` : "complete"}</td><td className={session.consent ? "" : "attention"}>{session.consent ? "yes" : "no"}</td><td>{session.pauses}</td><td className={session.gateOverrides ? "attention" : ""}>{session.gateOverrides}</td><td>{session.skippedSteps}</td><td>{session.artifacts}</td><td>{session.csiBaseline}</td></tr>)}</tbody></table></div></article>
+  </section>;
+}

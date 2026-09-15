@@ -2,3 +2,6 @@ pyserial>=3.5,<4
 opencv-python>=4.10,<5
 sounddevice>=0.5,<1
 websocket-client>=1.7,<2
+numpy>=1.26
+# Optional: Lab Streaming Layer output (--lsl)
+# pylsl>=1.16

@@ -1,17 +1,18 @@
-import { acquisitionCommand, getSession, mutateSession } from "@/lib/session-engine";
+import { acquisitionCommand, acquisitionExport, getSession, listAnnotations, mutateSession } from "@/lib/session-engine";
 
 export const dynamic = "force-dynamic";
 
 type AgentRequest = {
   code?: string;
   token?: string;
-  action?: "poll" | "heartbeat" | "finalize";
+  action?: "poll" | "heartbeat" | "finalize" | "export";
   agent?: Record<string,unknown>;
   sensors?: unknown[];
   recordings?: unknown[];
 };
 
 export async function POST(request: Request) {
+  const receivedAt = new Date().toISOString();
   try {
     const body = await request.json() as AgentRequest;
     const code = String(body.code ?? "").trim().toUpperCase().slice(0,16);
@@ -29,14 +30,16 @@ export async function POST(request: Request) {
         recordingRoot:agent.recordingRoot,inventory:agent.inventory,diskFreeGb:agent.diskFreeGb,
         estimatedHours:agent.estimatedHours,clockOffsetMs:agent.clockOffsetMs,openFileCount:agent.openFileCount,
         droppedPct:agent.droppedPct,previewUrls:agent.previewUrls,configRevision:agent.configRevision,
-        preflightTest:agent.preflightTest,sensors:Array.isArray(body.sensors)?body.sensors:[],
+        preflightTest:agent.preflightTest,csiCalibration:agent.csiCalibration,sensors:Array.isArray(body.sensors)?body.sensors:[],
       }) ?? session;
     } else if (body.action === "finalize") {
       current = await mutateSession(code,"acquisitionFinalize",{recordings:Array.isArray(body.recordings)?body.recordings:[]}) ?? session;
+    } else if (body.action === "export") {
+      return Response.json({command:{...acquisitionCommand(current),serverReceivedAt:receivedAt},export:{...acquisitionExport(current),annotations:await listAnnotations(current.code)}},{headers:{"cache-control":"no-store"}});
     } else if (body.action !== "poll") {
       return Response.json({error:"Unsupported acquisition action."},{status:400});
     }
-    return Response.json({command:acquisitionCommand(current)},{headers:{"cache-control":"no-store"}});
+    return Response.json({command:{...acquisitionCommand(current),serverReceivedAt:receivedAt}},{headers:{"cache-control":"no-store"}});
   } catch (error) {
     return Response.json({error:error instanceof Error?error.message:"Unable to update acquisition state."},{status:500});
   }

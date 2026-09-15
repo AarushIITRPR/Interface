@@ -22,7 +22,7 @@ class PreviewServer:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 parts = self.path.split("?")[0].strip("/").split("/")
-                if len(parts) != 3 or parts[0] != "preview" or parts[2] != parent.secret or parts[1] not in ("face", "thermal"):
+                if len(parts) != 3 or parts[0] != "preview" or parts[2] != parent.secret or parts[1] not in ("face", "face2", "thermal"):
                     self.send_error(404)
                     return
                 self.send_response(200)
@@ -55,7 +55,7 @@ class PreviewServer:
         self._thread.start()
 
     def urls(self) -> dict[str,str]:
-        return {sensor_id:f"http://127.0.0.1:{self.port}/preview/{sensor_id}/{self.secret}" for sensor_id in ("face","thermal")}
+        return {sensor_id:f"http://127.0.0.1:{self.port}/preview/{sensor_id}/{self.secret}" for sensor_id in ("face","thermal","face2")}
 
     def stop(self) -> None:
         server = self._server
