@@ -379,6 +379,9 @@ function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateT
   const canAdvance = running && ["operator", "gate"].includes(step.advance) && gateReady;
   const skipped = skippedSafetySteps(snapshot.screening?.answers);
   const advanceStage = () => void act("advance", needsOverride ? { override: true, reason: overrideReason.trim() } : {}).then((next) => { if (next) { setSettled(false); setOverrideReason(""); } });
+  // A repeat keeps the take that came before it: the export closes the current window as "repeated" and
+  // opens the next one at attempt + 1, so both are kept apart. Cancelling the prompt repeats nothing.
+  const repeatStage = () => { const reason = window.prompt("Why repeat this stage? The previous attempt is kept."); if (reason !== null) void act("repeat", { reason: reason.trim() }); };
 
   return (
     <section className="live-workspace-content">
@@ -390,7 +393,7 @@ function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateT
           {step.type === "nback" ? <fieldset className="live-context-control inline"><legend>N-back difficulty</legend>{[1, 2, 3].map((level) => <button className={snapshot.nbackLevel === level ? "selected" : ""} key={level} onClick={() => void act("nbackLevel", { level })}>{level}-back</button>)}</fieldset> : null}
           {step.bp ? <fieldset className="live-context-control bp"><legend>Blood pressure · {step.bpLabel}</legend><label>Systolic<input inputMode="numeric" value={sys} onChange={(event) => setSys(event.target.value.replace(/\D/g, ""))} /></label><label>Diastolic<input inputMode="numeric" value={dia} onChange={(event) => setDia(event.target.value.replace(/\D/g, ""))} /></label><label>Pulse<input inputMode="numeric" value={pulse} onChange={(event) => setPulse(event.target.value.replace(/\D/g, ""))} /></label><button disabled={!sys || !dia} onClick={() => { void act("bp", { label: step.bpLabel, systolic: Number(sys), diastolic: Number(dia), pulse: pulse ? Number(pulse) : null }); setSys(""); setDia(""); setPulse(""); }}>SAVE READING</button></fieldset> : null}
           <footer><button onClick={() => void act(running ? "pause" : "resume", running ? { reason: "Paused by operator" } : {})}>{running ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}{running ? " PAUSE SESSION" : " RESUME SESSION"}</button><button disabled={!canAdvance} onClick={advanceStage}>{needsOverride ? "ADVANCE WITH OVERRIDE" : "ADVANCE"} <ChevronRight size={14} /></button></footer>
-          <div className="live-stage-lower"><button disabled={snapshot.stepIndex === 0 || snapshot.status === "setup"} onClick={() => void act("navigate", { direction: -1 })}>PREVIOUS STAGE</button><span className={subjectOnline ? "connected" : "waiting"}>{subjectOnline ? "SUBJECT DISPLAY CONNECTED" : "SUBJECT DISPLAY WAITING"}</span></div>
+          <div className="live-stage-lower"><button disabled={snapshot.stepIndex === 0 || snapshot.status === "setup"} onClick={() => void act("navigate", { direction: -1 })}>PREVIOUS STAGE</button><button disabled={!running} onClick={repeatStage}>REPEAT STAGE</button><span className={subjectOnline ? "connected" : "waiting"}>{subjectOnline ? "SUBJECT DISPLAY CONNECTED" : "SUBJECT DISPLAY WAITING"}</span></div>
         </section>
       </div>
     </section>
