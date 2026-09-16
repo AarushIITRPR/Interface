@@ -28,6 +28,7 @@ The protocol has 43 steps and takes about 50 minutes. Plan on 75 minutes includi
    - ECG strap: wet the electrodes, snug under the chest, Frontier X app streaming (phone plugged in, screen awake).
    - Oximeter on the **non-dominant** index finger; hand resting on the table.
    - GSR electrodes on two fingers of the **same** hand as the oximeter, after the skin has been in contact for about 5 minutes.
+   - DJI mics: **mic 1 on the participant** near the collar, **mic 2 on the operator**. Mic 1 is the left channel, mic 2 the right — swap them and the operator's voice lands in the participant's channel for the whole session.
    - Seat 50-80 cm from the cameras, face centred in both previews, no hair over the forehead.
 5. Wait for signals to look right in **Overview**: ECG HR plausible (50-100 at rest), oximeter HR within 8 bpm of ECG, GSR above 0.5 uS and fairly stable, both face previews show the face, audio meter moves when they speak.
 6. **RUN PREFLIGHT** until it passes, then **START SESSION**.

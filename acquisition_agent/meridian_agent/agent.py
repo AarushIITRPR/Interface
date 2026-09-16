@@ -191,7 +191,7 @@ class MeridianAgent:
         values,inventory = discover_serial_assignments(values,bauds)
         camera_options = CameraOptions(codec=self.args.video_codec,width=self.args.camera_width,height=self.args.camera_height,fps=self.args.camera_fps,
                                        lock_settings=not self.args.no_camera_lock,thermal_format=self.args.thermal_format,thermal_units=self.args.thermal_units)
-        self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono,camera_options) for sensor_id in SENSOR_IDS]
+        self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono,camera_options,2 if self.args.audio_channels == "stereo" else 1) for sensor_id in SENSOR_IDS]
         if self.lsl is not None:
             for sensor in self.sensors:
                 sensor.sample_listener = self.lsl.push_value
@@ -401,6 +401,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--camera",default="auto",help="Camera index/path, none, or simulate")
     result.add_argument("--camera2",default="none",help="Second face camera index/path (e.g. a mirrorless camera over USB streaming), or none")
     result.add_argument("--audio",default="auto",help="Audio input index/name, none, or simulate")
+    result.add_argument("--audio-channels",choices=("mono","stereo"),default="mono",help="mono averages the input; stereo keeps a two-mic receiver's channels apart")
     result.add_argument("--oximeter",default="auto",help="CMS50E serial port, auto, none, or simulate")
     result.add_argument("--csi",default="auto",help="ESP32 CSI receiver serial port, auto, or none")
     result.add_argument("--csi-baud",type=int,default=921600)

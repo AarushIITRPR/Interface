@@ -161,7 +161,7 @@ The device lists in the instructor console already show these names.
 \midrule\endhead
 Face camera 1 & Logitech BCC950, USB directly to the PC & 30 fps, 640x480 & Camera heart rate (rPPG), facial expression; uncompressed input, exposure locked \\
 Face camera 2 & Sony a6700 in USB Streaming mode, 720p & 25 fps, 1280x720 & Second, sharper face view \\
-Audio & DJI Mic Mini into the Sony mic jack; recorded from the Sony USB audio & 48 kHz & Speech during conversation and movement steps; voice arousal \\
+Audio & DJI Mic Mini, two transmitters into one receiver in the Sony mic jack; recorded from the Sony USB audio & 48 kHz, 2 channels & Speech during conversation and movement steps; voice arousal. Mic 1 on the participant (left channel), mic 2 on the operator (right channel) \\
 Thermal camera & FLIR UVC camera & about 10 fps & Facial skin temperature, breathing at the nostrils \\
 ECG & Frontier X chest strap, live share link from the phone app & 125 Hz & Reference heart rate and heart-rate variability \\
 Pulse oximeter & CMS50E, USB serial & 60 Hz & Heart rate, SpO2, fingertip pulse wave \\
@@ -205,9 +205,13 @@ python3 -m meridian_agent --server http://localhost:3000 \
   --code SESSIONCODE --token SESSIONTOKEN \
   --camera /dev/v4l/by-id/usb-046d_BCC950_...-video-index0 \
   --camera2 /dev/v4l/by-id/usb-Sony_ILCE-6700_...-video-index0 \
-  --audio ILCE-6700
+  --audio ILCE-6700 --audio-channels stereo
 \end{verbatim}
 The other devices (oximeter, GSR, ECG link, thermal, CSI) can be passed as flags or assigned in the console.
+
+\ui{--audio-channels stereo} keeps the two microphones on separate channels. Without it the agent averages them to
+one track and the participant can no longer be separated from the operator, which cannot be undone afterwards. The
+flag is not settable from the console, so it has to be on this command line every session.
 
 \begin{warnbox}
 Run only \textbf{one agent at a time}. Two agents fight for the same cameras and ports and both recordings are
@@ -283,7 +287,9 @@ separate the person from the room.
     app; keep the phone awake and charging.
   \item \textbf{Pulse oximeter}: index finger of the non-dominant hand, hand resting on the table.
   \item \textbf{GSR electrodes}: two fingers of the same hand, skin clean and dry; allow about 5 minutes to settle.
-  \item \textbf{DJI Mic Mini}: transmitter switched on and clipped near the collar.
+  \item \textbf{DJI Mic Mini}: both transmitters switched on. \textbf{Mic 1 on the participant}, clipped near the
+    collar; \textbf{mic 2 on the operator}. Mic 1 is the left channel and mic 2 the right, so swapping them puts the
+    operator's voice in the participant's channel for the whole session.
   \item \textbf{Seating}: face centred in both camera previews, hair off the forehead.
 \end{enumerate}
 
@@ -294,7 +300,7 @@ ECG & heart rate plausible, about 50 to 100 bpm at rest \\
 Pulse oximeter & finger detected; heart rate within 8 bpm of the ECG (heart-rate agreement card) \\
 GSR & above 0.5 uS and fairly stable (0.00 uS means no skin contact) \\
 Face cameras & face visible in both previews, 0 dropped frames \\
-Audio & level meter moves when the participant speaks \\
+Audio & level meter moves when the participant speaks; with two mics, check each channel separately using \texttt{tools/audio\_check.py} \\
 \bottomrule
 \end{tabularx}
 

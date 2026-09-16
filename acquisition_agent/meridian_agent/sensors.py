@@ -71,6 +71,10 @@ class Sensor:
         self._previous_sample_mono = 0.0
         self._side_capture: tuple | None = None
         self._final_report: SensorReport | None = None
+        # Set by a sensor that is receiving samples which cannot be trusted, such as a frozen CSI
+        # channel estimate. sample() rewrites status and detail on every frame, so a fault that
+        # outlives one frame cannot live there; report() consults this instead.
+        self._health_fault: str | None = None
         # Optional callback (sensor_id, rate_hz, value, monotonic_s), used for Lab Streaming Layer output.
         self.sample_listener: Callable[[str, float | None, float, float], None] | None = None
         self._side_rows = 0
@@ -218,6 +222,9 @@ class Sensor:
                 result.quality = "bad"
             elif not result.dataDetected:
                 result.quality = "waiting"
+            elif self._health_fault:
+                result.quality = "bad"
+                result.detail = self._health_fault[:160]
             elif result.status == "delayed" or (result.targetRateHz and result.rateHz is not None and result.rateHz < result.targetRateHz * 0.8):
                 result.quality = "degraded"
             else:
@@ -537,8 +544,91 @@ class EnvironmentSensor(SerialLineSensor):
         return float(values[3]),metrics,["Hardware detected","Environment line format valid","Samples arriving"]
 
 
+# esptool's reset sequence, ported from the csi-hr-c5 rig (host/preflight.py). pyserial asserts DTR
+# when it opens a port, but an assert without an edge is not a reset: a C5 left asleep by a replug
+# stays asleep and the port reads silent indefinitely. Measured there: silent for 6 s before the
+# pulse, 931 CSI rows in the 10 s after it.
+CSI_RESET_HOLD_S = 0.12
+# Frozen-channel gates from the same rig (host/validate_csi.py, esp-idf#18493). The 5 GHz path can
+# return a channel estimate that never updates while frame rate, RSSI and I/Q stay plausible, so
+# nothing downstream notices: the FFT of a constant is a clean DC line, which reads as "no motion"
+# rather than "no data". A healthy reference capture: 1931/1931 frames unique, amplitude std 1.43.
+CSI_MIN_AMPLITUDE_STD = 0.5
+CSI_MAX_REPEAT_FRACTION = 0.5
+CSI_MIN_UNIQUE_FRAMES = 10
+CSI_FROZEN_WINDOW = 2000       # 20 s at the nominal 100 Hz, matching the reference capture length
+CSI_FROZEN_MIN_FRAMES = 100    # below this there is nothing to test, so no verdict either way
+CSI_FROZEN_INTERVAL = 100      # recheck about once per second rather than on every frame
+
+
 class CsiSensor(SerialLineSensor):
     header = ["host_epoch_ns", "monotonic_s", "device_timestamp", "packet_id", "rssi", "raw_line"]
+
+    def __init__(self, sensor_id: str, port: str, baud: int, session_dir: Path, origin_mono: float):
+        super().__init__(sensor_id, port, baud, session_dir, origin_mono)
+        self._csi_frames: deque[tuple[float, ...]] = deque(maxlen=CSI_FROZEN_WINDOW)
+        self._csi_since_check = 0
+        self._csi_stats: dict[str, object] = {}
+        self._csi_reset = False
+
+    def on_open(self, serial_port) -> None:
+        """Pulse the auto-reset line so a receiver asleep after a replug starts streaming.
+
+        Only while no frame has ever arrived. The C5 takes about 1.5 s to boot, so pulsing on every
+        reconnect attempt resets a board that is already booting and it never reaches the point of
+        streaming.
+        """
+        with self._lock:
+            if self._report.dataDetected:
+                return
+        try:
+            serial_port.dtr = False
+            serial_port.rts = True
+            time.sleep(CSI_RESET_HOLD_S)
+        finally:
+            # Leaving RTS asserted holds EN low forever, which looks exactly like a dead board.
+            serial_port.rts = False
+        serial_port.reset_input_buffer()
+        serial_port.readline()  # discard the partial line the reset cut in half
+        self._csi_reset = True
+
+    def _track_frozen(self, amplitudes: list[float]) -> None:
+        """Flag a channel estimate that is not updating, using the reference rig's three gates.
+
+        Amplitudes stand in for the raw I/Q vectors the reference compares: a stuck estimate repeats
+        its I/Q exactly, so the magnitudes repeat exactly too, and this stays correct for both line
+        layouts csi_amplitudes accepts.
+        """
+        self._csi_frames.append(tuple(amplitudes))
+        self._csi_since_check += 1
+        if self._csi_since_check < CSI_FROZEN_INTERVAL or len(self._csi_frames) < CSI_FROZEN_MIN_FRAMES:
+            return
+        self._csi_since_check = 0
+        frames = list(self._csi_frames)
+        width = min(len(frame) for frame in frames)
+        if not width:
+            return
+        trimmed = [frame[:width] for frame in frames]
+        count = len(trimmed)
+        repeats = sum(1 for index in range(1, count) if trimmed[index] == trimmed[index - 1])
+        repeat_fraction = repeats / max(1, count - 1)
+        unique = len(set(trimmed))
+        max_std = 0.0
+        for column in range(width):
+            mean = math.fsum(frame[column] for frame in trimmed) / count
+            variance = math.fsum((frame[column] - mean) ** 2 for frame in trimmed) / count
+            max_std = max(max_std, math.sqrt(variance))
+        if max_std < CSI_MIN_AMPLITUDE_STD:
+            fault = f"CSI frozen: amplitude std {max_std:.2f} under {CSI_MIN_AMPLITUDE_STD} on every subcarrier (esp-idf#18493)"
+        elif repeat_fraction > CSI_MAX_REPEAT_FRACTION:
+            fault = f"CSI frozen: {repeat_fraction:.0%} of frames identical to the previous one (esp-idf#18493)"
+        elif unique < CSI_MIN_UNIQUE_FRAMES:
+            fault = f"CSI frozen: only {unique} distinct frames in {count} (esp-idf#18493)"
+        else:
+            fault = None
+        self._csi_stats = {"amplitudeStd":round(max_std,3),"repeatFraction":round(repeat_fraction,3),"uniqueFrames":unique,"frozenWindow":count}
+        with self._lock:
+            self._health_fault = fault
 
     def parse(self, line: str) -> tuple[list[object], str] | None:
         if line.startswith("#"):
@@ -559,7 +649,15 @@ class CsiSensor(SerialLineSensor):
         rssi = float(values[2]); amplitudes = csi_amplitudes(str(values[3]))
         if amplitudes:
             self._series.clear(); self._series.extend(amplitudes[:64])
-        return rssi,{"rssi":rssi,"subcarriers":len(amplitudes) or 52},["Hardware detected","CSI packet format valid","Samples arriving"]
+            self._track_frozen(amplitudes)
+        metrics: dict = {"rssi":rssi,"subcarriers":len(amplitudes) or 52}
+        metrics.update(self._csi_stats)
+        validation = ["Hardware detected","CSI packet format valid"]
+        if self._csi_reset:
+            validation.append("Reset pulse sent")
+        fault = self._health_fault
+        validation.append(fault if fault else "Samples arriving")
+        return rssi,metrics,validation
 
 
 class GsrSensor(SerialLineSensor):
@@ -1108,10 +1206,13 @@ class CameraSensor(Sensor):
 
 
 class AudioSensor(Sensor):
-    def __init__(self, device: str, session_dir: Path, origin_mono: float, sample_rate: int = 48000):
+    def __init__(self, device: str, session_dir: Path, origin_mono: float, sample_rate: int = 48000, write_channels: int = 1):
         super().__init__("audio", device, session_dir, origin_mono)
         self.audio_device = int(device) if device.isdigit() else (None if device == "auto" else device)
         self.sample_rate = sample_rate
+        # Channels to keep in the recording. 1 averages the input to mono; 2 keeps a two-mic
+        # receiver's channels apart, which mono averaging destroys irreversibly.
+        self.write_channels = max(1, min(2, write_channels))
         self.path = session_dir / "audio" / "audio.wav"
 
     def run(self) -> None:
@@ -1141,32 +1242,47 @@ class AudioSensor(Sensor):
         try:
             # Stereo inputs are averaged to mono: a mic on one side of a camera's jack would be lost if only the first channel were read.
             channels = max(1, min(2, int(sd.query_devices(self.audio_device, "input")["max_input_channels"])))
+            # Keep only as many channels as the device actually offers, however many were asked for.
+            written = min(self.write_channels, channels)
             with sd.RawInputStream(samplerate=self.sample_rate,channels=channels,dtype="int16",device=self.audio_device,callback=callback):
-                self.set_state("connected",f"Mono {self.sample_rate} Hz" + (" (stereo input averaged)" if channels == 2 else ""))
+                self.set_state("connected",(f"Stereo {self.sample_rate} Hz (2 channels kept)" if written == 2
+                                            else f"Mono {self.sample_rate} Hz" + (" (stereo input averaged)" if channels == 2 else "")))
                 while not self._stop.is_set():
                     try:
                         chunk, silence_frames = chunks.get(timeout=0.25)
                     except queue.Empty:
                         continue
-                    chunk = downmix_int16(chunk, channels)
+                    if written == 1:
+                        chunk = downmix_int16(chunk, channels)
                     if self._recording.is_set() and target is None:
                         self.path.parent.mkdir(parents=True,exist_ok=True)
                         target = wave.open(str(self.path),"wb")
-                        target.setnchannels(1); target.setsampwidth(2); target.setframerate(self.sample_rate)
+                        target.setnchannels(written); target.setsampwidth(2); target.setframerate(self.sample_rate)
                     if not self._recording.is_set() and target is not None:
                         target.close(); target=None
                     if target is not None:
                         if silence_frames:
-                            target.writeframesraw(bytes(silence_frames*2))
+                            target.writeframesraw(silence_bytes(silence_frames, written))
                         target.writeframesraw(chunk)
-                    frames = len(chunk) // 2
-                    level = audio_level_pct(chunk)
-                    self.sample("Audio signal detected" if level>1 else "Audio connected",len(chunk) if target is not None else 0,frames,float(self.sample_rate),point=level,metrics={"levelPct":level,"sampleRate":self.sample_rate},validation=["Hardware detected","Audio stream open",("Signal detected" if level>1 else "Waiting for sound")])
+                    frames = len(chunk) // (2 * written)
+                    # Meter the mono average in both modes so the console number stays comparable.
+                    level = audio_level_pct(downmix_int16(chunk, written) if written > 1 else chunk)
+                    self.sample("Audio signal detected" if level>1 else "Audio connected",len(chunk) if target is not None else 0,frames,float(self.sample_rate),point=level,metrics={"levelPct":level,"sampleRate":self.sample_rate,"channels":written},validation=["Hardware detected","Audio stream open",("Signal detected" if level>1 else "Waiting for sound")])
         except Exception as exc:
             self.set_state("error",f"{type(exc).__name__}: {str(exc)[:120]}")
         finally:
             if target is not None:
                 target.close()
+
+
+def silence_bytes(frames: int, channels: int) -> bytes:
+    """Silent padding for a dropout, as 16-bit frames of `channels` samples each.
+
+    Gaps are filled so the WAV stays aligned to wall-clock time. At the wrong width the padding is
+    short by a factor of the channel count, so every dropout slides the audio against every other
+    stream — a drift no check of the file's existence or format would catch.
+    """
+    return bytes(max(0, frames) * 2 * max(1, channels))
 
 
 def downmix_int16(chunk: bytes, channels: int) -> bytes:
@@ -1400,7 +1516,7 @@ def _probe_serial_protocol(serial_module, port: str, baud: int, sensor_id: str) 
     return False
 
 
-def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin_mono: float, camera_options: CameraOptions | None = None) -> Sensor:
+def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin_mono: float, camera_options: CameraOptions | None = None, audio_channels: int = 1) -> Sensor:
     if value == "simulate":
         return SimulatedSensor(sensor_id,session_dir,origin_mono)
     if value in ("", "none"):
@@ -1408,7 +1524,7 @@ def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin
     if sensor_id in ("face","face2","thermal"):
         return CameraSensor(sensor_id,"0" if value == "auto" else value,session_dir,origin_mono,camera_options)
     if sensor_id == "audio":
-        return AudioSensor(value,session_dir,origin_mono)
+        return AudioSensor(value,session_dir,origin_mono,write_channels=audio_channels)
     if sensor_id == "oximeter":
         port = auto_oximeter_port() if value == "auto" else value
         return OximeterSensor(port,session_dir,origin_mono) if port else UnavailableSensor(sensor_id,"CMS50E not detected",session_dir,origin_mono)

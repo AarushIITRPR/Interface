@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -19,6 +20,78 @@ from meridian_agent.sensors import (
     frontierx_subscribe_payload,
     parse_frontierx_source,
 )
+
+
+class FakeResetPort:
+    """Records the control-line transitions a reset pulse makes, and how long EN was held low."""
+
+    def __init__(self):
+        self.events: list[tuple[str, bool]] = []
+        self.buffer_reset = False
+        self.readlines = 0
+        self.held = 0.0
+        self._asserted = 0.0
+        self._dtr = True
+        self._rts = False
+
+    @property
+    def dtr(self):
+        return self._dtr
+
+    @dtr.setter
+    def dtr(self, value):
+        self._dtr = value
+        self.events.append(("dtr",value))
+
+    @property
+    def rts(self):
+        return self._rts
+
+    @rts.setter
+    def rts(self, value):
+        if value:
+            self._asserted = time.monotonic()
+        elif self._asserted:
+            self.held = time.monotonic() - self._asserted
+        self._rts = value
+        self.events.append(("rts",value))
+
+    def reset_input_buffer(self):
+        self.buffer_reset = True
+
+    def readline(self):
+        self.readlines += 1
+        return b""
+
+
+class FakeAudioStream:
+    """Feeds fixed PCM chunks to AudioSensor's callback, standing in for a RawInputStream."""
+
+    def __init__(self, chunks, **kwargs):
+        self.callback = kwargs["callback"]
+        self.channels = kwargs["channels"]
+        self._chunks = list(chunks)
+        self._thread = None
+
+    def __enter__(self):
+        def pump():
+            for chunk in self._chunks:
+                self.callback(chunk, len(chunk) // (2 * self.channels), None, None)
+        self._thread = threading.Thread(target=pump)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        if self._thread is not None:
+            self._thread.join()
+        return False
+
+
+def fake_sounddevice(chunks, max_input_channels=2):
+    return types.SimpleNamespace(
+        query_devices=lambda device, kind=None: {"max_input_channels": max_input_channels},
+        RawInputStream=lambda **kwargs: FakeAudioStream(chunks, **kwargs),
+    )
 
 
 class ParserTests(unittest.TestCase):
@@ -54,6 +127,51 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(csi_amplitudes("218034440,29793,-38,-94,3,3,4,0,0,-6,8"),[5.0,0.0,10.0])
         self.assertEqual(csi_amplitudes("CSI_DATA,1000,42,-47,11,-92,6,1.5,-2.5,3"),[1.5,2.5,3.0])
 
+    def test_csi_reset_pulse_order_and_release(self):
+        """The C5 does not resume streaming after a replug without a DTR/RTS edge."""
+        from meridian_agent.sensors import CSI_RESET_HOLD_S
+        sensor = CsiSensor("csi","COM5",115200,self.root,0)
+        port = FakeResetPort()
+        sensor.on_open(port)
+        self.assertEqual(port.events,[("dtr",False),("rts",True),("rts",False)],
+                         "sequence must be DTR low, RTS high to hold EN low, then RTS low to release")
+        self.assertFalse(port.rts,"RTS left asserted holds EN low forever, which looks like a dead board")
+        self.assertGreaterEqual(port.held,CSI_RESET_HOLD_S * 0.8)
+        self.assertTrue(port.buffer_reset,"the input buffer must be cleared after the reset, not before")
+        self.assertEqual(port.readlines,1,"the partial line the reset cut in half must be discarded")
+
+    def test_csi_reset_pulse_is_not_repeated_once_frames_arrive(self):
+        """Re-pulsing a board that is already booting guarantees it never streams."""
+        sensor = CsiSensor("csi","COM5",115200,self.root,0)
+        sensor.sample("RSSI -44 dBm")
+        port = FakeResetPort()
+        sensor.on_open(port)
+        self.assertEqual(port.events,[])
+
+    def test_csi_frozen_channel_is_reported_as_bad(self):
+        sensor = CsiSensor("csi","COM5",115200,self.root,0)
+        for _ in range(300):
+            sensor.telemetry(["1000","42",-44.0,"1000,42,-44,-93,3,3,4,0,0,-6,8"])
+        self.assertIsNotNone(sensor._health_fault)
+        self.assertIn("frozen",sensor._health_fault)
+        sensor.sample("RSSI -44 dBm")
+        self.assertEqual(sensor.report().quality,"bad")
+
+    def test_csi_live_channel_has_no_fault(self):
+        sensor = CsiSensor("csi","COM5",115200,self.root,0)
+        for index in range(300):
+            swing = 20 + (index % 37)
+            sensor.telemetry(["1000",str(index),-44.0,f"1000,{index},-44,-93,3,{swing},4,{index % 23},0,-6,{swing}"])
+        self.assertIsNone(sensor._health_fault)
+        sensor.sample("RSSI -44 dBm")
+        self.assertEqual(sensor.report().quality,"good")
+
+    def test_csi_gives_no_frozen_verdict_below_the_floor(self):
+        sensor = CsiSensor("csi","COM5",115200,self.root,0)
+        for _ in range(50):
+            sensor.telemetry(["1000","42",-44.0,"1000,42,-44,-93,3,3,4,0,0,-6,8"])
+        self.assertIsNone(sensor._health_fault)
+
     def test_second_face_camera_uses_lossless_recorder(self):
         from meridian_agent.sensors import CameraSensor, make_sensor
         sensor = make_sensor("face2","/dev/v4l/by-id/usb-Sony_ILCE-6700-video-index0",115200,self.root,0)
@@ -67,6 +185,63 @@ class ParserTests(unittest.TestCase):
         mono = np.frombuffer(downmix_int16(stereo,2),dtype=np.int16).tolist()
         self.assertEqual(mono,[500,-1000,16388,-32768])
         self.assertEqual(downmix_int16(b"\x01\x02",1),b"\x01\x02")
+
+    def _run_audio(self, write_channels, chunks, max_input_channels=2):
+        """Drive AudioSensor through a fake stream and return (report, wave header)."""
+        import wave
+        from meridian_agent.sensors import AudioSensor
+        sensor = AudioSensor("auto",self.root,time.monotonic(),write_channels=write_channels)
+        expected = sum(len(chunk) for chunk in chunks) // (2 * max_input_channels)
+        sensor.start_recording()
+        with patch.dict(sys.modules,{"sounddevice":fake_sounddevice(chunks,max_input_channels)}):
+            sensor.start()
+            deadline = time.monotonic() + 3
+            while sensor.report().sampleCount < expected and time.monotonic() < deadline:
+                time.sleep(0.01)
+            sensor.stop_recording()
+            sensor.stop()
+        with wave.open(str(sensor.path),"rb") as handle:
+            header = (handle.getnchannels(), handle.getsampwidth(), handle.getnframes())
+        return sensor.report(), header, expected
+
+    def test_stereo_audio_keeps_both_channels(self):
+        """Two mics on separate channels are destroyed irreversibly by the mono average."""
+        chunks = [bytes(1920) for _ in range(4)]  # 480 stereo frames each at 16-bit
+        report, (channels, width, frames), expected = self._run_audio(2, chunks)
+        self.assertEqual(channels,2)
+        self.assertEqual(width,2)
+        self.assertEqual(report.metrics["channels"],2)
+        self.assertEqual(frames,expected,"recorded frames must match the frames captured")
+
+    def test_mono_audio_still_averages_to_one_channel(self):
+        chunks = [bytes(1920) for _ in range(4)]
+        report, (channels, width, frames), expected = self._run_audio(1, chunks)
+        self.assertEqual(channels,1)
+        self.assertEqual(width,2)
+        self.assertEqual(report.metrics["channels"],1)
+        self.assertEqual(frames,expected)
+
+    def test_audio_frame_count_does_not_change_with_channel_count(self):
+        """A frame is one sample per channel: stereo must not report twice the rate of mono."""
+        chunks = [bytes(1920) for _ in range(4)]
+        stereo, _, expected = self._run_audio(2, chunks)
+        mono, _, _ = self._run_audio(1, chunks)
+        self.assertEqual(stereo.sampleCount,expected)
+        self.assertEqual(stereo.sampleCount,mono.sampleCount)
+
+    def test_stereo_request_falls_back_on_a_mono_device(self):
+        chunks = [bytes(960) for _ in range(4)]
+        report, (channels, _, _), _ = self._run_audio(2, chunks, max_input_channels=1)
+        self.assertEqual(channels,1)
+        self.assertEqual(report.metrics["channels"],1)
+
+    def test_silence_padding_width_follows_the_channel_count(self):
+        """A dropout padded at the wrong width slides audio against every other stream."""
+        from meridian_agent.sensors import silence_bytes
+        self.assertEqual(len(silence_bytes(480,1)),960)
+        self.assertEqual(len(silence_bytes(480,2)),1920)
+        self.assertEqual(silence_bytes(0,2),b"")
+        self.assertEqual(len(silence_bytes(-5,2)),0)
 
     def test_gsr_json(self):
         sensor = GsrSensor("gsr","COM7",115200,self.root,0)
