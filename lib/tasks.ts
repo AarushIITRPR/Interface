@@ -175,3 +175,159 @@ function inverseNormal(p: number) {
 
 /** Breath hold ends automatically at this limit. */
 export const BREATH_HOLD_MAX_SEC = 60;
+
+export const WORD_LIST = {
+  /** How long the whole list stays on screen before recall. */
+  studySec: 30,
+} as const;
+
+/**
+ * Six recall lists of ten concrete, emotionally neutral nouns: one word per semantic category within a list, four to
+ * eight letters, no Stroop colour words, no word shared between lists.
+ *
+ * List 1 is the list from protocol_console_optimized.html, kept so results stay comparable with anything run on that
+ * prototype; it pairs "river" with "ocean", which the others avoid. The lists were matched by hand, not against
+ * published norms - check them against frequency and concreteness ratings before publishing.
+ */
+export const WORD_LISTS: readonly (readonly string[])[] = [
+  ["apple", "river", "chair", "music", "garden", "pencil", "ocean", "candle", "bicycle", "window"],
+  ["bread", "forest", "table", "coin", "clock", "rabbit", "bottle", "cloud", "hammer", "jacket"],
+  ["lemon", "bridge", "carpet", "kettle", "pillow", "sheep", "mirror", "violin", "basket", "planet"],
+  ["cheese", "valley", "desk", "rocket", "blanket", "horse", "wallet", "drum", "stamp", "brush"],
+  ["carrot", "desert", "lamp", "saucer", "curtain", "eagle", "compass", "guitar", "anchor", "pocket"],
+  ["onion", "mountain", "stool", "spoon", "turtle", "helmet", "piano", "castle", "kite", "pebble"],
+];
+
+/**
+ * Which list a participant studies, from their two counterbalancing rows (both 1-6).
+ *
+ * `(emotionRow + taskRow) % 6` is a Latin square over the 6x6 grid: every list appears once in every emotion order and
+ * once in every task order, so list difficulty can never masquerade as an order effect. Rotating on the participant
+ * number alone would tie the list to the emotion order, since that row is itself `(pid - 1) % 6`.
+ */
+export function wordListIndex(emotionRow: number, taskRow: number): number {
+  return (((emotionRow - 1) + (taskRow - 1)) % WORD_LISTS.length + WORD_LISTS.length) % WORD_LISTS.length;
+}
+
+export type RecallScore = {
+  hits: string[];
+  /** Typed words one letter away from a list word, with the word they resemble. Not counted as hits. */
+  near: Array<{ typed: string; word: string }>;
+  intrusions: string[];
+  repeats: number;
+  misses: string[];
+  total: number;
+  hitsLenient: number;
+};
+
+function editDistanceIsOne(a: string, b: string): boolean {
+  if (a === b || Math.abs(a.length - b.length) > 1) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (b.length > a.length) j++;
+    else { i++; j++; }
+  }
+  return edits + (a.length - i) + (b.length - j) === 1;
+}
+
+/**
+ * Score free recall against a list.
+ *
+ * A token is a hit when it matches a list word exactly or with a plural ending. A token one letter away from a list
+ * word is a near miss and is kept separate: "chain" is a different word from "chair", and whether it counts belongs to
+ * the analyst, not to the scorer. `hitsLenient` adds the near misses for anyone who wants typo-tolerant scoring.
+ * The prototype scored exact matches only, so "apples" counted as an intrusion and as a missed "apple" at once.
+ */
+export function scoreRecall(list: readonly string[], text: string): RecallScore {
+  const words = list.map((word) => word.toLowerCase());
+  const tokens = (text || "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const hitIndexes = new Set<number>();
+  const nearIndexes = new Set<number>();
+  const near: RecallScore["near"] = [];
+  const intrusions: string[] = [];
+  let repeats = 0;
+  const plural = (token: string, word: string) => token === `${word}s` || token === `${word}es` || (word.endsWith("s") && token === word.slice(0, -1));
+  for (const token of tokens) {
+    const exact = words.findIndex((word) => word === token || plural(token, word));
+    if (exact >= 0) {
+      if (hitIndexes.has(exact)) repeats += 1; else hitIndexes.add(exact);
+      continue;
+    }
+    const close = token.length >= 5 ? words.findIndex((word) => editDistanceIsOne(token, word)) : -1;
+    if (close >= 0) {
+      near.push({ typed: token, word: words[close] });
+      nearIndexes.add(close);
+      continue;
+    }
+    intrusions.push(token);
+  }
+  const lenient = new Set([...hitIndexes, ...nearIndexes]);
+  return {
+    hits: words.filter((_, index) => hitIndexes.has(index)),
+    near,
+    intrusions,
+    repeats,
+    misses: words.filter((_, index) => !hitIndexes.has(index)),
+    total: words.length,
+    hitsLenient: lenient.size,
+  };
+}
+
+export const WORD_LIST_EVENTS = { immediate: "wordlist_recall", delayed: "wordlist_delayed_recall" } as const;
+
+const boundedMs = (value: unknown, max: number) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(max, Math.round(number))) : 0;
+};
+const tenths = (value: number) => Math.round(value * 10) / 10;
+
+/**
+ * The event recorded when a participant submits a recall, scored on the server.
+ *
+ * The subject display sends only what was typed and two durations it measured with its own monotonic clock. The
+ * study end time is placed on the server clock as `receivedAt - recallMs`, so the study-to-test delay never depends
+ * on the display's wall clock. Delay runs from the end of study to the start of the delayed step: how long the
+ * participant then took to type is reported separately and does not stretch the retention interval.
+ */
+export function wordListResult(input: {
+  phase: "immediate" | "delayed";
+  list: readonly string[];
+  listIndex: number;
+  raw: Record<string, unknown>;
+  receivedAt: number;
+  stepStartedAt: number;
+  /** Metadata of the latest immediate recall, when scoring a delayed one. */
+  immediate?: Record<string, unknown>;
+}): { eventType: string; label: string; metadata: Record<string, unknown> } {
+  const response = String(input.raw.response ?? "").slice(0, 2000);
+  const score = scoreRecall(input.list, response);
+  const common = {
+    phase: input.phase, listIndex: input.listIndex, words: [...input.list], response,
+    hits: score.hits.length, hitsLenient: score.hitsLenient, intrusions: score.intrusions.length, repeats: score.repeats,
+    total: score.total, recalled: score.hits, near: score.near, intrusionWords: score.intrusions, misses: score.misses,
+    recallSec: tenths((input.receivedAt - input.stepStartedAt) / 1000),
+  };
+  if (input.phase === "immediate") {
+    const recallMs = boundedMs(input.raw.recallMs, 600_000);
+    return {
+      eventType: WORD_LIST_EVENTS.immediate,
+      label: `Word list recalled: ${score.hits.length}/${score.total}`,
+      metadata: { ...common, studyMs: boundedMs(input.raw.studyMs, 120_000), recallMs, studyEndedAt: new Date(input.receivedAt - recallMs).toISOString() },
+    };
+  }
+  const studyEndedAt = typeof input.immediate?.studyEndedAt === "string" ? Date.parse(input.immediate.studyEndedAt) : NaN;
+  const immediateHits = Number(input.immediate?.hits);
+  return {
+    eventType: WORD_LIST_EVENTS.delayed,
+    label: `Delayed recall: ${score.hits.length}/${score.total}`,
+    metadata: {
+      ...common,
+      delaySec: Number.isFinite(studyEndedAt) ? tenths((input.stepStartedAt - studyEndedAt) / 1000) : null,
+      immediateHits: Number.isFinite(immediateHits) ? immediateHits : null,
+      retentionPct: Number.isFinite(immediateHits) && immediateHits > 0 ? Math.round((100 * score.hits.length) / immediateHits) : null,
+    },
+  };
+}

@@ -7,7 +7,7 @@ export const PROTOCOL_VERSION = "v9";
 export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"] as const;
 export type Emotion = (typeof EMOTIONS)[number];
 export type BufferKind = "stroop" | "nback" | "conversation";
-export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "questionnaire" | "annotation" | "end";
+export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "questionnaire" | "annotation" | "wordlist" | "wordlist_delayed" | "end";
 
 /** Optional protocol blocks, chosen per session during setup and fixed once recording starts. */
 export type ProtocolOptions = {
@@ -16,6 +16,8 @@ export type ProtocolOptions = {
   extendedExertion: boolean;
   neutralClip: boolean;
   annotationReplay: boolean;
+  /** Word list study with immediate recall after Part 3, and delayed recall after the body scan. */
+  wordList?: boolean;
 };
 export type SessionStatus = "setup" | "running" | "paused" | "complete" | "aborted";
 export type SensorStatus = "connected" | "recording" | "delayed" | "missing" | "error" | "unknown";
@@ -52,6 +54,15 @@ export type Assignment = {
   options?: ProtocolOptions;
   /** Stimulus id per clip kind from the registry (v9+). */
   stimuli?: Partial<Record<ClipKind, string>>;
+  /** Index into WORD_LISTS in lib/tasks.ts. Absent on older sessions, which derive it from their two rows. */
+  wordList?: number;
+  /**
+   * The protocol template this session was created from, copied at creation.
+   *
+   * Absent means the session predates the builder and renders through `createPlan`, so its step ids keep the
+   * scheme its stored events were written against.
+   */
+  protocol?: ProtocolTemplate;
 };
 
 export type ProtocolStep = {
@@ -69,6 +80,8 @@ export type ProtocolStep = {
   clip?: ClipKind;
   questionnaireId?: string;
   breathsPerMin?: number;
+  /** Shortest run that still measures what the step exists to measure; the operator cannot advance before it. */
+  minDurationSec?: number;
   safety?: boolean;
   bp?: boolean;
   bpLabel?: string;
@@ -77,6 +90,62 @@ export type ProtocolStep = {
   safetyKey?: "breath_hold" | "standing" | "exertion";
   advance: "operator" | "timer" | "media" | "task" | "gate" | "subject";
   estimatedSec: number;
+  /** Template slot this step came from. Absent on sessions built before the protocol builder. */
+  slotKey?: string;
+  /** Non-clip media this step plays, so the subject display does not have to match on the title. */
+  mediaKey?: MediaKey;
+};
+
+/** Which counterbalanced clip fills a clip or rating slot: the neutral control, or a position in a block. */
+export type ClipSlot = "neutral" | "b1a" | "b1b" | "b2a" | "b2b" | "b3a" | "b3b";
+/** Which of the three counterbalanced task positions a slot occupies. */
+export type BufferSlot = 1 | 2 | 3;
+/** Non-clip media a slot can carry. */
+export type MediaKey = "washout" | "boxBreathing" | "bodyScan" | "fixation";
+
+/**
+ * One position in the protocol template.
+ *
+ * A slot says what happens and for how long; it does not say which emotion or which task lands in it. Those come
+ * from the participant's counterbalancing at render time, so editing the template cannot disturb the Williams
+ * square in `assignFor`.
+ */
+export type ProtocolSlot = Omit<ProtocolStep, "id" | "index" | "emo" | "clip" | "slotKey"> & {
+  /** Stable identity, unique within the template. Becomes part of the rendered step id. */
+  key: string;
+  /** Present on clip and rating slots; the emotion is resolved per participant. */
+  clipSlot?: ClipSlot;
+  /** Present on task slots and on anything that follows one, such as the workload rating. */
+  bufferSlot?: BufferSlot;
+  /** Render this slot only when its buffer position resolved to one of these tasks. */
+  requiresTask?: BufferKind[];
+  /** Render this slot only when this clip kind has media. The neutral block drops out for participants without one. */
+  requiresClip?: ClipKind;
+};
+
+/** A clip and the duration measured from the file itself, resolved when the template is saved. */
+export type ClipMedia = {
+  /** Uploaded asset in R2, or a registry entry from lib/stimuli.ts. Exactly one is set. */
+  assetId?: string;
+  stimulusId?: string;
+  src: string;
+  durationSec: number;
+};
+
+/** The editable half of a task step. Which of the three runs where is counterbalancing's business. */
+export type TaskSlot = Pick<ProtocolSlot, "title" | "subjectPrompt" | "operatorScript" | "operatorNote" | "durationSec" | "minDurationSec" | "advance" | "estimatedSec"> & {
+  type: Extract<StepType, "stroop" | "nback" | "conversation">;
+};
+
+export type ProtocolTemplate = {
+  id: string;
+  version: number;
+  label: string;
+  updatedAt: string;
+  slots: ProtocolSlot[];
+  clips: Partial<Record<ClipKind, ClipMedia>>;
+  tasks: Record<BufferKind, TaskSlot>;
+  media: Partial<Record<MediaKey, string>>;
 };
 
 export type ExperimentEvent = {
@@ -188,7 +257,7 @@ export type SessionSnapshot = {
   notes: Array<{ id: string; body: string; category: string; stepId: string; stepLabel: string; createdAt: string }>;
   ratings: Array<{ emotion: ClipKind; valence: number; arousal: number; dominance: number; scalePoints?: number; discreteEmotion?: string | null; intensity?: number | null; familiarity?: string | null; createdAt: string }>;
   sensors: SensorChannel[];
-  bpReadings: Array<{ stepId: string; label: string; systolic: number; diastolic: number; pulse: number | null; createdAt: string }>;
+  bpReadings: Array<{ stepId: string; label: string; systolic: number; diastolic: number; pulse: number | null; createdAt: string; cuffStartedAt?: string; cuffSec?: number }>;
   media: MediaConfig;
   nbackLevel: 1 | 2 | 3;
   operatorLastSeenAt: string | null;
@@ -223,6 +292,13 @@ export type SessionSnapshot = {
   gate?: GateStatus | null;
   /** Stimulus preload progress reported by the subject display. */
   subjectMedia?: { loaded: number; total: number; failed: number; ready: boolean };
+  /**
+   * A rehearsal, not a participant.
+   *
+   * Starts without an acquisition agent, consent or screening, and is kept out of the cohort so it cannot be
+   * counted as a participant or fill a cell in the counterbalancing grid.
+   */
+  demo?: boolean;
   /** Unique per saved revision; lets batched event inserts confirm their snapshot update won. */
   writeId?: string;
   /** Server clock when this snapshot was read; used to order responses that share a revision. */
@@ -233,10 +309,14 @@ export type SubjectStep = Pick<ProtocolStep,
   "id" | "index" | "type" | "subjectPrompt" | "durationSec" | "safety" | "fixation" | "advance" | "questionnaireId" | "breathsPerMin"
 > & {
   variant: "box_breathing" | "breath_hold" | "paced_breathing" | null;
+  /** The list to study. Sent for the study step only: the delayed recall step must not carry it. */
+  words?: string[];
 };
 
 export type SubjectSnapshot = {
   serverTime: string;
+  /** A rehearsal; the display says so, so nobody mistakes a demo for a real session or the reverse. */
+  demo: boolean;
   /** Every stimulus the session can play, so the display can load them all before the protocol starts. */
   mediaManifest: string[];
   /** Show the photodiode sync patch, which flashes when stimuli start and steps appear. */

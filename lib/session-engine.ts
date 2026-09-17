@@ -1,12 +1,12 @@
 import { env } from "cloudflare:workers";
 import { summarizeSession } from "./cohort";
-import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel } from "./protocol";
+import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel, wordListFor, wordListIndexFor } from "./protocol";
 import { QUESTIONNAIRES, scoreQuestionnaire, validAnswers } from "./questionnaires";
 import { STIMULI, stimulusById } from "./stimuli";
-import { ARTIFACT_TYPES, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, requiredSensorsReady, sanitizeFields, stalePreflightReport, startChecks, withConsentDefaults } from "./rig";
+import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, requiredSensorsReady, sanitizeFields, stalePreflightReport, startChecks, withConsentDefaults } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
-import { SAM_POINTS } from "./tasks";
-import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
+import { SAM_POINTS, WORD_LIST_EVENTS, wordListResult } from "./tasks";
+import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type ProtocolTemplate, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
 const bindings = () => env as unknown as Bindings;
@@ -33,16 +33,21 @@ export function ensureSchema() {
 async function createSchema() {
   const db = bindings().DB;
   await db.batch([
-    db.prepare(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, participant_id INTEGER NOT NULL, operator TEXT NOT NULL, protocol_version TEXT NOT NULL, status TEXT NOT NULL, step_index INTEGER NOT NULL, revision INTEGER NOT NULL, assignment_json TEXT NOT NULL, snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, participant_id INTEGER NOT NULL, operator TEXT NOT NULL, protocol_version TEXT NOT NULL, status TEXT NOT NULL, step_index INTEGER NOT NULL, revision INTEGER NOT NULL, assignment_json TEXT NOT NULL, snapshot_json TEXT NOT NULL, demo INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, sequence INTEGER NOT NULL, step_id TEXT NOT NULL, event_type TEXT NOT NULL, severity TEXT NOT NULL, source TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_events_session_sequence ON events(session_id, sequence)`),
-    db.prepare(`CREATE TABLE IF NOT EXISTS media_assets (id TEXT PRIMARY KEY, object_key TEXT NOT NULL, filename TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, created_at TEXT NOT NULL)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS media_assets (id TEXT PRIMARY KEY, object_key TEXT NOT NULL, filename TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, duration_sec REAL, created_at TEXT NOT NULL)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_media_created ON media_assets(created_at DESC)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS protocol_templates (id TEXT PRIMARY KEY, version INTEGER NOT NULL, label TEXT NOT NULL, template_json TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_protocol_active ON protocol_templates(active, version DESC)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS annotations (id TEXT PRIMARY KEY, code TEXT NOT NULL, step_id TEXT NOT NULL, chunk INTEGER NOT NULL, samples_json TEXT NOT NULL, created_at TEXT NOT NULL)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_annotations_code ON annotations(code, step_id, chunk)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS session_telemetry (code TEXT PRIMARY KEY, sensors_json TEXT, acquisition_json TEXT, operator_last_seen_at TEXT, subject_last_seen_at TEXT, updated_at TEXT NOT NULL)`),
   ]);
+  // These tables predate their newest columns, and SQLite has no ADD COLUMN IF NOT EXISTS.
+  await db.prepare(`ALTER TABLE media_assets ADD COLUMN duration_sec REAL`).run().catch(() => {});
+  await db.prepare(`ALTER TABLE sessions ADD COLUMN demo INTEGER NOT NULL DEFAULT 0`).run().catch(() => {});
 }
 
 /*
@@ -112,7 +117,8 @@ function enforceLeases(snapshot: SessionSnapshot) {
   const operatorLost = !snapshot.operatorLastSeenAt || at - Date.parse(snapshot.operatorLastSeenAt) > OPERATOR_LEASE_MS;
   let lostSensors: string[] = [];
   const recordingFor = snapshot.recordingStartedAt ? at - Date.parse(snapshot.recordingStartedAt) : 0;
-  if (!snapshot.hardwareGateOverride && recordingFor > SENSOR_START_GRACE_MS) {
+  // A demo has no agent by design, so the lease that guards a real recording would pause it on a loop.
+  if (!snapshot.demo && !snapshot.hardwareGateOverride && recordingFor > SENSOR_START_GRACE_MS) {
     const agentOnline = Boolean(snapshot.acquisition.lastSeenAt && at - Date.parse(snapshot.acquisition.lastSeenAt) <= ACQUISITION_LEASE_MS);
     lostSensors = agentOnline ? snapshot.requiredSensors.filter((id) => {
       const sensor = snapshot.sensors.find((item) => item.id === id);
@@ -188,9 +194,30 @@ function hydrateSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
   return snapshot;
 }
 
-export async function createSession(participantId: number, operator: string) {
+/** The protocol template new sessions are built from, or null while the study is still on the built-in protocol. */
+export async function activeTemplate(): Promise<ProtocolTemplate | null> {
+  const row = await bindings().DB.prepare(`SELECT template_json FROM protocol_templates WHERE active = 1 ORDER BY version DESC LIMIT 1`).first<{ template_json: string }>();
+  if (!row) return null;
+  try {
+    return JSON.parse(row.template_json) as ProtocolTemplate;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param options.demo   A rehearsal: starts with no hardware, consent or screening, and stays out of the cohort.
+ * @param options.protocol  A draft template to run instead of the saved one, so the builder can preview an edit
+ *                          without first pushing it to every future participant.
+ */
+export async function createSession(participantId: number, operator: string, options: { demo?: boolean; protocol?: ProtocolTemplate } = {}) {
   await ensureSchema();
-  const assignment = assignFor(participantId);
+  const base = assignFor(participantId);
+  // The template is copied into the session, not referenced, so editing it later cannot change what this
+  // participant already did - the rule lib/stimuli.ts states for clips, applied to the whole protocol.
+  const template = options.protocol ?? await activeTemplate();
+  const assignment = template ? { ...base, protocol: template } : base;
+  const demo = Boolean(options.demo);
   const createdAt = now();
   const snapshot: SessionSnapshot = {
     id: uid("ses"), code: sessionCode(assignment.pid), revision: 1, participantId: assignment.pid,
@@ -198,9 +225,9 @@ export async function createSession(participantId: number, operator: string) {
     stepIndex:0, attempt:1, stepStartedAt:createdAt, pausedAt:null, announcement:null, events:[], notes:[], ratings:[],
     sensors:SENSOR_CATALOG.map((sensor) => emptySensor(sensor,createdAt)),
     bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt,subjectLastSeenAt:null,
-    acquisitionToken:acquisitionToken(), acquisition:emptyAcquisition(), recordings:[], requiredSensors:["face","audio","oximeter"], hardwareGateOverride:false,deviceConfig:{...DEFAULT_DEVICE_CONFIG},configRevision:1,configurationLocked:false,recordingStartedAt:null,preflightTest:{status:"idle",detail:"Not run",completedAt:null}, createdAt, updatedAt:createdAt,
+    acquisitionToken:acquisitionToken(), acquisition:emptyAcquisition(), recordings:[], requiredSensors:["face","audio","oximeter"], hardwareGateOverride:false,deviceConfig:{...DEFAULT_DEVICE_CONFIG},configRevision:1,configurationLocked:false,recordingStartedAt:null,preflightTest:{status:"idle",detail:"Not run",completedAt:null}, demo, createdAt, updatedAt:createdAt,
   };
-  const event = appendEvent(snapshot,{ eventType:"session_prepared", label:"Session prepared", detail:`Participant ${assignment.pid}, emotion row ${assignment.row}, task order ${assignment.bufferRow}`, source:"operator", metadata:{ assignment } });
+  const event = appendEvent(snapshot,{ eventType:demo ? "demo_prepared" : "session_prepared", label:demo ? "Demo run prepared" : "Session prepared", detail:`${demo ? "Demo, participant" : "Participant"} ${assignment.pid}, emotion row ${assignment.row}, task order ${assignment.bufferRow}`, severity:demo ? "warn" : "info", source:"operator", metadata:{ assignment, demo } });
   snapshot.revision = 2;
   snapshot.writeId = uid("w");
   const db = bindings().DB;
@@ -210,8 +237,8 @@ export async function createSession(participantId: number, operator: string) {
     snapshot.code = sessionCode(assignment.pid);
   }
   await db.batch([
-    db.prepare(`INSERT INTO sessions (id, code, participant_id, operator, protocol_version, status, step_index, revision, assignment_json, snapshot_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(snapshot.id,snapshot.code,snapshot.participantId,snapshot.operator,snapshot.protocolVersion,snapshot.status,snapshot.stepIndex,snapshot.revision,JSON.stringify(assignment),storedSnapshot(snapshot),createdAt,createdAt),
+    db.prepare(`INSERT INTO sessions (id, code, participant_id, operator, protocol_version, status, step_index, revision, assignment_json, snapshot_json, demo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(snapshot.id,snapshot.code,snapshot.participantId,snapshot.operator,snapshot.protocolVersion,snapshot.status,snapshot.stepIndex,snapshot.revision,JSON.stringify(assignment),storedSnapshot(snapshot),demo ? 1 : 0,createdAt,createdAt),
     eventStatement(snapshot.id,event),
     telemetryStatement(snapshot,"operator"),
     telemetryStatement(snapshot,"agent"),
@@ -230,7 +257,8 @@ export async function getSession(code: string) {
 export async function getLatestSetupSessionForParticipant(participantId: number) {
   await ensureSchema();
   if (!Number.isSafeInteger(participantId) || participantId < 1) return null;
-  const row = await bindings().DB.prepare(`${SESSION_SELECT} WHERE s.participant_id = ? AND s.status = 'setup' ORDER BY s.created_at DESC LIMIT 1`)
+  // Real sessions win over demos, so a rehearsal left in setup cannot capture the participant who arrives next.
+  const row = await bindings().DB.prepare(`${SESSION_SELECT} WHERE s.participant_id = ? AND s.status = 'setup' ORDER BY s.demo ASC, s.created_at DESC LIMIT 1`)
     .bind(participantId).first<SessionRow>();
   return row ? snapshotFromRow(row) : null;
 }
@@ -238,33 +266,89 @@ export async function getLatestSetupSessionForParticipant(participantId: number)
 /** Compact per-session summaries for the cohort dashboard (most recent 500 sessions). */
 export async function cohortSessions() {
   await ensureSchema();
-  const result = await bindings().DB.prepare(`${SESSION_SELECT} ORDER BY s.created_at DESC LIMIT 500`).all<SessionRow>();
+  // Demos are rehearsals, not participants: counting one would add a completed participant, fill a cell in the
+  // counterbalancing grid, and shift the skin type, sex and age distributions.
+  const result = await bindings().DB.prepare(`${SESSION_SELECT} WHERE s.demo = 0 ORDER BY s.created_at DESC LIMIT 500`).all<SessionRow>();
   return result.results.map((row) => summarizeSession(snapshotFromRow(row)));
 }
 
 export async function listSessions() {
   await ensureSchema();
-  const result = await bindings().DB.prepare(`SELECT code, participant_id, operator, status, step_index, revision, created_at, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 50`).all();
+  // Excludes demos so the launcher never offers to resume a rehearsal for a real participant.
+  const result = await bindings().DB.prepare(`SELECT code, participant_id, operator, status, step_index, revision, created_at, updated_at FROM sessions WHERE demo = 0 ORDER BY updated_at DESC LIMIT 50`).all();
   return result.results;
+}
+
+/** Most recent event of a type, optionally narrowed further. */
+function latestEvent(snapshot: SessionSnapshot, eventType: string, match: (event: ExperimentEvent) => boolean = () => true): ExperimentEvent | undefined {
+  for (let index = snapshot.events.length - 1; index >= 0; index--) {
+    const event = snapshot.events[index];
+    if (event.eventType === eventType && match(event)) return event;
+  }
+  return undefined;
+}
+
+function artifactLabel(id: string) { return ARTIFACT_TYPES.find((type) => type.id === id)?.label ?? id; }
+
+/**
+ * What the subject display should play for a step.
+ *
+ * A templated step names its media with `mediaKey`. Untemplated sessions fall back to the original rules, which
+ * included matching the box-breathing video on the literal title "Box breathing" - workable only while titles were
+ * hardcoded, which is exactly what the protocol builder changes.
+ */
+function stepMediaSrc(snapshot: SessionSnapshot, step: ProtocolStep | null): string {
+  if (!step) return "";
+  if ((step.type === "clip" || step.type === "annotation") && step.clip) {
+    return snapshot.assignment.protocol?.clips?.[step.clip]?.src
+      || clipSource(snapshot.assignment, step.clip, snapshot.media.emotions);
+  }
+  if (step.mediaKey) return snapshot.assignment.protocol?.media?.[step.mediaKey] ?? snapshot.media[step.mediaKey] ?? "";
+  if (step.type === "washout") return snapshot.media.washout;
+  if (step.type === "bodyscan") return snapshot.media.bodyScan;
+  if (step.title === "Box breathing") return snapshot.media.boxBreathing;
+  if (step.fixation) return snapshot.media.fixation;
+  return "";
+}
+
+/**
+ * Every file this session can play, for the subject display to preload before the protocol starts.
+ *
+ * A clip the template overrides must not pull its superseded source in behind it. Swapping anger and disgust for
+ * new files otherwise left the old pair in the manifest, so the display downloaded 82 MB it would never play and
+ * the "media ready" gate waited on it.
+ */
+function mediaManifest(snapshot: SessionSnapshot): string[] {
+  const template = snapshot.assignment.protocol;
+  const overridden = new Set(Object.keys(template?.clips ?? {}));
+  const registry = Object.entries(snapshot.assignment.stimuli ?? {})
+    .filter(([clip]) => !overridden.has(clip))
+    .map(([, id]) => stimulusById(id, STIMULI)?.src ?? "");
+  const configured = Object.entries(snapshot.media.emotions).filter(([clip]) => !overridden.has(clip)).map(([, src]) => src);
+  return [...new Set([
+    ...Object.values(template?.clips ?? {}).map((clip) => clip.src),
+    ...Object.values(template?.media ?? {}),
+    ...registry, ...configured,
+    ...(template ? [] : [snapshot.media.washout, snapshot.media.boxBreathing, snapshot.media.bodyScan, snapshot.media.fixation]),
+  ].filter(Boolean))];
 }
 
 export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   const plan = buildPlan(snapshot.assignment);
   const current = plan[snapshot.stepIndex] ?? null;
-  let mediaSrc = "";
-  if ((current?.type === "clip" || current?.type === "annotation") && current.clip) mediaSrc = clipSource(snapshot.assignment, current.clip, snapshot.media.emotions);
-  if (current?.type === "washout") mediaSrc = snapshot.media.washout;
-  if (current?.type === "bodyscan") mediaSrc = snapshot.media.bodyScan;
-  if (current?.fixation) mediaSrc = snapshot.media.fixation;
-  if (current?.title === "Box breathing") mediaSrc = snapshot.media.boxBreathing;
+  const mediaSrc = stepMediaSrc(snapshot, current);
 
   const operatorConnected = Boolean(snapshot.operatorLastSeenAt && Date.now() - Date.parse(snapshot.operatorLastSeenAt) <= OPERATOR_LEASE_MS);
-  const acquisitionReady = snapshot.hardwareGateOverride || requiredSensorsReady(snapshot,Date.now(),{recording:true});
+  // A demo has no agent to wait for, so the display must not sit on a gate that will never open.
+  const acquisitionReady = Boolean(snapshot.demo) || snapshot.hardwareGateOverride || requiredSensorsReady(snapshot,Date.now(),{recording:true});
   return {
     serverTime: now(),
     // A photodiode on the screen corner needs the sync patch; without one the patch stays hidden from the subject.
     syncPatch: Boolean(snapshot.deviceConfig.photodiode && snapshot.deviceConfig.photodiode !== "none"),
-    mediaManifest: [...new Set([...Object.values(snapshot.assignment.stimuli ?? {}).map((id) => stimulusById(id, STIMULI)?.src ?? ""),...Object.values(snapshot.media.emotions),snapshot.media.washout,snapshot.media.boxBreathing,snapshot.media.bodyScan,snapshot.media.fixation].filter(Boolean))],
+    // Everything this session can play, so the display has it loaded before the protocol starts. A templated
+    // session plays the template's clips, which may be uploads the registry knows nothing about.
+    demo: Boolean(snapshot.demo),
+    mediaManifest: mediaManifest(snapshot),
     code: snapshot.code,
     participantId: snapshot.participantId,
     revision: snapshot.revision,
@@ -289,11 +373,28 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
       advance: current.advance,
       questionnaireId: current.questionnaireId,
       breathsPerMin: current.breathsPerMin,
-      variant: current.title === "Box breathing" ? "box_breathing" : current.title === "Breath hold" ? "breath_hold" : current.breathsPerMin ? "paced_breathing" : null,
+      // Chosen by what the step is, not what it is called: titles are editable in the protocol builder. The title
+      // comparison stays only for sessions whose steps predate mediaKey.
+      variant: current.mediaKey === "boxBreathing" || current.title === "Box breathing" ? "box_breathing"
+        : current.safetyKey === "breath_hold" || current.title === "Breath hold" ? "breath_hold"
+        : current.breathsPerMin ? "paced_breathing" : null,
+      // Only the study step carries the list. Sending it to the delayed step would put the answers on screen.
+      ...(current.type === "wordlist" ? { words: [...wordListFor(snapshot.assignment)] } : {}),
     } : null,
   };
 }
 
+
+/** Which run of this step is about to start, counted from the step_start events already recorded.
+ *
+ * Returning to a step has to raise the attempt number, not reset it. Session 0101JUMR ran s36 and s37 twice and
+ * exported both runs as attempt 1, so two rows of steps.tsv, qa_report.json and physio_summary.tsv shared a key
+ * that is supposed to identify them. */
+function nextAttempt(snapshot: SessionSnapshot, stepId: string) {
+  const runs = snapshot.events.filter((event) => event.stepId === stepId
+    && (event.eventType === "step_start" || event.eventType === "step_repeated")).length;
+  return runs + 1;
+}
 
 function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"operator"|"system") {
   const plan = buildPlan(snapshot.assignment);
@@ -306,7 +407,7 @@ function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"o
   }
   snapshot.stepIndex += 1;
   skipScreenedSteps(snapshot, plan, 1);
-  snapshot.attempt = 1;
+  snapshot.attempt = nextAttempt(snapshot, plan[snapshot.stepIndex]?.id ?? "");
   snapshot.stepStartedAt = now();
   snapshot.announcement = null;
   appendEvent(snapshot,{ eventType:"step_start", label:"Step started", detail:shortLabel(plan[snapshot.stepIndex]), source:"system" });
@@ -353,6 +454,14 @@ export async function mutateSession(code: string, action: string, payload: Actio
     const running = current.status === "running";
     if (action === "advance" && running) {
       const fromSubject = payload.source === "subject";
+      // A step with a floor has to reach it or the data it exists to produce is not there. Overridable, like the
+      // return-to-baseline gate, so the operator can still get a distressed participant out of it.
+      if (step?.minDurationSec && payload.override !== true) {
+        const elapsed = (Date.now() - Date.parse(current.stepStartedAt)) / 1000;
+        if (elapsed < step.minDurationSec) {
+          throw new Error(`${shortLabel(step)} needs ${step.minDurationSec}s to measure anything; ${Math.floor(elapsed)}s elapsed. Wait, or advance with an override.`);
+        }
+      }
       // Subjects may only finish steps they control; gates, timers, and operator checks stay with the operator.
       if (!fromSubject && step?.type === "gate") {
         const gate = evaluateGate(current.acquisition.physiology, Date.now(), Date.parse(current.stepStartedAt));
@@ -384,19 +493,23 @@ export async function mutateSession(code: string, action: string, payload: Actio
       if (targetIndex !== current.stepIndex) {
         const previousLabel = step ? shortLabel(step) : "Unknown step";
         const target = plan[targetIndex];
-        appendEvent(current,{eventType:"operator_navigation",label:direction < 0 ? "Moved to previous task" : "Moved to next task",detail:`${previousLabel} to ${shortLabel(target)}`,source:"operator",metadata:{fromIndex:current.stepIndex,toIndex:targetIndex}});
+        appendEvent(current,{eventType:"operator_navigation",label:direction < 0 ? "Moved to previous task" : "Moved to next task",detail:`${previousLabel} to ${shortLabel(target)}`,source:"operator",metadata:{fromIndex:current.stepIndex,toIndex:targetIndex,review:current.status === "complete"}});
+        // Once the session is complete the sensors have stopped, so navigation is review only: move what the console
+        // shows, but do not reopen the session or start a step. Session 0101JUMR browsed back through ten steps six
+        // minutes after the streams closed, and each one exported as a real attempt with 0% coverage on every stream.
         current.stepIndex = targetIndex;
-        current.attempt = 1;
-        current.stepStartedAt = now();
-        if (current.status === "complete") current.status = "running";
-        if (current.status === "paused") current.pausedAt = current.stepStartedAt;
-        appendEvent(current,{eventType:"step_start",label:"Step started",detail:shortLabel(target),source:"operator"});
+        if (current.status !== "complete") {
+          current.attempt = nextAttempt(current, target.id);
+          current.stepStartedAt = now();
+          if (current.status === "paused") current.pausedAt = current.stepStartedAt;
+          appendEvent(current,{eventType:"step_start",label:"Step started",detail:shortLabel(target),source:"operator"});
+        }
       }
     }
     if (action === "autoAdvance" && running && step?.advance === "timer" && step.durationSec && Date.now()-Date.parse(current.stepStartedAt) >= step.durationSec*1000-AUTO_ADVANCE_TOLERANCE_MS) advance(current,"Timer completed","system");
     if (action === "pause" && current.status === "running") { current.status="paused"; current.pausedAt=now(); current.announcement={id:uid("ann"),text:"Please wait a moment.",kind:"pause",createdAt:now()}; appendEvent(current,{eventType:"session_paused",label:"Session paused",detail:String(payload.reason ?? ""),severity:"warn",source:payload.source === "subject" ? "subject" : "operator"}); }
     if (action === "resume" && current.status === "paused") { const delta = current.pausedAt ? Date.now()-Date.parse(current.pausedAt) : 0; current.stepStartedAt=new Date(Date.parse(current.stepStartedAt)+delta).toISOString(); current.status="running"; current.pausedAt=null; current.announcement=null; appendEvent(current,{eventType:"session_resumed",label:"Session resumed",source:"operator",metadata:{pauseMs:delta}}); }
-    if (action === "repeat") { current.attempt += 1; current.stepStartedAt=now(); appendEvent(current,{eventType:"step_repeated",label:"Step repeated by operator",detail:String(payload.reason ?? "No reason entered"),severity:"warn",source:"operator",metadata:{attempt:current.attempt}}); }
+    if (action === "repeat") { current.stepStartedAt=now(); current.attempt = nextAttempt(current, step?.id ?? ""); appendEvent(current,{eventType:"step_repeated",label:"Step repeated by operator",detail:String(payload.reason ?? "No reason entered"),severity:"warn",source:"operator",metadata:{attempt:current.attempt}}); }
     if (action === "message") { const text=String(payload.text ?? "").trim().slice(0,180); if(text){ current.announcement={id:uid("ann"),text,kind:payload.kind === "safety" ? "safety" : "info",createdAt:now()}; appendEvent(current,{eventType:"operator_message",label:"Operator message sent",detail:text,source:"operator"}); } }
     if (action === "ack") { if(current.announcement) appendEvent(current,{eventType:"message_ack",label:"Message acknowledged",source:"subject"}); current.announcement=null; }
     if (action === "log") appendEvent(current,{eventType:String(payload.eventType ?? "subject_event"),label:String(payload.label ?? "Subject event"),detail:String(payload.detail ?? ""),severity:(payload.severity as ExperimentEvent["severity"]) ?? "info",source:(payload.source as ExperimentEvent["source"]) ?? "subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}});
@@ -406,7 +519,19 @@ export async function mutateSession(code: string, action: string, payload: Actio
       appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{...rating}});
       advance(current,"Response submitted","subject");
     }
-    if (action === "taskComplete" && running && (step?.type === "stroop" || step?.type === "nback" || step?.advance === "subject")) { appendEvent(current,{eventType:String(payload.eventType ?? "task_complete"),label:String(payload.label ?? "Task completed"),source:"subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}}); advance(current,"Task completed","subject"); }
+    const recallStep = step?.type === "wordlist" || step?.type === "wordlist_delayed";
+    if (action === "taskComplete" && running && (step?.type === "stroop" || step?.type === "nback" || recallStep || step?.advance === "subject")) {
+      const raw = (payload.metadata as Record<string,unknown>) ?? {};
+      // Recall is scored here against the session's own list; the display only reports what was typed.
+      const result = recallStep && step ? wordListResult({
+        phase: step.type === "wordlist" ? "immediate" : "delayed",
+        list: wordListFor(current.assignment), listIndex: wordListIndexFor(current.assignment), raw,
+        receivedAt: Date.now(), stepStartedAt: Date.parse(current.stepStartedAt),
+        immediate: latestEvent(current, WORD_LIST_EVENTS.immediate)?.metadata,
+      }) : { eventType:String(payload.eventType ?? "task_complete"), label:String(payload.label ?? "Task completed"), metadata:raw };
+      appendEvent(current,{ ...result, source:"subject" });
+      advance(current,"Task completed","subject");
+    }
     if (action === "note") { const body=String(payload.body ?? "").trim().slice(0,500); if(body){ current.notes.push({id:uid("note"),body,category:String(payload.category ?? "general"),stepId:step?.id ?? "",stepLabel:step ? shortLabel(step) : "",createdAt:now()}); appendEvent(current,{eventType:"operator_note",label:"Operator note",detail:body,source:"operator"}); } }
     if (action === "sensor") { const sensor=current.sensors.find((item)=>item.id===payload.id); if(sensor){ sensor.status=String(payload.status) as SensorStatus; sensor.detail=String(payload.detail ?? sensor.detail); sensor.updatedAt=now(); appendEvent(current,{eventType:"sensor_status",label:`${sensor.label}: ${sensor.status}`,severity:["missing","error"].includes(sensor.status)?"error":sensor.status==="delayed"?"warn":"info",source:"sensor",metadata:{sensorId:sensor.id,status:sensor.status}}); } }
     if (action === "acquisitionHeartbeat") applyAcquisitionHeartbeat(current,payload);
@@ -499,7 +624,16 @@ export async function mutateSession(code: string, action: string, payload: Actio
       current.hardwareGateOverride = Boolean(payload.enabled);
       appendEvent(current,{eventType:"hardware_gate_override",label:current.hardwareGateOverride?"Hardware readiness override enabled":"Hardware readiness override cleared",severity:current.hardwareGateOverride?"warn":"info",source:"operator"});
     }
-    if (action === "bp") { if (!Number.isFinite(Number(payload.systolic)) || !Number.isFinite(Number(payload.diastolic))) throw new Error("Enter systolic and diastolic values."); current.bpReadings.push({stepId:step?.id ?? "",label:String(payload.label ?? step?.bpLabel ?? "Reading"),systolic:Number(payload.systolic),diastolic:Number(payload.diastolic),pulse:Number.isFinite(Number(payload.pulse)) && payload.pulse !== "" && payload.pulse != null ? Number(payload.pulse) : null,createdAt:now()}); appendEvent(current,{eventType:"bp_recorded",label:"Blood pressure recorded",source:"operator",metadata:{systolic:payload.systolic,diastolic:payload.diastolic,pulse:payload.pulse}}); }
+    if (action === "bp") {
+      if (!Number.isFinite(Number(payload.systolic)) || !Number.isFinite(Number(payload.diastolic))) throw new Error("Enter systolic and diastolic values.");
+      // The cuff compresses the arm and provokes the sympathetic response this study measures, so its window is kept
+      // as an artifact span. Saving the reading ends it, in the same update, so no span is left open by a reading.
+      const cuff = openArtifactSpans(current.events).has(BP_CUFF_ARTIFACT) ? latestEvent(current, "artifact", (event) => event.metadata?.type === BP_CUFF_ARTIFACT && event.metadata?.kind === "start") : undefined;
+      const cuffSec = cuff ? Math.round((Date.now() - Date.parse(cuff.createdAt)) / 100) / 10 : undefined;
+      if (cuff) appendEvent(current,{ eventType:"artifact", label:`Artifact: ${artifactLabel(BP_CUFF_ARTIFACT)} ended`, severity:"warn", source:"operator", metadata:{ type:BP_CUFF_ARTIFACT, kind:"end" } });
+      current.bpReadings.push({stepId:step?.id ?? "",label:String(payload.label ?? step?.bpLabel ?? "Reading"),systolic:Number(payload.systolic),diastolic:Number(payload.diastolic),pulse:Number.isFinite(Number(payload.pulse)) && payload.pulse !== "" && payload.pulse != null ? Number(payload.pulse) : null,createdAt:now(),...(cuff ? { cuffStartedAt:cuff.createdAt, cuffSec } : {})});
+      appendEvent(current,{eventType:"bp_recorded",label:"Blood pressure recorded",source:"operator",metadata:{systolic:payload.systolic,diastolic:payload.diastolic,pulse:payload.pulse,...(cuff ? { cuffSec } : {})}});
+    }
     if (action === "nbackLevel" && Number.isFinite(Number(payload.level))) current.nbackLevel = Math.max(1,Math.min(3,Math.round(Number(payload.level)))) as 1|2|3;
     if (action === "media") { current.media = payload.media as MediaConfig; appendEvent(current,{eventType:"media_config",label:"Media configuration updated",source:"operator"}); }
     if (action === "complete") { current.status="complete"; current.stepIndex=plan.length-1; current.stepStartedAt=now(); appendEvent(current,{eventType:"session_complete",label:"Session completed by operator",source:"operator"}); }
@@ -687,13 +821,13 @@ export function acquisitionExport(snapshot: SessionSnapshot) {
   const plan = buildPlan(snapshot.assignment);
   return {
     exportedAt:now(), sessionCode:snapshot.code, participantId:snapshot.participantId, operator:snapshot.operator,
-    protocolVersion:snapshot.protocolVersion, status:snapshot.status, assignment:snapshot.assignment,
+    protocolVersion:snapshot.protocolVersion, status:snapshot.status, demo:Boolean(snapshot.demo), assignment:snapshot.assignment,
     createdAt:snapshot.createdAt, recordingStartedAt:snapshot.recordingStartedAt, requiredSensors:snapshot.requiredSensors,
     deviceConfig:snapshot.deviceConfig, media:snapshot.media, hardwareGateOverride:snapshot.hardwareGateOverride,
-    plan:plan.map((step) => ({ id:step.id, index:step.index, type:step.type, title:step.title, label:shortLabel(step), phase:step.phase, emotion:step.emo ?? null, durationSec:step.durationSec ?? null, advance:step.advance })),
+    plan:plan.map((step) => ({ id:step.id, index:step.index, slotKey:step.slotKey ?? null, type:step.type, title:step.title, label:shortLabel(step), phase:step.phase, emotion:step.emo ?? null, durationSec:step.durationSec ?? null, minDurationSec:step.minDurationSec ?? null, advance:step.advance })),
     events:snapshot.events.map(agentEvent), ratings:snapshot.ratings, notes:snapshot.notes, bpReadings:snapshot.bpReadings,
     participantMetadata:snapshot.participantMetadata?.values ?? {}, participantFields:PARTICIPANT_FIELDS, consent:snapshot.consent ?? null,
-    protocolOptions:snapshot.assignment.options ?? null, stimuli:Object.fromEntries(Object.entries(snapshot.assignment.stimuli ?? {}).map(([clip,id]) => [clip, stimulusById(id, STIMULI) ?? { id }])),
+    protocolOptions:snapshot.assignment.options ?? null, protocolTemplate:snapshot.assignment.protocol ? { id:snapshot.assignment.protocol.id, version:snapshot.assignment.protocol.version, label:snapshot.assignment.protocol.label } : null, stimuli:Object.fromEntries(Object.entries(snapshot.assignment.stimuli ?? {}).map(([clip,id]) => [clip, stimulusById(id, STIMULI) ?? { id }])),
     questionnaires:snapshot.questionnaires ?? [], questionnaireItems:QUESTIONNAIRES,
     csiSetup:snapshot.csiSetup?.values ?? {}, csiSetupFields:CSI_SETUP_FIELDS, csiCalibration:snapshot.csiCalibration ?? null,
   };

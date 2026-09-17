@@ -1,4 +1,5 @@
 import { getOperatorUser } from "@/app/operator-auth";
+import { TemplateError, sanitizeTemplate } from "@/lib/protocol-template";
 import { DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, SAM_POINTS } from "@/lib/tasks";
 import { summarizeCohort } from "@/lib/cohort";
 import { appendAnnotationChunk, cohortSessions, createSession, getLatestSetupSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
@@ -33,13 +34,21 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const receivedAt = new Date().toISOString();
   try {
-    const body = await request.json() as { action?:string; code?:string; participantId?:number; operator?:string; view?:string; payload?:Record<string,unknown> };
+    const body = await request.json() as { action?:string; code?:string; participantId?:number; operator?:string; view?:string; demo?:boolean; protocol?:unknown; payload?:Record<string,unknown> };
     const subjectView = body.view === "subject";
     const operator = subjectView ? null : await getOperatorUser();
     if (body.action === "create") {
       if (!operator) return unauthorized();
       if (!body.participantId || body.participantId < 1) return Response.json({error:"Participant ID is required."},{status:400});
-      return Response.json({ session:await createSession(body.participantId,body.operator ?? "Operator") },{status:201});
+      // A preview carries the builder's draft template so an edit can be walked through before it is saved and
+      // becomes what every future participant gets. It is validated exactly as a save would be.
+      let protocol;
+      try {
+        protocol = body.protocol ? sanitizeTemplate(body.protocol) : undefined;
+      } catch (error) {
+        return Response.json({error:error instanceof TemplateError ? error.message : "That protocol could not be read."},{status:400});
+      }
+      return Response.json({ session:await createSession(body.participantId,body.operator ?? "Operator",{ demo:Boolean(body.demo), protocol }) },{status:201});
     }
     if (!body.code || !body.action) return Response.json({error:"Session code and action are required."},{status:400});
     if (subjectView && !isSubjectAction(body.action,body.payload ?? {})) return unauthorized();

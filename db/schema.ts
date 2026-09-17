@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),
@@ -11,6 +11,8 @@ export const sessions = sqliteTable("sessions", {
   revision: integer("revision").notNull(),
   assignmentJson: text("assignment_json").notNull(),
   snapshotJson: text("snapshot_json").notNull(),
+  /** A rehearsal rather than a participant; excluded from the cohort and from the launcher's resume lookup. */
+  demo: integer("demo").notNull().default(0),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [uniqueIndex("idx_sessions_code").on(table.code), index("idx_sessions_updated").on(table.updatedAt)]);
@@ -33,8 +35,19 @@ export const mediaAssets = sqliteTable("media_assets", {
   filename: text("filename").notNull(),
   contentType: text("content_type").notNull(),
   size: integer("size").notNull(),
+  /** Length read from the file in the browser at upload; Workers cannot decode media to measure it server side. */
+  durationSec: real("duration_sec"),
   createdAt: text("created_at").notNull(),
 }, (table) => [index("idx_media_created").on(table.createdAt)]);
+
+export const protocolTemplates = sqliteTable("protocol_templates", {
+  id: text("id").primaryKey(),
+  version: integer("version").notNull(),
+  label: text("label").notNull(),
+  templateJson: text("template_json").notNull(),
+  active: integer("active").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+}, (table) => [index("idx_protocol_active").on(table.active, table.version)]);
 
 export const sessionTelemetry = sqliteTable("session_telemetry", {
   code: text("code").primaryKey(),

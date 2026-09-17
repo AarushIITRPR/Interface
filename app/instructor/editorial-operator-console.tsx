@@ -2,6 +2,8 @@
 "use client";
 import {
   Activity,
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
   Check,
   ChevronRight,
@@ -18,6 +20,8 @@ import {
   ScanLine,
   Send,
   Settings2,
+  SlidersHorizontal,
+  Upload,
   Video,
   X,
 } from "lucide-react";
@@ -26,14 +30,17 @@ import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, estimateRemaining, shortLabel } from "@/lib/protocol";
-import { ARTIFACT_TYPES, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, startChecks, withConsentDefaults, type MetadataField, type StartCheck } from "@/lib/rig";
+import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, defaultProtocolTemplate, estimateRemaining, shortLabel, wordListIndexFor } from "@/lib/protocol";
+import { WORD_LIST_EVENTS } from "@/lib/tasks";
+import { resolveBufferSlot, resolveClipSlot } from "@/lib/protocol-template";
+import { EMOTIONS as CLIP_KINDS_EDITABLE } from "@/lib/types";
+import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, startChecks, withConsentDefaults, type MetadataField, type StartCheck } from "@/lib/rig";
 import { startTicker } from "@/lib/ticker";
 import { SCREENING_QUESTIONS, screeningComplete, skippedSafetySteps } from "@/lib/safety";
 import type { CohortOverview } from "@/lib/cohort";
-import type { DeviceConfig, ProtocolOptions, ProtocolStep, SensorChannel, SessionSnapshot } from "@/lib/types";
+import type { Assignment, DeviceConfig, ProtocolOptions, ProtocolSlot, ProtocolStep, ProtocolTemplate, SensorChannel, SessionSnapshot } from "@/lib/types";
 
-type WorkspaceTab = "overview" | "protocol" | "review" | "cohort";
+type WorkspaceTab = "overview" | "protocol" | "builder" | "review" | "cohort";
 type Act = (action: string, payload?: Record<string, unknown>) => Promise<SessionSnapshot | null>;
 type HistoryItem = {
   code: string;
@@ -192,10 +199,24 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
     setNotice("Protocol position saved");
   }, [accept, snapshot]);
 
+  // Open a session named in the URL, the convention the subject display already uses (subject-portal.tsx:138).
+  // This is the only way into a specific session once the console is past its launcher, and it is what makes the
+  // builder's demo links work without anything being typed.
+  const [linkError, setLinkError] = useState("");
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("session")?.trim().toUpperCase();
+    if (!requested || activeCode.current) return;
+    let cancelled = false;
+    load(requested)
+      .then((next) => { if (!cancelled) openSession(next); })
+      .catch(() => { if (!cancelled) setLinkError(`No session ${requested} could be opened.`); });
+    return () => { cancelled = true; };
+  }, [openSession]);
+
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const closeLedger = useCallback(() => setLedgerOpen(false), []);
 
-  if (!snapshot) return <EditorialSessionEntry operatorName={operatorName} onOpen={openSession} />;
+  if (!snapshot) return <EditorialSessionEntry operatorName={operatorName} onOpen={openSession} linkError={linkError} />;
 
   const plan = buildPlan(snapshot.assignment);
   const step = plan[snapshot.stepIndex] ?? plan[0];
@@ -223,22 +244,25 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
             <nav aria-label="Instructor workspace">
               <SidebarButton active={tab === "overview"} icon={Monitor} label="Study overview" onClick={() => changeTab("overview")} />
               <SidebarButton active={tab === "protocol"} icon={ClipboardList} label="Protocol workspace" onClick={() => changeTab("protocol")} />
+              <SidebarButton active={tab === "builder"} icon={SlidersHorizontal} label="Protocol builder" onClick={() => changeTab("builder")} />
               <SidebarButton active={tab === "review"} icon={ScanLine} label="Recording review" onClick={() => changeTab("review")} />
               <SidebarButton active={tab === "cohort"} icon={Activity} label="Cohort" onClick={() => changeTab("cohort")} />
             </nav>
             <div className="live-sidebar-footer">
-              <span className={running ? "is-live" : "is-paused"}><Circle size={8} fill="currentColor" /> {statusText(snapshot.status)}</span>
+              <span className={snapshot.demo ? "is-demo" : running ? "is-live" : "is-paused"}><Circle size={8} fill="currentColor" /> {snapshot.demo ? `DEMO / ${statusText(snapshot.status)}` : statusText(snapshot.status)}</span>
               <button onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> WORKSPACE SETTINGS</button>
             </div>
           </aside>
 
           <section className="live-instructor-main" id="workspace-content" tabIndex={-1}>
             <span className="sr-only" role="status">{notice}</span>
+            {snapshot.demo ? <div className="live-demo-banner">DEMO RUN. No sensors, no consent, no screening. Nothing here counts toward the cohort.</div> : null}
             {error ? <div className="live-workspace-error" role="alert">{error}</div> : null}
             <AnimatePresence mode="wait" initial={false}>
               <motion.div key={tab} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -3 }}>
                 {tab === "overview" ? <Overview snapshot={snapshot} step={step} plan={plan} running={running} health={health} readyCount={readyCount} required={required} agentOnline={agentOnline} subjectOnline={subjectOnline} now={now} act={act} onSettings={() => setSettingsOpen(true)} /> : null}
-                {tab === "protocol" ? <Protocol snapshot={snapshot} step={step} plan={plan} running={running} subjectOnline={subjectOnline} act={act} navigateTo={navigateTo} /> : null}
+                {tab === "protocol" ? <Protocol snapshot={snapshot} step={step} plan={plan} running={running} subjectOnline={subjectOnline} act={act} navigateTo={navigateTo} now={now} /> : null}
+                {tab === "builder" ? <ProtocolBuilder assignment={snapshot.assignment} /> : null}
                 {tab === "review" ? <Review snapshot={snapshot} required={required} now={now} onLedger={() => setLedgerOpen(true)} /> : null}
                 {tab === "cohort" ? <CohortDashboard /> : null}
               </motion.div>
@@ -255,7 +279,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
   );
 }
 
-function EditorialSessionEntry({ operatorName, onOpen }: { operatorName: string; onOpen: (snapshot: SessionSnapshot) => void }) {
+function EditorialSessionEntry({ operatorName, onOpen, linkError = "" }: { operatorName: string; onOpen: (snapshot: SessionSnapshot) => void; linkError?: string }) {
   const [participant, setParticipant] = useState("");
   const [existing, setExisting] = useState<HistoryItem | null>(null);
   const [checking, setChecking] = useState(false);
@@ -303,7 +327,7 @@ function EditorialSessionEntry({ operatorName, onOpen }: { operatorName: string;
           <label htmlFor="participant-id">Participant ID</label>
           <input id="participant-id" inputMode="numeric" value={participant} onChange={(event) => { const value = event.target.value.replace(/\D/g, ""); setParticipant(value); setExisting(null); setChecking(Boolean(value)); setError(""); }} placeholder="0001" />
           <div className="live-entry-state" role="status">{checking ? "Checking previous sessions" : existing ? `Existing session ${existing.code} found` : participant ? "Ready to prepare session" : "Enter the participant identifier"}</div>
-          {error ? <p className="live-entry-error" role="alert">{error}</p> : null}
+          {error || linkError ? <p className="live-entry-error" role="alert">{error || linkError}</p> : null}
           <button type="submit" disabled={busy || !participant}>{busy ? "PREPARING" : existing ? "RESUME SESSION" : "CONTINUE"}<ArrowUpRight size={16} /></button>
           {existing ? <button type="button" className="live-entry-secondary" onClick={() => { setExisting(null); void start(); }}>START A NEW ACQUISITION</button> : null}
         </form>
@@ -367,12 +391,10 @@ function Overview({ snapshot, step, plan, running, health, readyCount, required,
   );
 }
 
-function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateTo }: { snapshot: SessionSnapshot; step: ProtocolStep; plan: readonly ProtocolStep[]; running: boolean; subjectOnline: boolean; act: Act; navigateTo: (index: number) => Promise<void> }) {
+function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateTo, now }: { snapshot: SessionSnapshot; step: ProtocolStep; plan: readonly ProtocolStep[]; running: boolean; subjectOnline: boolean; act: Act; navigateTo: (index: number) => Promise<void>; now: number }) {
   const [settled, setSettled] = useState(false);
+  const [note, setNote] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
-  const [sys, setSys] = useState("");
-  const [dia, setDia] = useState("");
-  const [pulse, setPulse] = useState("");
   const gate = step.type === "gate" ? snapshot.gate : null;
   const needsOverride = gate?.status === "not_ready";
   const gateReady = step.type !== "gate" || (settled && (!needsOverride || overrideReason.trim().length > 0));
@@ -391,7 +413,16 @@ function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateT
         <section className="live-stage-detail"><div><span>STAGE {String(snapshot.stepIndex + 1).padStart(2, "0")}</span><span>EST. {durationLabel(step)}</span></div><h3>{shortLabel(step)}</h3><p>{step.operatorScript}</p><blockquote><span>SUBJECT CUE</span>“{step.subjectPrompt || "Please wait for the instructor."}”</blockquote>
           {step.type === "gate" ? <fieldset className="live-context-control"><legend>Return-to-baseline check</legend><GatePhysiology gate={gate ?? null} /><label><input type="checkbox" checked={settled} onChange={(event) => setSettled(event.target.checked)} />Subject settled and breathing regularly</label>{needsOverride ? <label className="live-gate-override">Override reason<input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} placeholder="Why continue before physiology has recovered?" /></label> : null}</fieldset> : null}
           {step.type === "nback" ? <fieldset className="live-context-control inline"><legend>N-back difficulty</legend>{[1, 2, 3].map((level) => <button className={snapshot.nbackLevel === level ? "selected" : ""} key={level} onClick={() => void act("nbackLevel", { level })}>{level}-back</button>)}</fieldset> : null}
-          {step.bp ? <fieldset className="live-context-control bp"><legend>Blood pressure · {step.bpLabel}</legend><label>Systolic<input inputMode="numeric" value={sys} onChange={(event) => setSys(event.target.value.replace(/\D/g, ""))} /></label><label>Diastolic<input inputMode="numeric" value={dia} onChange={(event) => setDia(event.target.value.replace(/\D/g, ""))} /></label><label>Pulse<input inputMode="numeric" value={pulse} onChange={(event) => setPulse(event.target.value.replace(/\D/g, ""))} /></label><button disabled={!sys || !dia} onClick={() => { void act("bp", { label: step.bpLabel, systolic: Number(sys), diastolic: Number(dia), pulse: pulse ? Number(pulse) : null }); setSys(""); setDia(""); setPulse(""); }}>SAVE READING</button></fieldset> : null}
+          {step.bp ? <BloodPressurePanel snapshot={snapshot} step={step} plan={plan} act={act} now={now} /> : null}
+          {step.type === "wordlist" || step.type === "wordlist_delayed" ? <WordListPanel snapshot={snapshot} step={step} /> : null}
+          <fieldset className="live-context-control notes">
+            <legend>Observation</legend>
+            <form onSubmit={(event) => { event.preventDefault(); const body = note.trim(); if (!body) return; void act("note", { body, category: "observation" }).then((next) => { if (next) setNote(""); }); }}>
+              <input aria-label="Observation about this stage" value={note} maxLength={500} onChange={(event) => setNote(event.target.value)} placeholder="What did you notice? Saved with this stage and the time." />
+              <button type="submit" disabled={!note.trim() || !["running", "paused"].includes(snapshot.status)}>ADD NOTE</button>
+            </form>
+            {snapshot.notes.filter((item) => item.stepId === step.id).slice(-4).map((item) => <p key={item.id}><time>{new Date(item.createdAt).toLocaleTimeString()}</time> {item.body}</p>)}
+          </fieldset>
           <footer><button onClick={() => void act(running ? "pause" : "resume", running ? { reason: "Paused by operator" } : {})}>{running ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}{running ? " PAUSE SESSION" : " RESUME SESSION"}</button><button disabled={!canAdvance} onClick={advanceStage}>{needsOverride ? "ADVANCE WITH OVERRIDE" : "ADVANCE"} <ChevronRight size={14} /></button></footer>
           <div className="live-stage-lower"><button disabled={snapshot.stepIndex === 0 || snapshot.status === "setup"} onClick={() => void act("navigate", { direction: -1 })}>PREVIOUS STAGE</button><button disabled={!running} onClick={repeatStage}>REPEAT STAGE</button><span className={subjectOnline ? "connected" : "waiting"}>{subjectOnline ? "SUBJECT DISPLAY CONNECTED" : "SUBJECT DISPLAY WAITING"}</span></div>
         </section>
@@ -709,6 +740,7 @@ const PROTOCOL_OPTION_LABELS: Array<{ key: keyof ProtocolOptions; label: string;
   { key: "extendedExertion", label: "Longer exertion", help: "60 s instead of 20 s, for a wider heart-rate range" },
   { key: "neutralClip", label: "Neutral control clip", help: "Clip, rating, and washout before Part 1, if a neutral clip is registered" },
   { key: "annotationReplay", label: "Continuous rating replay", help: "Replays every clip at the end with a valence-arousal marker (adds the clip durations)" },
+  { key: "wordList", label: "Word list recall", help: "Study 10 words and recall them after Part 3, then recall again after the body scan (about 2.5 minutes)" },
 ];
 
 function ProtocolOptionsSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
@@ -717,7 +749,7 @@ function ProtocolOptionsSection({ snapshot, act }: { snapshot: SessionSnapshot; 
   const editable = snapshot.status === "setup" && snapshot.stepIndex === 0 && Boolean(saved);
   const preview = buildPlan({ ...snapshot.assignment, options });
   const neutralMissing = options.neutralClip && !snapshot.assignment.stimuli?.neutral;
-  return <section className="live-rig-section"><h3>Protocol options</h3><p>{saved ? "Choose the optional blocks for this session. They are fixed once recording starts." : "This session uses the earlier protocol without optional blocks."}</p>{PROTOCOL_OPTION_LABELS.map((item) => <label key={item.key} className="live-option"><input type="checkbox" checked={options[item.key]} disabled={!editable} onChange={(event) => setOptions((current) => ({ ...current, [item.key]: event.target.checked }))} /><span><strong>{item.label}</strong><small>{item.help}</small></span></label>)}{neutralMissing ? <p className="attention">No neutral clip is registered in lib/stimuli.ts, so the neutral block will be left out.</p> : null}<p className={editable ? "" : "attention"}>{preview.length} steps, about {Math.round(estimateRemaining(preview, 0) / 60)} minutes.</p><button disabled={!editable} onClick={() => void act("protocolOptions", { options })}>SAVE PROTOCOL OPTIONS</button></section>;
+  return <section className="live-rig-section"><h3>Protocol options</h3><p>{saved ? "Choose the optional blocks for this session. They are fixed once recording starts." : "This session uses the earlier protocol without optional blocks."}</p>{PROTOCOL_OPTION_LABELS.map((item) => <label key={item.key} className="live-option"><input type="checkbox" checked={Boolean(options[item.key])} disabled={!editable} onChange={(event) => setOptions((current) => ({ ...current, [item.key]: event.target.checked }))} /><span><strong>{item.label}</strong><small>{item.help}</small></span></label>)}{neutralMissing ? <p className="attention">No neutral clip is registered in lib/stimuli.ts, so the neutral block will be left out.</p> : null}<p className={editable ? "" : "attention"}>{preview.length} steps, about {Math.round(estimateRemaining(preview, 0) / 60)} minutes.</p><button disabled={!editable} onClick={() => void act("protocolOptions", { options })}>SAVE PROTOCOL OPTIONS</button></section>;
 }
 
 function ConsentSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
@@ -757,4 +789,318 @@ function CohortDashboard() {
     </div>
     <article className="live-cohort-table"><header><WorkspaceLabel>Sessions</WorkspaceLabel><button onClick={download}><Download size={14} /> EXPORT TSV</button></header><div><table><thead><tr><th>Code</th><th>P</th><th>Status</th><th>Protocol</th><th>Min</th><th>Order</th><th>Skin</th><th>Details</th><th>Consent</th><th>Pauses</th><th>Overrides</th><th>Skipped</th><th>Artifacts</th><th>CSI baseline</th></tr></thead><tbody>{cohort.sessions.map((session) => <tr key={session.code}><td>{session.code}</td><td>{session.participantId}</td><td>{session.status}</td><td>{session.protocolVersion}</td><td>{session.durationMin ?? ""}</td><td>E{session.emotionRow}{session.taskRow ? `/T${session.taskRow}` : ""}</td><td>{session.skinType ?? ""}</td><td className={session.missingDetails ? "attention" : ""}>{session.missingDetails ? `${session.missingDetails} missing` : "complete"}</td><td className={session.consent ? "" : "attention"}>{session.consent ? "yes" : "no"}</td><td>{session.pauses}</td><td className={session.gateOverrides ? "attention" : ""}>{session.gateOverrides}</td><td>{session.skippedSteps}</td><td>{session.artifacts}</td><td>{session.csiBaseline}</td></tr>)}</tbody></table></div></article>
   </section>;
+}
+
+type MediaAsset = { id: string; object_key: string; filename: string; content_type: string; size: number; duration_sec: number | null };
+
+/** Read a media file's real length in the browser. Workers cannot decode media, so this is the only measurement. */
+function readDuration(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const element = document.createElement(file.type.startsWith("audio/") ? "audio" : "video");
+    const url = URL.createObjectURL(file);
+    const done = (value: number | null) => {
+      URL.revokeObjectURL(url);
+      element.removeAttribute("src");
+      if (value) resolve(value); else reject(new Error("no duration"));
+    };
+    element.preload = "metadata";
+    element.onloadedmetadata = () => done(Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null);
+    element.onerror = () => done(null);
+    element.src = url;
+  });
+}
+
+/** Must stay in step with MAX_UPLOAD_MB in app/api/media/route.ts and the bodySizeLimit in next.config.ts. */
+const MAX_UPLOAD_MB = 100;
+
+/** A rejection from the runtime rather than the route is plain text, so parsing it as JSON throws over the throw. */
+async function readJson(response: Response): Promise<{ error?: string; asset?: { id: string; key: string; filename: string } }> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as { error?: string };
+  } catch {
+    return { error: text.trim().slice(0, 200) || undefined };
+  }
+}
+
+const fmt = (seconds: number | null | undefined) => seconds == null ? "not set" : seconds >= 60 ? `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s` : `${Math.round(seconds * 10) / 10}s`;
+
+/**
+ * Edits the study's protocol: which steps run, in what order, for how long, and on which clips.
+ *
+ * Emotion clips stay slots. Which emotion lands in each is the participant's counterbalancing, so the preview shows
+ * this session's assignment while the template itself stays participant independent.
+ */
+function ProtocolBuilder({ assignment }: { assignment: Assignment }) {
+  const [template, setTemplate] = useState<ProtocolTemplate | null>(null);
+  const [assets, setAssets] = useState<MediaAsset[]>([]);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [previewPid, setPreviewPid] = useState("1");
+  const [addKey, setAddKey] = useState("");
+  const [addAfter, setAddAfter] = useState("");
+  const [preview_, setPreview_] = useState<{ code: string } | null>(null);
+
+  const loadAssets = useCallback(() => fetch("/api/media", { cache: "no-store" }).then((r) => r.json()).then((data) => setAssets(data.assets ?? [])).catch(() => {}), []);
+  useEffect(() => {
+    void fetch("/api/protocol", { cache: "no-store" }).then((r) => r.json())
+      .then((data) => { setTemplate(data.template ?? null); setStatus(data.saved ? "" : "Showing the built-in protocol. Saving creates your first version."); })
+      .catch(() => setError("Unable to load the protocol."));
+    void loadAssets();
+  }, [loadAssets]);
+
+  if (!template) return <section className="live-workspace-content"><p>{error || "Loading protocol..."}</p></section>;
+
+  const edit = (next: Partial<ProtocolTemplate>) => { setTemplate({ ...template, ...next }); setStatus("Unsaved changes."); };
+  const editSlot = (key: string, patch: Partial<ProtocolSlot>) => edit({ slots: template.slots.map((slot) => slot.key === key ? { ...slot, ...patch } : slot) });
+  const move = (index: number, by: number) => {
+    const target = index + by;
+    if (target < 0 || target >= template.slots.length) return;
+    const slots = [...template.slots];
+    [slots[index], slots[target]] = [slots[target], slots[index]];
+    edit({ slots });
+  };
+  const remove = (key: string) => edit({ slots: template.slots.filter((slot) => slot.key !== key) });
+  // Every built-in step not already in the template, so a removed step can come back and new ones can be placed.
+  const allOptions = Object.fromEntries(Object.keys(DEFAULT_PROTOCOL_OPTIONS).map((key) => [key, true])) as ProtocolOptions;
+  const catalog = defaultProtocolTemplate(allOptions, assignment).slots;
+  const missing = catalog.filter((slot) => !template.slots.some((item) => item.key === slot.key));
+  const addStep = () => {
+    const slot = catalog.find((item) => item.key === addKey);
+    if (!slot) return;
+    const after = template.slots.findIndex((item) => item.key === addAfter);
+    const slots = [...template.slots];
+    slots.splice(after + 1, 0, structuredClone(slot));
+    edit({ slots });
+    setAddKey("");
+  };
+  const slotName = (slot: ProtocolSlot) => slot.title || `${slot.type}${slot.clipSlot ? ` (${slot.clipSlot})` : slot.bufferSlot ? ` (task ${slot.bufferSlot})` : ""}`;
+
+  const preview = buildPlan({ ...assignment, protocol: template });
+  const studyAt = template.slots.findIndex((slot) => slot.type === "wordlist");
+  const delayedAt = template.slots.findIndex((slot) => slot.type === "wordlist_delayed");
+  const warnings = [
+    ...template.slots.filter((slot) => slot.minDurationSec && (slot.durationSec ?? 0) < slot.minDurationSec)
+      .map((slot) => `${slot.title || slot.key} is under its ${slot.minDurationSec}s floor.`),
+    ...CLIP_KINDS_EDITABLE.filter((clip) => !template.clips?.[clip]?.src).map((clip) => `No clip file for ${clip}.`),
+    ...(delayedAt >= 0 && (studyAt < 0 || studyAt > delayedAt) ? ["Delayed word recall needs the word list study step before it. Saving will be refused."] : []),
+  ];
+
+  const save = async () => {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch("/api/protocol", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ template }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not save the protocol.");
+      setTemplate(data.template); setStatus(`Saved as version ${data.template.version}. New sessions will use it.`);
+    } catch (problem) { setError(problem instanceof Error ? problem.message : "Could not save the protocol."); }
+    finally { setBusy(false); }
+  };
+
+  const upload = async (file: File, apply: (asset: MediaAsset, durationSec: number) => void) => {
+    setBusy(true); setError("");
+    try {
+      let durationSec = 0;
+      try { durationSec = await readDuration(file); }
+      catch { throw new Error(`Could not read the length of ${file.name}. It may be corrupt or in a format this browser cannot play.`); }
+      // Checked here as well as on the server so a 60 MB file is not sent twice over to be refused, and so the
+      // reason names the file and its size.
+      if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+        throw new Error(`${file.name} is ${(file.size / 1e6).toFixed(0)} MB. The limit is ${MAX_UPLOAD_MB} MB; re-encode it with scripts/normalize-media.sh first.`);
+      }
+      const body = new FormData(); body.append("file", file); body.append("durationSec", String(durationSec));
+      const response = await fetch("/api/media", { method: "POST", body });
+      const data = await readJson(response);
+      if (!response.ok) throw new Error(data.error || `Upload failed (${response.status}).`);
+      if (!data.asset) throw new Error("The upload succeeded but returned nothing to use.");
+      await loadAssets();
+      apply({ id: data.asset.id, object_key: data.asset.key, filename: data.asset.filename, content_type: file.type, size: file.size, duration_sec: durationSec }, durationSec);
+    } catch (problem) { setError(problem instanceof Error ? problem.message : "Upload failed."); }
+    finally { setBusy(false); }
+  };
+
+  const assetUrl = (asset: MediaAsset) => `/api/media?key=${encodeURIComponent(asset.object_key)}`;
+
+  // Runs the draft, not the saved template, so an edit can be walked through before it becomes what every future
+  // participant gets. A demo needs no agent, consent or screening, and stays out of the cohort.
+  const startPreview = async () => {
+    const pid = Number(previewPid);
+    if (!Number.isSafeInteger(pid) || pid < 1) { setError("Enter a participant number to preview."); return; }
+    setBusy(true); setError(""); setPreview_(null);
+    try {
+      const response = await fetch("/api/sessions", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "create", participantId: pid, operator: "Demo run", demo: true, protocol: template }) });
+      const data = await readJson(response) as { error?: string; session?: { code: string } };
+      if (!response.ok || !data.session) throw new Error(data.error || `Could not start the demo (${response.status}).`);
+      setPreview_({ code: data.session.code });
+      setStatus("");
+    } catch (problem) { setError(problem instanceof Error ? problem.message : "Could not start the demo."); }
+    finally { setBusy(false); }
+  };
+
+  return <section className="live-workspace-content live-builder">
+    <div className="live-content-heading">
+      <div><WorkspaceLabel>Protocol builder</WorkspaceLabel><h2>The protocol,<br /><i>as you want it.</i></h2></div>
+      <div><span>{preview.length} STEPS · ABOUT {Math.round(estimateRemaining(preview, 0) / 60)} MINUTES</span>
+        <p>Order, timings and clips for every future session. Sessions already created keep the version they started with, so editing here never changes a recording that has happened.</p></div>
+    </div>
+
+    {error ? <p className="live-builder-error" role="alert">{error}</p> : null}
+    {status ? <p className="live-builder-status" role="status">{status}</p> : null}
+    {warnings.length ? <ul className="live-builder-warnings">{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
+
+    <article className="live-builder-clips">
+      <header><WorkspaceLabel>Clips</WorkspaceLabel><p>Each clip&apos;s length is read from the file, so the step timing follows whatever you upload.</p></header>
+      <table><thead><tr><th>Clip</th><th>File</th><th>Length</th><th /></tr></thead><tbody>
+        {CLIP_KINDS_EDITABLE.map((clip) => {
+          const current = template.clips?.[clip];
+          return <tr key={clip}>
+            <td><strong>{clip}</strong></td>
+            <td>{current?.src ? <code>{current.src.split("/").pop()}</code> : <em>none</em>}</td>
+            <td>{fmt(current?.durationSec)}</td>
+            <td>
+              <label className="live-builder-upload">
+                <Upload size={13} /> {current ? "REPLACE" : "UPLOAD"}
+                <input type="file" accept="video/*,audio/*" disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void upload(file, (asset, durationSec) => edit({ clips: { ...template.clips, [clip]: { assetId: asset.id, src: assetUrl(asset), durationSec } } })); }} />
+              </label>
+              {assets.length ? <select aria-label={`Existing file for ${clip}`} value="" disabled={busy} onChange={(event) => { const asset = assets.find((item) => item.id === event.target.value); if (asset?.duration_sec) edit({ clips: { ...template.clips, [clip]: { assetId: asset.id, src: assetUrl(asset), durationSec: asset.duration_sec } } }); }}>
+                <option value="">Use an uploaded file</option>
+                {assets.filter((asset) => asset.duration_sec).map((asset) => <option key={asset.id} value={asset.id}>{asset.filename} ({fmt(asset.duration_sec)})</option>)}
+              </select> : null}
+            </td>
+          </tr>;
+        })}
+      </tbody></table>
+    </article>
+
+    <article className="live-builder-steps">
+      <header><WorkspaceLabel>Steps</WorkspaceLabel><p>Preview shows participant {assignment.pid}. Clip and task slots are filled by counterbalancing, so they differ per participant.</p></header>
+      {missing.length ? <div className="live-builder-add">
+        <label>Add a step<select value={addKey} onChange={(event) => setAddKey(event.target.value)}>
+          <option value="">Choose a step</option>
+          {missing.map((slot) => <option key={slot.key} value={slot.key}>{slotName(slot)} · {slot.phase}</option>)}
+        </select></label>
+        <label>after<select value={addAfter} onChange={(event) => setAddAfter(event.target.value)}>
+          <option value="">the start</option>
+          {template.slots.map((slot, index) => <option key={slot.key} value={slot.key}>{index + 1}. {slotName(slot)}</option>)}
+        </select></label>
+        <button type="button" disabled={!addKey} onClick={addStep}>ADD</button>
+      </div> : null}
+      <ol>
+        {template.slots.map((slot, index) => {
+          const clip = slot.clipSlot ? resolveClipSlot(assignment, slot.clipSlot) : undefined;
+          const task = slot.bufferSlot ? resolveBufferSlot(assignment, slot.bufferSlot) : undefined;
+          const filled = slot.bufferSlot && slot.type !== "questionnaire" ? template.tasks?.[task!] : null;
+          const tooShort = Boolean(slot.minDurationSec && (slot.durationSec ?? 0) < slot.minDurationSec);
+          const mediaKey = slot.mediaKey;
+          return <li key={slot.key} className={tooShort ? "attention" : ""}>
+            <div className="live-builder-step-head">
+              <span className="live-builder-order">{index + 1}</span>
+              <div>
+                <strong>{filled?.title || slot.title || `${slot.type} slot`}</strong>
+                <small>{slot.phase} · {slot.type}{clip ? ` · ${clip} for this participant` : ""}{task ? ` · ${task} for this participant` : ""}</small>
+              </div>
+              <div className="live-builder-step-actions">
+                <button aria-label={`Move ${slot.key} earlier`} disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={14} /></button>
+                <button aria-label={`Move ${slot.key} later`} disabled={index === template.slots.length - 1} onClick={() => move(index, 1)}><ArrowDown size={14} /></button>
+                <button aria-label={`Remove ${slot.key}`} onClick={() => remove(slot.key)}><X size={14} /></button>
+              </div>
+            </div>
+            <div className="live-builder-step-fields">
+              {slot.clipSlot
+                ? <span className="live-builder-derived">Length from the clip file: {fmt(clip ? template.clips?.[clip]?.durationSec : null)}</span>
+                : <label>Seconds<input type="number" min={0} step={1} value={(filled ?? slot).durationSec ?? ""} placeholder="no timer"
+                    onChange={(event) => {
+                      const value = event.target.value === "" ? undefined : Number(event.target.value);
+                      if (filled && task) edit({ tasks: { ...template.tasks, [task]: { ...filled, durationSec: value, estimatedSec: value ?? filled.estimatedSec } } });
+                      else editSlot(slot.key, { durationSec: value, estimatedSec: value ?? slot.estimatedSec });
+                    }} /></label>}
+              {slot.minDurationSec ? <span className={tooShort ? "attention" : ""}>Floor {slot.minDurationSec}s</span> : null}
+              {mediaKey ? <label>Media<select value={template.media?.[mediaKey] ?? ""} onChange={(event) => edit({ media: { ...template.media, [mediaKey]: event.target.value } })}>
+                <option value="">None</option>
+                {(() => { const current = template.media?.[mediaKey]; return current && !assets.some((asset) => assetUrl(asset) === current) ? <option value={current}>{current.split("/").pop()}</option> : null; })()}
+                {assets.map((asset) => <option key={asset.id} value={assetUrl(asset)}>{asset.filename}</option>)}
+              </select></label> : null}
+            </div>
+          </li>;
+        })}
+      </ol>
+    </article>
+
+    <article className="live-builder-preview">
+      <header><WorkspaceLabel>Try it</WorkspaceLabel><p>Walks these steps with no sensors, consent or screening. Runs what is on screen now, saved or not, and is never counted in the cohort.</p></header>
+      <div>
+        <label>Preview as participant<input type="number" min={1} value={previewPid} disabled={busy} onChange={(event) => setPreviewPid(event.target.value.replace(/\D/g, ""))} /></label>
+        <button disabled={busy} onClick={() => void startPreview()}>{busy ? "STARTING" : "START DEMO RUN"}</button>
+      </div>
+      {preview_ ? <div className="live-builder-preview-open">
+        {/* Both links carry the code, so nothing has to be typed. The console opens in its own tab rather than
+            taking this one over, which may be sitting on a real session. */}
+        <p>Demo session <strong className="mono">{preview_.code}</strong> is ready. Open both, then step through it from the console tab.</p>
+        <div className="live-builder-preview-links">
+          <a href={`/instructor?session=${encodeURIComponent(preview_.code)}`} target="_blank" rel="noreferrer">1. OPEN CONSOLE FOR THIS DEMO <ArrowUpRight size={13} /></a>
+          <a href={`/subject?session=${encodeURIComponent(preview_.code)}`} target="_blank" rel="noreferrer">2. OPEN SUBJECT DISPLAY <ArrowUpRight size={13} /></a>
+          <button type="button" onClick={() => { void navigator.clipboard?.writeText(preview_.code).then(() => setStatus(`Copied ${preview_.code}.`)).catch(() => setStatus(`Session code is ${preview_.code}.`)); }}>COPY CODE</button>
+        </div>
+        <small>This tab stays on whatever session it already had. Close the demo tabs when you are done.</small>
+      </div> : null}
+    </article>
+
+    <div className="live-builder-save">
+      <button className="primary" disabled={busy} onClick={() => void save()}>{busy ? "SAVING" : "SAVE PROTOCOL"}</button>
+      <button disabled={busy} onClick={() => { setTemplate(defaultProtocolTemplate(assignment.options ?? DEFAULT_PROTOCOL_OPTIONS, assignment)); setStatus("Reset to the built-in protocol. Not saved yet."); }}>RESET TO DEFAULT</button>
+      <small>Saving writes a new version. Sessions already created are unaffected.</small>
+    </div>
+  </section>;
+}
+
+/**
+ * Blood pressure entry. INFLATE opens a "BP cuff" artifact span and saving the reading closes it, so the seconds the
+ * cuff was squeezing the arm - a sympathetic stimulus in a study of sympathetic responses - can be excluded later.
+ */
+function BloodPressurePanel({ snapshot, step, plan, act, now }: { snapshot: SessionSnapshot; step: ProtocolStep; plan: readonly ProtocolStep[]; act: Act; now: number }) {
+  const [sys, setSys] = useState("");
+  const [dia, setDia] = useState("");
+  const [pulse, setPulse] = useState("");
+  const inflating = openArtifactSpans(snapshot.events).has(BP_CUFF_ARTIFACT);
+  const cuffStart = inflating ? [...snapshot.events].reverse().find((event) => event.eventType === "artifact" && event.metadata?.type === BP_CUFF_ARTIFACT && event.metadata?.kind === "start") : undefined;
+  const cuffSec = cuffStart ? Math.max(0, Math.round((now - Date.parse(cuffStart.createdAt)) / 1000)) : 0;
+  const bpSteps = plan.filter((item) => item.bp);
+  const position = bpSteps.findIndex((item) => item.id === step.id) + 1;
+  const active = ["running", "paused"].includes(snapshot.status);
+  const save = () => {
+    void act("bp", { label: step.bpLabel, systolic: Number(sys), diastolic: Number(dia), pulse: pulse ? Number(pulse) : null }).then((next) => {
+      if (next) { setSys(""); setDia(""); setPulse(""); }
+    });
+  };
+  return <fieldset className="live-context-control bp">
+    <legend>Blood pressure · reading {position} of {bpSteps.length} · {step.bpLabel}</legend>
+    <p className="live-bp-hint">Non-dominant arm, supported at heart level, feet flat. No talking while the cuff inflates.</p>
+    <div className="live-bp-cuff">
+      <button type="button" disabled={!active || inflating} onClick={() => void act("artifact", { type: BP_CUFF_ARTIFACT })}>{inflating ? "INFLATING" : "INFLATE"}</button>
+      <span>{inflating ? `Cuff on ${cuffSec} s` : "Press as the cuff starts inflating"}</span>
+    </div>
+    <label>Systolic<input inputMode="numeric" value={sys} onChange={(event) => setSys(event.target.value.replace(/\D/g, ""))} /></label>
+    <label>Diastolic<input inputMode="numeric" value={dia} onChange={(event) => setDia(event.target.value.replace(/\D/g, ""))} /></label>
+    <label>Pulse<input inputMode="numeric" value={pulse} onChange={(event) => setPulse(event.target.value.replace(/\D/g, ""))} /></label>
+    <button disabled={!sys || !dia} onClick={save}>SAVE READING</button>
+  </fieldset>;
+}
+
+/** What the operator needs during recall: which list is in play, and the score once it lands. */
+function WordListPanel({ snapshot, step }: { snapshot: SessionSnapshot; step: ProtocolStep }) {
+  const list = wordListIndexFor(snapshot.assignment) + 1;
+  const eventType = step.type === "wordlist" ? WORD_LIST_EVENTS.immediate : WORD_LIST_EVENTS.delayed;
+  const result = [...snapshot.events].reverse().find((event) => event.eventType === eventType && event.stepId === step.id)?.metadata;
+  return <fieldset className="live-context-control wordlist">
+    <legend>Word list {list} · {step.type === "wordlist" ? "study and recall" : "delayed recall"}</legend>
+    {result ? <p>
+      <strong>{String(result.hits)}/{String(result.total)}</strong> recalled
+      {Number(result.hitsLenient) > Number(result.hits) ? `, ${Number(result.hitsLenient) - Number(result.hits)} near miss` : ""}
+      {Number(result.intrusions) ? `, ${String(result.intrusions)} not on the list` : ""}
+      {result.retentionPct != null ? ` · ${String(result.retentionPct)}% of the immediate score` : ""}
+      {result.delaySec != null ? ` · ${Math.round(Number(result.delaySec) / 60)} min after study` : ""}
+    </p> : <p>Waiting for the participant. The score appears here when they submit.</p>}
+  </fieldset>;
 }

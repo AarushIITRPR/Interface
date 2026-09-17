@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { QUESTIONNAIRES } from "@/lib/questionnaires";
 import { startTicker } from "@/lib/ticker";
-import { BREATH_HOLD_MAX_SEC, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
+import { BREATH_HOLD_MAX_SEC, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, WORD_LIST, WORD_LIST_EVENTS, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
 // Step timers use the server clock so a subject computer with a skewed clock cannot shorten or stretch timed steps.
@@ -208,7 +208,7 @@ export function SubjectPortal() {
   if (!step || snapshot.status === "complete" || step.type === "end") return <SubjectFrame code={snapshot.code} progress={100} label="Session complete" title={<>Thank you.<br /><i>Please wait.</i></>} description="Your responses have been recorded. The instructor will guide you from here." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField complete /></SubjectFrame>;
   // Operator or recording loss while running is handled by a server-side pause, shown as an overlay below, so the
   // current stimulus stays mounted and resumes where it stopped.
-  if (snapshot.status === "setup") return <SubjectFrame code={snapshot.code} progress={progress} label="Study preparation" title={<>Please wait.<br /><i>We will begin shortly.</i></>} description="There is nothing you need to do yet." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
+  if (snapshot.status === "setup") return <SubjectFrame demo={snapshot.demo} code={snapshot.code} progress={progress} label="Study preparation" title={<>Please wait.<br /><i>We will begin shortly.</i></>} description="There is nothing you need to do yet." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
 
   const presentation = subjectPresentation(step);
   return <SubjectFrame code={snapshot.code} progress={progress} label={presentation.label} title={presentation.title} description={step.subjectPrompt || presentation.description} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}>
@@ -224,8 +224,8 @@ function SubjectConnect({draft,error,connecting,setDraft,submit}:{draft:string;e
   return <main className="live-entry live-subject-connect"><header className="live-entry-topbar"><Link href="/">MERIDIAN</Link><span>THE MERIDIAN STUDY</span><span>SUBJECT DISPLAY</span></header><section className="live-entry-grid"><div className="live-entry-index"><i /><span>01</span><p>Guided<br />session</p></div><form onSubmit={(event)=>{event.preventDefault();void submit()}}><p className="live-workspace-label">Subject display</p><h1>Join your<br /><i>study session.</i></h1><label htmlFor="session-code">Code shown by instructor</label><input id="session-code" value={draft} onChange={(event)=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} placeholder="0009AB7K" />{error ? <p className="live-entry-error" role="alert">{error}</p> : <div className="live-entry-state">Enter the code or participant ID shown by the instructor.</div>}<button type="submit" disabled={connecting || !draft.trim()}>{connecting ? "CONNECTING" : "CONNECT"}<ArrowUpRight size={16} /></button></form><div className="live-entry-context"><span>GUIDED DISPLAY</span><strong>One task at a time.</strong><p>Only the current instruction will appear during the study.</p></div></section><footer className="live-entry-footer"><span><Eye size={14} /> SUBJECT EXPERIENCE</span><span>THE MERIDIAN STUDY</span></footer></main>;
 }
 
-function SubjectFrame({code,progress,label,title,description,audioEnabled,setAudioEnabled,changeSession,children}:{code:string;progress:number;label:string;title:ReactNode;description:string;audioEnabled:boolean;setAudioEnabled:(value:boolean)=>void;changeSession:()=>void;children:ReactNode}) {
-  return <MotionConfig reducedMotion="user"><main className="live-subject"><header className="live-subject-topbar"><Link href="/" className="live-wordmark">MERIDIAN</Link><span>SUBJECT DISPLAY</span><span>SESSION IN PROGRESS</span></header><div className="live-subject-progress" aria-hidden="true"><motion.i initial={false} animate={{width:`${Math.max(0,Math.min(progress,100))}%`}} /></div><section className="live-subject-stage"><motion.div className="live-subject-copy" key={`${code}-${label}`} initial={{opacity:0,y:7}} animate={{opacity:1,y:0}}><p className="live-subject-label">{label}</p><h1>{title}</h1><p className="live-subject-description">{description}</p><div className="live-subject-actions"><button className="live-subject-secondary" onClick={()=>setAudioEnabled(!audioEnabled)} aria-pressed={audioEnabled}>{audioEnabled?<Volume2 size={16}/>:<VolumeX size={16}/>} {audioEnabled?"AUDIO ON":"AUDIO OFF"}</button></div></motion.div><div className="live-subject-field"><span className="live-subject-field-label top">BE PRESENT / NO RUSH</span>{children}<span className="live-subject-field-label bottom">ONE TASK AT A TIME</span></div></section><footer className="live-subject-footer"><span><Eye size={15}/> YOUR SESSION IS GUIDED</span><span>THE MERIDIAN STUDY / {code}</span><button onClick={changeSession}>CHANGE SESSION <ArrowUpRight size={14}/></button></footer><p className="sr-only" aria-live="polite">Audio is {audioEnabled?"on":"off"}.</p></main></MotionConfig>;
+function SubjectFrame({code,progress,label,title,description,audioEnabled,setAudioEnabled,changeSession,demo=false,children}:{code:string;progress:number;label:string;title:ReactNode;description:string;audioEnabled:boolean;setAudioEnabled:(value:boolean)=>void;changeSession:()=>void;demo?:boolean;children:ReactNode}) {
+  return <MotionConfig reducedMotion="user"><main className="live-subject"><header className="live-subject-topbar"><Link href="/" className="live-wordmark">MERIDIAN</Link><span>SUBJECT DISPLAY</span><span>{demo?"DEMO RUN / NOT RECORDED":"SESSION IN PROGRESS"}</span></header><div className="live-subject-progress" aria-hidden="true"><motion.i initial={false} animate={{width:`${Math.max(0,Math.min(progress,100))}%`}} /></div><section className="live-subject-stage"><motion.div className="live-subject-copy" key={`${code}-${label}`} initial={{opacity:0,y:7}} animate={{opacity:1,y:0}}><p className="live-subject-label">{label}</p><h1>{title}</h1><p className="live-subject-description">{description}</p><div className="live-subject-actions"><button className="live-subject-secondary" onClick={()=>setAudioEnabled(!audioEnabled)} aria-pressed={audioEnabled}>{audioEnabled?<Volume2 size={16}/>:<VolumeX size={16}/>} {audioEnabled?"AUDIO ON":"AUDIO OFF"}</button></div></motion.div><div className="live-subject-field"><span className="live-subject-field-label top">BE PRESENT / NO RUSH</span>{children}<span className="live-subject-field-label bottom">ONE TASK AT A TIME</span></div></section><footer className="live-subject-footer"><span><Eye size={15}/> YOUR SESSION IS GUIDED</span><span>THE MERIDIAN STUDY / {code}</span><button onClick={changeSession}>CHANGE SESSION <ArrowUpRight size={14}/></button></footer><p className="sr-only" aria-live="polite">Audio is {audioEnabled?"on":"off"}.</p></main></MotionConfig>;
 }
 
 function QuietField({complete=false}:{complete?:boolean}) { return <div className={`live-subject-cross ${complete?"complete":""}`} aria-hidden="true"><i/><i/></div>; }
@@ -235,6 +235,7 @@ function subjectPresentation(step:SubjectStep) {
   if(step.type==="sam") return {label:"Short response",title:<>Choose what<br/><i>fits best.</i></>,description:"Choose the response that feels closest."};
   if(step.type==="stroop") return {label:"Attention task",title:<>Respond<br/><i>accurately.</i></>,description:"Follow the instruction shown on the screen."};
   if(step.type==="nback") return {label:"Memory task",title:<>Stay with<br/><i>the sequence.</i></>,description:"Follow the instruction shown on the screen."};
+  if(step.type==="wordlist"||step.type==="wordlist_delayed") return {label:"Memory task",title:<>Remember<br/><i>the words.</i></>,description:"Follow the instruction shown on the screen."};
   if(step.type==="conversation") return {label:"Speaking task",title:<>Speak<br/><i>naturally.</i></>,description:"Speak at a comfortable pace."};
   if(step.type==="washout"||step.fixation) return {label:"Baseline task",title:<>Keep your eyes<br/><i>at the centre.</i></>,description:"Stay with the centre of the screen."};
   if(step.type==="bodyscan") return {label:"Rest task",title:<>Settle<br/><i>into stillness.</i></>,description:"Stay still and follow the instruction."};
@@ -249,6 +250,8 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
   if (step.type === "washout") return <WashoutScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "stroop") return <StroopTask step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} act={act} paused={snapshot.status !== "running"} />;
+  if (step.type === "wordlist") return <WordListTask step={step} act={act} paused={snapshot.status !== "running"} />;
+  if (step.type === "wordlist_delayed") return <DelayedRecallTask step={step} act={act} />;
   if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
   if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
@@ -395,6 +398,57 @@ function StroopTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<
   if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
   const trial=trials[index];
   return <section className="task-screen"><div className="stroop-word" style={{color:showing?trial.hex:undefined}}>{showing?trial.word.toUpperCase():"+"}</div><div className="colour-buttons">{TASK_COLOURS.map(colour=><button key={colour.name} style={{background:colour.hex}} disabled={!showing||paused} onClick={event=>record(colour.name,event.timeStamp)}>{colour.name}</button>)}</div></section>;
+}
+
+/**
+ * The recall box. Autocorrect and spellcheck are off: a browser that "fixes" a typo would silently turn a near miss
+ * into a hit, or a hit into another word. It shows no example words, since any word shown here could be recalled.
+ */
+function RecallBox({prompt,onSubmit}:{prompt:string;onSubmit:(text:string)=>void}) {
+  const [text,setText]=useState("");
+  return <section className="subject-center wordlist-recall"><h1>{prompt}</h1>
+    <textarea aria-label="Words you remember" value={text} onChange={event=>setText(event.target.value)} spellCheck={false} autoCorrect="off" autoCapitalize="none" autoComplete="off" placeholder="Type each word you remember, separated by spaces or commas." />
+    <button className="paper-button" onClick={()=>onSubmit(text)}>{text.trim()?"Done":"I cannot remember any"}</button>
+  </section>;
+}
+
+/** Word list: study the whole list for a fixed time, then free recall. The server scores what was typed. */
+function WordListTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
+  const words=step.words??[];
+  const [stage,setStage]=useState<"intro"|"study"|"recall"|"sent">("intro");
+  const [remainingMs,setRemainingMs]=useState<number>(WORD_LIST.studySec*1000);
+  const studyEnded=useRef(0); const shownMs=useRef(0);
+  useEffect(()=>{
+    // Study time only runs while the words are visible: a pause hides them and stops the clock.
+    if(stage!=="study"||paused)return;
+    let last=performance.now();
+    const id=window.setInterval(()=>{
+      const now=performance.now(); shownMs.current+=now-last; last=now;
+      const left=WORD_LIST.studySec*1000-shownMs.current;
+      if(left<=0){window.clearInterval(id);studyEnded.current=now;setRemainingMs(0);setStage("recall");return;}
+      setRemainingMs(left);
+    },100);
+    return()=>window.clearInterval(id);
+  },[stage,paused]);
+  if(!words.length)return <CenteredInstruction text="Please wait." />;
+  if(stage==="intro")return <section className="subject-center"><h1>{step.subjectPrompt}</h1><p className="wordlist-intro">You will see {words.length} words for {WORD_LIST.studySec} seconds. Afterwards, type as many as you can remember, in any order. You will be asked about them again later.</p><button className="paper-button" onClick={()=>setStage("study")}>Begin</button></section>;
+  if(stage==="study")return <section className="task-screen wordlist-study"><ol className="wordlist-words" aria-label="Words to remember">{paused?null:words.map(word=><li key={word}>{word}</li>)}</ol><time>{paused?"Paused":`${Math.ceil(remainingMs/1000)} s`}</time></section>;
+  if(stage==="sent")return <section className="subject-center"><h1>Thank you.</h1></section>;
+  return <RecallBox prompt="Type the words you remember." onSubmit={text=>{
+    setStage("sent");
+    const metadata={response:text,studyMs:Math.round(shownMs.current),recallMs:Math.round(performance.now()-studyEnded.current)};
+    sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:WORD_LIST_EVENTS.immediate,label:"Word list recalled",metadata}));
+  }} />;
+}
+
+/** Delayed recall of the same list. The list is never sent to this step. */
+function DelayedRecallTask({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
+  const [sent,setSent]=useState(false);
+  if(sent)return <section className="subject-center"><h1>Thank you.</h1></section>;
+  return <RecallBox prompt={step.subjectPrompt} onSubmit={text=>{
+    setSent(true);
+    sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:WORD_LIST_EVENTS.delayed,label:"Delayed recall submitted",metadata:{response:text}}));
+  }} />;
 }
 
 /** N-back with a short practice block (with feedback) and a pre-generated scored block. */

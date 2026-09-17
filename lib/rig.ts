@@ -62,7 +62,11 @@ export const ARTIFACT_TYPES: readonly ArtifactType[] = [
   { id: "operator_in_view", label: "Operator in view", key: "o", kind: "span" },
   { id: "other_person", label: "Door or other person", key: "d", kind: "point" },
   { id: "phone", label: "Phone or notification", key: "p", kind: "point" },
+  // Started by INFLATE on a blood pressure step and ended by saving the reading.
+  { id: "bp_cuff", label: "BP cuff inflated", key: "b", kind: "span" },
 ];
+/** The cuff squeezes the arm and provokes a sympathetic response, so its window is excluded like any other artifact. */
+export const BP_CUFF_ARTIFACT = "bp_cuff";
 export const POINT_ARTIFACT_WINDOW = { beforeSec: 3, afterSec: 1 } as const;
 
 /** Span artifacts (such as talking) currently switched on, from the event ledger. */
@@ -185,6 +189,10 @@ export function startChecks(snapshot: SessionSnapshot, now: number): StartCheck[
   const agentOnline = Boolean(snapshot.acquisition.lastSeenAt && now - Date.parse(snapshot.acquisition.lastSeenAt) <= START_LEASE_MS);
   const label = (id: string) => snapshot.sensors.find((sensor) => sensor.id === id)?.label ?? id;
   const media = snapshot.subjectMedia;
+  // A demo has no participant to consent or screen and no hardware to check; it exists to walk the tasks.
+  if (snapshot.demo) {
+    return [{ id: "demo", label: "Demo run", ok: true, detail: "Hardware, consent and screening checks are skipped. Nothing is recorded to the cohort." }];
+  }
   const checks: StartCheck[] = [
     { id: "consent", label: "Consent", ok: consentReady(snapshot.consent?.values), detail: !snapshot.consent ? "Not saved. Choose participation in Consent." : snapshot.consent.values.participation !== "Yes" ? "Participation consent is not Yes." : "Saved" },
     { id: "screening", label: "Safety screening", ok: screeningComplete(snapshot.screening?.answers), detail: snapshot.screening ? "Saved" : "Not saved. Answer all six questions." },

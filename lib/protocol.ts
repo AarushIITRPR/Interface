@@ -1,11 +1,26 @@
+import { WORD_LIST_STEPS, defaultTemplate, renderPlan } from "./protocol-template";
 import { STIMULI, chooseStimuli, stimulusById, type ClipKind } from "./stimuli";
-import { DEFAULT_CLIP_SECONDS, EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolOptions, type ProtocolStep } from "./types";
+import { WORD_LISTS, wordListIndex } from "./tasks";
+import { DEFAULT_CLIP_SECONDS, EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolOptions, type ProtocolStep, type ProtocolTemplate } from "./types";
 
 /** Blocks enabled for new sessions. Annotation replay adds about 15 minutes, so it is opt-in. */
-export const DEFAULT_PROTOCOL_OPTIONS: ProtocolOptions = { questionnaires: true, pacedBreathing: true, extendedExertion: true, neutralClip: true, annotationReplay: false };
+export const DEFAULT_PROTOCOL_OPTIONS: ProtocolOptions = { questionnaires: true, pacedBreathing: true, extendedExertion: true, neutralClip: true, annotationReplay: false, wordList: true };
 /** Sessions created before v9 have no options and keep the v8 plan. */
-const V8_OPTIONS: ProtocolOptions = { questionnaires: false, pacedBreathing: false, extendedExertion: false, neutralClip: false, annotationReplay: false };
+const V8_OPTIONS: ProtocolOptions = { questionnaires: false, pacedBreathing: false, extendedExertion: false, neutralClip: false, annotationReplay: false, wordList: false };
 export const PACED_BREATHING_RATES = [6, 10, 15, 20] as const;
+/** Cycles needed before a breathing rate estimate is stable rather than a guess at a partial waveform. */
+const PACED_BREATHING_MIN_CYCLES = 6;
+/** Floor on window length, so the spectrum resolves 1.5 breaths/min - finer than the 4-5/min gaps between rates. */
+const PACED_BREATHING_MIN_SEC = 40;
+
+/** Shortest usable run of a paced-breathing step.
+ *
+ * Session 0101JUMR ran these for 35.2, 14.2, 12.4 and 19.6 s against 60 s planned - 2.4 to 3.5 cycles, resolving
+ * only to 3.1-4.8 breaths/min when the conditions themselves are 5/min apart. The block could not have validated a
+ * respiration estimator however well the sensors worked, so the floor is enforced rather than planned. */
+export function pacedBreathingMinSec(rate: number) {
+  return Math.max(PACED_BREATHING_MIN_SEC, Math.ceil((PACED_BREATHING_MIN_CYCLES / rate) * 60));
+}
 
 export function sanitizeProtocolOptions(raw: unknown, current: ProtocolOptions = DEFAULT_PROTOCOL_OPTIONS): ProtocolOptions {
   const input = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
@@ -31,7 +46,17 @@ export function assignFor(raw: number | string): Assignment {
   const bufferRow = Math.floor((pid - 1) / 6) % 6;
   const order = WILLIAMS6[row].map((n) => EMOTIONS[n - 1]);
   const buffers = BUFFER_ORDERS[bufferRow];
-  return { pid, row: row + 1, bufferRow: bufferRow + 1, buf1: buffers[0], buf2: buffers[1], buf3: buffers[2], block1: [order[0],order[1]], block2: [order[2],order[3]], block3: [order[4],order[5]], fullOrder: order, options: { ...DEFAULT_PROTOCOL_OPTIONS }, stimuli: chooseStimuli(pid) };
+  return { pid, row: row + 1, bufferRow: bufferRow + 1, buf1: buffers[0], buf2: buffers[1], buf3: buffers[2], block1: [order[0],order[1]], block2: [order[2],order[3]], block3: [order[4],order[5]], fullOrder: order, options: { ...DEFAULT_PROTOCOL_OPTIONS }, stimuli: chooseStimuli(pid), wordList: wordListIndex(row + 1, bufferRow + 1) };
+}
+
+/** Which recall list a session uses: stored at creation, or derived the same way for sessions that predate it. */
+export function wordListIndexFor(a: Assignment): number {
+  const index = a.wordList ?? wordListIndex(a.row, a.bufferRow ?? 1);
+  return index >= 0 && index < WORD_LISTS.length ? index : 0;
+}
+
+export function wordListFor(a: Assignment): readonly string[] {
+  return WORD_LISTS[wordListIndexFor(a)];
 }
 
 function clipSeconds(a: Assignment, clip: ClipKind) {
@@ -39,14 +64,19 @@ function clipSeconds(a: Assignment, clip: ClipKind) {
   return stimulus?.durationSec ?? (clip === "neutral" ? 120 : DEFAULT_CLIP_SECONDS[clip]);
 }
 
-// The plan depends only on the orders, options, and assigned stimuli, so few distinct plans are ever built.
+// The plan depends only on the orders, options, assigned stimuli, and template, so few distinct plans are built.
 const planCache = new Map<string, readonly ProtocolStep[]>();
 
 export function buildPlan(a: Assignment): readonly ProtocolStep[] {
-  const key = JSON.stringify([a.block1,a.block2,a.block3,a.buf1,a.buf2,a.buf3,a.options ?? null,a.stimuli ?? null]);
+  const key = JSON.stringify([a.block1,a.block2,a.block3,a.buf1,a.buf2,a.buf3,a.options ?? null,a.stimuli ?? null,a.protocol ?? null]);
   let plan = planCache.get(key);
-  if (!plan) { plan = Object.freeze(createPlan(a)); planCache.set(key, plan); }
+  if (!plan) { plan = Object.freeze(a.protocol ? renderPlan(a.protocol, a) : createPlan(a)); planCache.set(key, plan); }
   return plan;
+}
+
+/** The built-in protocol as an editable template, as the starting point for the builder. */
+export function defaultProtocolTemplate(options: ProtocolOptions = DEFAULT_PROTOCOL_OPTIONS, a?: Assignment): ProtocolTemplate {
+  return defaultTemplate(options, pacedBreathingMinSec, PACED_BREATHING_RATES, a);
 }
 
 function createPlan(a: Assignment): ProtocolStep[] {
@@ -83,11 +113,12 @@ function createPlan(a: Assignment): ProtocolStep[] {
   }
   const block = (pair:[Emotion,Emotion], kind:BufferKind, phase:string, withGate=true) => { clip(pair[0],phase); rating(pair[0],phase); washout(phase); clip(pair[1],phase); rating(pair[1],phase); buffer(kind,phase); if(withGate) gate(phase, `After ${phase}`); };
   block(a.block1,a.buf1,"Part 1"); block(a.block2,a.buf2,"Part 2"); block(a.block3,a.buf3,"Part 3",false);
+  if (options.wordList) add({ ...WORD_LIST_STEPS.immediate });
   gate("Movement and breathing","Before physiological sweep","Settle before physiological sweep");
   add({ type:"sweep", title:"Seated rest", subjectPrompt:"Sit comfortably and stay still.", operatorScript:"Sit comfortably and stay still for a short moment.", operatorNote:"20 second seated anchor.", phase:"Movement and breathing", durationSec:20, advance:"timer", estimatedSec:20 });
   add({ type:"sweep", title:"Box breathing", subjectPrompt:"Follow the circle.", operatorScript:"Breathe in as the circle grows, hold, breathe out as it shrinks, then hold again.", operatorNote:"Use the registered media when available, otherwise use the visual pacer.", phase:"Movement and breathing", durationSec:45, advance:"timer", estimatedSec:45 });
   if (options.pacedBreathing) {
-    for (const rate of PACED_BREATHING_RATES) add({ type:"sweep", title:`Paced breathing: ${rate} per minute`, subjectPrompt:"Breathe in as the bar rises and out as it falls.", operatorScript:`Follow the guide at ${rate} breaths per minute. Breathe gently; do not force it.`, operatorNote:"Reference for breathing-rate estimation from video, thermal, and CSI.", phase:"Movement and breathing", durationSec:60, breathsPerMin:rate, advance:"timer", estimatedSec:60 });
+    for (const rate of PACED_BREATHING_RATES) add({ type:"sweep", title:`Paced breathing: ${rate} per minute`, subjectPrompt:"Breathe in as the bar rises and out as it falls.", operatorScript:`Follow the guide at ${rate} breaths per minute. Breathe gently; do not force it.`, operatorNote:"Reference for breathing-rate estimation from video, thermal, and CSI.", phase:"Movement and breathing", durationSec:60, minDurationSec:pacedBreathingMinSec(rate), breathsPerMin:rate, advance:"timer", estimatedSec:60 });
   }
   add({ type:"sweep", title:"Breath hold", safetyKey:"breath_hold", subjectPrompt:"Breathe in and hold. Release whenever you need to.", operatorScript:"Take a normal breath in and hold only for as long as feels comfortable.", operatorNote:"Voluntary and comfort limited. Skip if contraindicated.", phase:"Movement and breathing", safety:true, advance:"subject", estimatedSec:40 });
   add({ type:"sweep", title:"Head movement and speaking", subjectPrompt:"Turn left. Turn right. Look up. Look down. Then speak.", operatorScript:"Slowly turn left, right, up, and down. Then speak aloud for a few seconds.", operatorNote:"Motion and speech segment.", phase:"Movement and breathing", durationSec:30, advance:"timer", estimatedSec:30 });
@@ -96,6 +127,7 @@ function createPlan(a: Assignment): ProtocolStep[] {
   add({ type:"sweep", title:"Brief exertion", safetyKey:"exertion", subjectPrompt:"March in place or do sit-to-stands.", operatorScript:"March in place or do comfortable sit-to-stands.", operatorNote:`${exertionSec} second exertion period. Skip if contraindicated.`, phase:"Movement and breathing", durationSec:exertionSec, safety:true, advance:"timer", estimatedSec:exertionSec });
   add({ type:"sweep", title:"Post-exertion recovery", subjectPrompt:"Sit down. Stay still.", operatorScript:"Sit back down and stay still while your breathing settles.", operatorNote:"60 second recovery after exertion.", phase:"Movement and breathing", durationSec:60, advance:"timer", estimatedSec:60 });
   add({ type:"bodyscan", title:"Guided body scan", subjectPrompt:"Get comfortable. Close your eyes.", operatorScript:"Sit comfortably, close your eyes, and follow the guided audio.", operatorNote:"Four minute guided body scan.", phase:"Relaxation", durationSec:240, advance:"timer", estimatedSec:240 });
+  if (options.wordList) add({ ...WORD_LIST_STEPS.delayed });
   add({ type:"recovery", title:"Return to normal", subjectPrompt:"Open your eyes when you are ready.", operatorScript:"Open your eyes whenever you are ready.", operatorNote:"Final eyes-open return and BP.", phase:"Relaxation", durationSec:60, bp:true, bpLabel:"Relaxed final", advance:"timer", estimatedSec:60 });
   if (options.questionnaires) questionnaire("panas_post", "Current mood (PANAS, end)", "Relaxation", 75);
   if (options.annotationReplay) {
