@@ -134,6 +134,38 @@ class ExportTests(unittest.TestCase):
         session = json.loads((out / "session.json").read_text())
         self.assertEqual(session["clock"]["recordingStartHostEpochNs"], ns(0))
 
+    def test_word_list_recall_gets_its_own_table_and_consent(self):
+        fixture = export_fixture()
+        recall = {"phase": "delayed", "listIndex": 0, "hits": 2, "hitsLenient": 3, "intrusions": 1, "repeats": 0, "total": 10,
+                  "delaySec": 600.0, "retentionPct": 50, "immediateHits": 4, "recallSec": 60.0,
+                  "recalled": ["apple", "river"], "near": [{"typed": "chain", "word": "chair"}], "intrusionWords": ["dog"],
+                  "misses": ["chair"], "words": ["apple", "river", "chair"], "response": "apple\triver\nchain dog"}
+        fixture["events"].insert(-1, event(11, "wordlist_delayed_recall", 58, 2, "s02-clip-happy", attempt=2, metadata=recall))
+        fixture["consent"] = {"values": {"participation": "Yes", "shareResponses": "No"}}
+
+        build_bundle(fixture, self.root, HostClock(0.0, 0.0, ns(0), 0.0), [])
+
+        out = self.root / "export"
+        rows = list(csv.DictReader((out / "wordlist.tsv").open(), delimiter="\t"))
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["phase"], row["hits"], row["hits_lenient"], row["delay_s"], row["retention_pct"]), ("delayed", "2", "3", "600.0", "50"))
+        self.assertEqual(row["near"], "chain>chair")
+        self.assertEqual(row["list"], "1")
+        self.assertEqual(row["recalled"], "apple;river")
+        # Typed text cannot break the table.
+        self.assertEqual(row["response"], "apple river chain dog")
+        # The summary stays readable: per-word detail lives in wordlist.tsv only.
+        summary = (out / "tasks.tsv").read_text()
+        self.assertIn("wordlist_delayed_recall", summary)
+        self.assertNotIn("intrusionWords", summary)
+        # Recall is a response, so it follows the participant's response-sharing consent.
+        manifest = json.loads((out / "share_manifest.json").read_text())
+        entry = next(item for item in manifest["files"] if item["path"].endswith("wordlist.tsv"))
+        self.assertEqual(entry["consentField"], "shareResponses")
+        # The participant declined to share responses, so the recall table is withheld.
+        self.assertFalse(entry["share"])
+
     def test_photodiode_edges_and_sync_latency(self):
         path = self.root / "photodiode.csv"
         with path.open("w", newline="") as handle:

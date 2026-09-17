@@ -153,15 +153,23 @@ def read_host_times(path: Path) -> list[int]:
     return values
 
 
-def coverage(times: list[int], start_ns: int, end_ns: int) -> dict:
-    """Share of one-second bins inside the window that contain at least one sample."""
+def coverage(times: list[int], start_ns: int, end_ns: int, rate_hz: float | None = None) -> dict:
+    """Share of one-second bins inside the window that contain at least one sample.
+
+    Bins measure continuity, not completeness, so they also report `rowsPct` when the stream's rate is known: a
+    burst-delivered stream can fill every bin while missing most of its samples, and a stream stamped on arrival
+    can empty bins it actually covered. Session 0101JUMR read 75-94% per step on ECG that was 100% complete.
+    """
     import bisect
     duration_s = max(0.0, (end_ns - start_ns) / 1e9)
     lo = bisect.bisect_left(times, start_ns)
     hi = bisect.bisect_left(times, end_ns)
     bins = max(1, math.ceil(duration_s))
     filled = {min(bins - 1, int((stamp - start_ns) // 1_000_000_000)) for stamp in times[lo:hi]}
-    return {"rows": hi - lo, "coveragePct": round(100 * len(filled) / bins, 1) if duration_s else 0.0}
+    result = {"rows": hi - lo, "coveragePct": round(100 * len(filled) / bins, 1) if duration_s else 0.0}
+    if rate_hz and duration_s:
+        result["rowsPct"] = round(min(100.0, 100 * (hi - lo) / (rate_hz * duration_s)), 1)
+    return result
 
 
 def stream_files(session_dir: Path, artifacts: list[dict]) -> dict[str, Path]:
@@ -272,7 +280,7 @@ def _write_tsv(path: Path, header: list[str], rows: list[list]) -> None:
 
 CONSENT_BY_SENSOR = {"face": "shareFaceVideo", "face2": "shareFaceVideo", "thermal": "shareThermalVideo", "audio": "shareAudio", "oximeter": "sharePhysiology", "ecg": "sharePhysiology",
                      "emg": "sharePhysiology", "gsr": "sharePhysiology", "resp": "sharePhysiology", "csi": "shareWifi", "csi2": "shareWifi"}
-RESPONSE_FILES = {"ratings.tsv", "tasks.tsv", "stroop_trials.tsv", "nback_trials.tsv", "questionnaire_items.tsv", "questionnaire_scores.tsv", "annotations.tsv"}
+RESPONSE_FILES = {"ratings.tsv", "tasks.tsv", "stroop_trials.tsv", "nback_trials.tsv", "wordlist.tsv", "questionnaire_items.tsv", "questionnaire_scores.tsv", "annotations.tsv"}
 
 
 def consent_allows(consent: dict, key: str | None) -> bool:
@@ -328,10 +336,11 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     _write_tsv(out / "ratings.tsv", ["onset_s", "clip_emotion", "valence", "arousal", "dominance", "scale_points", "felt_emotion", "intensity", "familiarity"],
         [[_seconds(clock.server_to_host_ns(r.get("createdAt")), origin_ns), r.get("emotion"), r.get("valence"), r.get("arousal"), r.get("dominance"),
           r.get("scalePoints", 10), r.get("discreteEmotion"), r.get("intensity"), r.get("familiarity")] for r in export.get("ratings", [])])
-    task_events = [m for m in markers if m["eventType"] in ("stroop_complete", "nback_complete", "breath_hold_complete")]
+    task_events = [m for m in markers if m["eventType"] in ("stroop_complete", "nback_complete", "breath_hold_complete", *WORD_LIST_EVENTS)]
     _write_tsv(out / "tasks.tsv", ["onset_s", "event_type", "step_id", "summary"],
-        [[_seconds(m["hostEpochNs"], origin_ns), m["eventType"], m["stepId"], {key: value for key, value in m["metadata"].items() if key not in ("trialData", "clientTime")}] for m in task_events])
+        [[_seconds(m["hostEpochNs"], origin_ns), m["eventType"], m["stepId"], {key: value for key, value in m["metadata"].items() if key not in SUMMARY_EXCLUDED}] for m in task_events])
     write_trial_tables(out, task_events)
+    write_wordlist(out, task_events, origin_ns)
 
     artifact_list = artifact_windows(markers)
     _write_tsv(out / "artifacts.tsv", ["onset_s", "duration_s", "type", "kind", "step_id", "unclosed"],
@@ -446,6 +455,37 @@ def environment_summary(path: Path) -> dict | None:
     return summary
 
 
+WORD_LIST_EVENTS = ("wordlist_recall", "wordlist_delayed_recall")
+# Per-trial and per-word detail lives in its own table; tasks.tsv keeps one readable summary per task.
+SUMMARY_EXCLUDED = {"trialData", "clientTime", "words", "recalled", "near", "intrusionWords", "misses", "response"}
+WORDLIST_COLUMNS = ["onset_s", "step_id", "phase", "list", "hits", "hits_lenient", "intrusions", "repeats", "total",
+                    "delay_s", "retention_pct", "immediate_hits", "recall_s", "study_ms", "recalled", "near", "intrusion_words",
+                    "misses", "words", "response"]
+
+
+def write_wordlist(out: Path, task_events: list[dict], origin_ns: int | None) -> None:
+    """One row per recall attempt. Delay runs from the end of study to the start of the delayed step, on the server clock."""
+    joined = lambda values: ";".join(str(value) for value in values or [])
+    rows = []
+    for marker in task_events:
+        if marker["eventType"] not in WORD_LIST_EVENTS:
+            continue
+        meta = marker["metadata"]
+        rows.append([
+            # Numbered from 1, as the console shows it.
+            _seconds(marker["hostEpochNs"], origin_ns), marker["stepId"], meta.get("phase"),
+            None if meta.get("listIndex") is None else int(meta["listIndex"]) + 1,
+            meta.get("hits"), meta.get("hitsLenient"), meta.get("intrusions"), meta.get("repeats"), meta.get("total"),
+            meta.get("delaySec"), meta.get("retentionPct"), meta.get("immediateHits"), meta.get("recallSec"), meta.get("studyMs"),
+            joined(meta.get("recalled")), joined(f"{item.get('typed')}>{item.get('word')}" for item in meta.get("near") or []),
+            joined(meta.get("intrusionWords")), joined(meta.get("misses")), joined(meta.get("words")),
+            # Typed free text: tabs and newlines would break the table.
+            " ".join(str(meta.get("response") or "").split()),
+        ])
+    if rows:
+        _write_tsv(out / "wordlist.tsv", WORDLIST_COLUMNS, rows)
+
+
 TRIAL_TABLES = {
     "stroop_complete": ("stroop_trials.tsv", ["i", "word", "ink", "congruent", "response", "rtMs", "correct", "timedOut"]),
     "nback_complete": ("nback_trials.tsv", ["index", "position", "target", "responded", "rtMs", "outcome"]),
@@ -518,6 +558,7 @@ def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: l
     required = set(export.get("requiredSensors") or [])
     files = stream_files(session_dir, artifacts)
     times = {sensor: read_host_times(path) for sensor, path in files.items()}
+    rates = {artifact["sensorId"]: artifact.get("averageRateHz") for artifact in artifacts}
     # Streams without per-sample timestamps (audio WAV) are continuous files spanning the recording.
     continuous = {artifact["sensorId"] for artifact in artifacts} - set(times)
     steps = []
@@ -528,7 +569,7 @@ def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: l
         issues = []
         if start is not None and end is not None and end > start:
             for sensor, stamps in times.items():
-                streams[sensor] = coverage(stamps, start, end)
+                streams[sensor] = coverage(stamps, start, end, rates.get(sensor))
                 if sensor in required and streams[sensor]["coveragePct"] < MIN_STEP_COVERAGE_PCT:
                     issues.append(f"{sensor} coverage {streams[sensor]['coveragePct']}%")
             for sensor in continuous:

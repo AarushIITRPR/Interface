@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import gzip
 import math
+import sys
 import wave
 from pathlib import Path
 
@@ -102,13 +103,19 @@ def detect_r_peaks(signal: np.ndarray, fs: float) -> np.ndarray:
 
 
 def ecg_times_and_signal(columns: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray, float] | None:
-    """Frontier X rows share a host receipt time per packet, so sample times come from the device clock fitted to host time."""
+    """Frontier X sample times, taken from the device clock offset by the smallest transport delay observed.
+
+    A least-squares fit of device time against host time looks like the obvious choice and is the wrong one: arrival
+    lag is one-sided, so the fit chases the mean of a skewed distribution instead of its floor. On session 0101JUMR
+    it landed 0.74 s late and reported -180 ppm of clock drift where the floor shows -4.7 ppm, turning a constant
+    offset into one that slides 0.34 s across the session. The floor is the arrival that queued least, so it is the
+    only estimate the outliers cannot move.
+    """
     host = columns["host_epoch_ns"]
     signal = columns["scaled_value"]
     if "sample_time_ms" in columns and np.ptp(columns["sample_time_ms"]) > 0:
         device = columns["sample_time_ms"]
-        slope, intercept = np.polyfit(device, host, 1)
-        times = slope * device + intercept
+        times = device * 1e6 + np.min(host - device * 1e6)
         order = np.argsort(device, kind="stable")
         times, signal = times[order], signal[order]
     else:
@@ -130,13 +137,41 @@ def rmssd(rr_ms: np.ndarray) -> float | None:
     return float(np.sqrt(np.mean(np.square(np.diff(rr_ms)))))
 
 
+SCR_THRESHOLD_US = 0.05
+# Seated adult skin conductance runs about 2-20 uS. Well below that means the electrodes, the reference resistor
+# or the front-end gain is wrong, not that the participant is unusually dry.
+MIN_PLAUSIBLE_SCL_US = 0.5
+
+
+def eda_quality(values: np.ndarray) -> str:
+    """Empty string if this EDA channel can support SCR detection, else why it cannot.
+
+    Session 0101JUMR reported 140 SCRs in a 57 s step - 2.4 per second, against a spontaneous rate of one or two a
+    minute. Its raw_adc held 28 distinct codes across the whole session, so one quantisation step was about
+    0.024 uS and any two-code jump cleared the 0.05 uS threshold. The detector was counting the ADC, not the skin.
+    """
+    finite = values[np.isfinite(values)]
+    if finite.size < 2:
+        return "no samples"
+    level = float(np.median(finite))
+    if level < MIN_PLAUSIBLE_SCL_US:
+        return f"skin conductance {level:.3f} uS is below the plausible {MIN_PLAUSIBLE_SCL_US} uS floor"
+    distinct = np.unique(finite)
+    if distinct.size < 2:
+        return "signal is constant"
+    step = float(np.min(np.diff(distinct)))
+    if step >= SCR_THRESHOLD_US / 2:
+        return f"quantisation step {step:.3f} uS is too coarse for a {SCR_THRESHOLD_US} uS threshold"
+    return ""
+
+
 def eda_decompose(values: np.ndarray, fs: float, tonic_window_s: float = 8.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Tonic level as a moving median, phasic as the remainder, and SCR peaks above 0.05 uS at least 1 s apart."""
     width = max(3, int(tonic_window_s * fs) | 1)
     padded = np.pad(values, width // 2, mode="edge")
     tonic = np.median(np.lib.stride_tricks.sliding_window_view(padded, width), axis=1)[: values.size]
     phasic = values - tonic
-    candidates = np.flatnonzero((phasic[1:-1] > phasic[:-2]) & (phasic[1:-1] >= phasic[2:]) & (phasic[1:-1] > 0.05)) + 1
+    candidates = np.flatnonzero((phasic[1:-1] > phasic[:-2]) & (phasic[1:-1] >= phasic[2:]) & (phasic[1:-1] > SCR_THRESHOLD_US)) + 1
     peaks: list[int] = []
     for index in candidates:
         if not peaks or index - peaks[-1] >= fs:
@@ -243,7 +278,8 @@ def physio_summary(windows: list[dict], session_dir: Path, artifacts: list[dict]
 
     gsr_path = paths.get("gsr")
     gsr = read_numeric_columns(gsr_path, ["conductance_us"]) if gsr_path and gsr_path.suffix == ".csv" and gsr_path.exists() else None
-    if gsr and gsr["host_epoch_ns"].size > 10:
+    gsr_fault = eda_quality(gsr["conductance_us"]) if gsr else "no samples"
+    if gsr and gsr["host_epoch_ns"].size > 10 and not gsr_fault:
         times = gsr["host_epoch_ns"]
         fs = (times.size - 1) / max(1e-9, (times[-1] - times[0]) / 1e9)
         tonic, _, scr = eda_decompose(gsr["conductance_us"], fs)
@@ -253,6 +289,9 @@ def physio_summary(windows: list[dict], session_dir: Path, artifacts: list[dict]
             if mask.any():
                 summary["sclUs"] = round(float(np.mean(tonic[mask])), 3)
                 summary["scrCount"] = int(window_mask(scr_times, summary["start_ns"], summary["end_ns"]).sum())
+    elif gsr and gsr_fault:
+        # Leave sclUs and scrCount unset so they export as n/a: a number here would be read as a measurement.
+        print(f"Skipping EDA derivatives: {gsr_fault}", file=sys.stderr)
 
     resp_path = paths.get("resp")
     resp = read_numeric_columns(resp_path, ["raw"]) if resp_path and resp_path.suffix == ".csv" and resp_path.exists() else None

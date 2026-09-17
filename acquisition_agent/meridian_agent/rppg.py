@@ -14,7 +14,11 @@ FS = 30.0
 
 
 def pos_heart_rate(times_s: list[float], bgr_means: list[tuple[float, float, float]], window_s: float = 1.6) -> tuple[float, float] | None:
-    """Return (bpm, quality) where quality is the share of in-band spectral power at the peak, or None if too short."""
+    """Return (bpm, quality, half_bpm, half_quality), or None if too short.
+
+    quality is the share of in-band spectral power at the peak; half_bpm is the f/2 candidate and its share, so a
+    caller can see when the peak may be a second harmonic rather than the rate.
+    """
     import numpy as np
 
     if len(times_s) < 2 or times_s[-1] - times_s[0] < 6:
@@ -47,7 +51,18 @@ def pos_heart_rate(times_s: list[float], bgr_means: list[tuple[float, float, flo
     peak = int(np.argmax(np.where(band, spectrum, 0)))
     spread = max(1, int(round((2 / 60) / (freqs[1] - freqs[0]))))  # +-2 bpm around the peak
     neighbourhood = spectrum[max(0, peak - spread):peak + spread + 1].sum()
-    return round(float(freqs[peak] * 60), 1), round(float(neighbourhood / spectrum[band].sum()), 3)
+    bpm = float(freqs[peak] * 60)
+    # The band spans an octave and a half, so for any true rate below 90 bpm its second harmonic is also in band
+    # and can win the argmax. Report the half-rate candidate rather than silently picking one: a subject paced at
+    # 12/min has been seen reported as 23.71/min, plausible enough to survive into a results table.
+    half = bpm / 2
+    if half >= MIN_BPM:
+        half_index = int(np.argmin(np.abs(freqs - half / 60)))
+        half_power = spectrum[max(0, half_index - spread):half_index + spread + 1].sum()
+    else:
+        half_power = 0.0
+    return (round(bpm, 1), round(float(neighbourhood / spectrum[band].sum()), 3),
+            round(half, 1) if half_power else None, round(float(half_power / spectrum[band].sum()), 3) if half_power else 0.0)
 
 
 class LiveRppg:
@@ -62,7 +77,7 @@ class LiveRppg:
         self.last_detect = -1e9
         self.last_estimate = -1e9
         self.last_face = -1e9
-        self.estimate: tuple[float, float] | None = None
+        self.estimate: tuple[float, float, float | None, float] | None = None
         self._cascade = None
 
     def _detect(self, frame, cv2) -> None:
@@ -96,5 +111,8 @@ class LiveRppg:
             self.estimate = pos_heart_rate([t for t, _ in self.samples], [v for _, v in self.samples]) if now - self.last_face < 2 else None
         metrics: dict = {"faceDetected": now - self.last_face < 2}
         if self.estimate:
-            metrics["rppgHeartRate"], metrics["rppgQuality"] = self.estimate
+            metrics["rppgHeartRate"], metrics["rppgQuality"], half, half_quality = self.estimate
+            # Surfaced only when the half-rate candidate is competitive, so it reads as a warning rather than noise.
+            if half and half_quality >= metrics["rppgQuality"] * 0.5:
+                metrics["rppgHalfRate"], metrics["rppgHalfQuality"] = half, half_quality
         return metrics

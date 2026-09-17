@@ -19,12 +19,14 @@ from urllib.request import Request, urlopen
 from . import __version__
 from .export import HostClock, auxiliary_files, build_bundle, event_marker
 from .preview import PreviewServer
-from .sensors import CameraOptions, CameraSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor
+from .sensors import CameraOptions, CameraSensor, FrontierXEcgSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor, restamp_frontierx_csv
 
 
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
 SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode","csi2","resp","environment","face2")
 CSI_SENSOR_IDS = ("csi","csi2")
+# Cameras whose frames feed rPPG, where a drifting exposure is a confound rather than a cosmetic issue.
+RPPG_SENSOR_IDS = ("face","face2")
 
 
 def unique_session_dir(root: Path, name: str) -> Path:
@@ -244,16 +246,29 @@ class MeridianAgent:
             current_reports = reports or [sensor.report().payload() for sensor in self.sensors]
             required = set(map(str,command.get("requiredSensors") or []))
             failed = [item["id"] for item in current_reports if item["id"] in required and item.get("quality") != "good"]
+            # An rPPG camera whose auto exposure is still running is not ready, however cleanly its frames arrive.
+            unlocked = [item["id"] for item in current_reports
+                        if item["id"] in required and item["id"] in RPPG_SENSOR_IDS
+                        and item.get("metrics", {}).get("settingsLocked") is False]
+            # Without the empty-room baseline there is no null for any CSI claim, so the session cannot be scored.
+            baseline_missing = bool(required & set(CSI_SENSOR_IDS)) and (self.calibration or {}).get("status") != "done"
             probe = self.session_dir / "preflight_test.json"
-            payload = {"completedAt":iso_now(),"required":sorted(required),"failed":failed,"diskFreeGb":round(shutil.disk_usage(self.session_dir).free/(1024**3),2)}
+            payload = {"completedAt":iso_now(),"required":sorted(required),"failed":failed,"exposureUnlocked":unlocked,
+                       "csiEmptyRoomBaseline":(self.calibration or {}).get("status","not recorded"),
+                       "diskFreeGb":round(shutil.disk_usage(self.session_dir).free/(1024**3),2)}
             probe.write_text(json.dumps(payload,indent=2),encoding="utf-8")
             verified = json.loads(probe.read_text(encoding="utf-8")) == payload
             sync_ok = abs(self.clock_offset_ms) < 100
             # Enough disk for a full session (about 45 minutes) with 50% margin.
             needed_gb = max(10.0, self.recording_gb_per_hour() * 0.75 * 1.5)
             payload["diskNeededGb"] = round(needed_gb,1)
-            passed = not failed and verified and payload["diskFreeGb"] >= needed_gb and sync_ok
-            problem = ", ".join(failed) if failed else "clock synchronization" if not sync_ok else f"disk space ({payload['diskFreeGb']} GB free, {payload['diskNeededGb']} GB needed)" if payload["diskFreeGb"] < needed_gb else "local storage"
+            passed = not failed and not unlocked and not baseline_missing and verified and payload["diskFreeGb"] >= needed_gb and sync_ok
+            problem = (", ".join(failed) if failed
+                       else f"auto exposure still running on {', '.join(unlocked)}" if unlocked
+                       else "empty-room CSI baseline not recorded" if baseline_missing
+                       else "clock synchronization" if not sync_ok
+                       else f"disk space ({payload['diskFreeGb']} GB free, {payload['diskNeededGb']} GB needed)" if payload["diskFreeGb"] < needed_gb
+                       else "local storage")
             self.preflight_result = {"status":"pass" if passed else "fail","detail":"All required streams, synchronization, and local storage passed" if passed else "Check: "+problem,"completedAt":payload["completedAt"]}
 
     def run_calibration(self, command: dict) -> None:
@@ -373,6 +388,12 @@ class MeridianAgent:
                 sensor.stop()
             if self.preview:
                 self.preview.stop()
+            # Re-stamp ECG against the whole capture's arrival floor before the manifest hashes the file.
+            for sensor in self.sensors:
+                if isinstance(sensor, FrontierXEcgSensor):
+                    restamped = restamp_frontierx_csv(sensor.path)
+                    if restamped:
+                        print(f"ECG re-stamped from the device clock: transport delay {restamped['offsetSec']}s, arrival jitter {restamped['jitterSec']}s removed")
             artifacts = [artifact.payload() for sensor in self.sensors if (artifact := sensor.artifact())]
             manifest = {"sessionCode":self.code,"finalizedAt":iso_now(),"recordings":artifacts,"auxiliaryFiles":auxiliary_files(self.session_dir)}
             (self.session_dir / "manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
@@ -415,8 +436,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--photodiode",default="none",help="Photodiode (screen sync patch) serial port, or none")
     result.add_argument("--photodiode-baud",type=int,default=921600)
     result.add_argument("--video-codec",choices=("ffv1","mjpg"),default="ffv1",help="ffv1 is lossless (recommended for rPPG); mjpg is small but lossy")
-    result.add_argument("--camera-width",type=int,default=0,help="Requested capture width (0 keeps the camera default)")
-    result.add_argument("--camera-height",type=int,default=0,help="Requested capture height (0 keeps the camera default)")
+    # 720p, not the camera default. Session 0101JUMR left these at 0, negotiated 1920x1080, and lossless FFV1 on
+    # 1080p could not keep up: 42.6% of face frames were dropped at the writer queue, leaving 14.34 Hz on disk.
+    result.add_argument("--camera-width",type=int,default=1280,help="Requested capture width (0 keeps the camera default)")
+    result.add_argument("--camera-height",type=int,default=720,help="Requested capture height (0 keeps the camera default)")
     result.add_argument("--camera-fps",type=float,default=0.0,help="Requested frame rate (0 keeps the camera default)")
     result.add_argument("--no-camera-lock",action="store_true",help="Leave auto exposure and white balance on")
     result.add_argument("--thermal-format",choices=("rgb","y16"),default="rgb",help="y16 records radiometric 16-bit frames (e.g. FLIR Lepton on PureThermal)")

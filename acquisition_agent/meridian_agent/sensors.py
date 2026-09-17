@@ -15,7 +15,7 @@ from collections import deque
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 from urllib.parse import urlparse
 
 from .models import RecordingArtifact, SensorReport
@@ -27,6 +27,10 @@ TARGET_RATES = {"face":30.0,"audio":48000.0,"oximeter":60.0,"csi":100.0,"emg":10
 
 FRONTIERX_SCALE_PER_COUNT = 0.0000038146972
 FRONTIERX_SAMPLE_RATE_HZ = 125.0
+# A stream that lost this share of its samples is not a clean recording, whatever rate the device reported.
+MAX_DROPOUT_PCT = 2.0
+# The ESP32 receiver's timestamp is a 32-bit microsecond counter, so it returns to zero every 71.6 minutes.
+CSI_TIMESTAMP_WRAP = 1 << 32
 FRONTIERX_SERVER_COUNTS = {"frontierxapp.com":5,"frontierxs.com":5,"frontierxd.in":1}
 
 
@@ -65,6 +69,8 @@ class Sensor:
         self._recording_ended_mono = 0.0
         self._recorded_samples = 0
         self._dropped_samples = 0
+        # Samples that reached the file, when that differs from the samples that reached the process (cameras).
+        self._persisted_samples: int | None = None
         self._gap_count = 0
         self._total_gap_s = 0.0
         self._longest_gap_s = 0.0
@@ -225,7 +231,7 @@ class Sensor:
             elif self._health_fault:
                 result.quality = "bad"
                 result.detail = self._health_fault[:160]
-            elif result.status == "delayed" or (result.targetRateHz and result.rateHz is not None and result.rateHz < result.targetRateHz * 0.8):
+            elif result.status == "delayed" or result.dropoutPct >= MAX_DROPOUT_PCT or (result.targetRateHz and result.rateHz is not None and result.rateHz < result.targetRateHz * 0.8):
                 result.quality = "degraded"
             else:
                 result.quality = "good"
@@ -242,15 +248,19 @@ class Sensor:
             return None
         report = self._final_report or self.report()
         duration = max(0.0,(self._recording_ended_mono or time.monotonic()) - self._recording_started_mono) if self._recording_started_mono else 0.0
-        average_rate = self._recorded_samples / duration if duration else 0.0
-        quality = "pass" if self._recorded_samples > 0 and report.status not in ("error", "missing") else "fail"
-        if quality == "pass" and report.targetRateHz and average_rate < report.targetRateHz * 0.8:
+        # Count what reached the file, not what reached the process. On session 0101JUMR the face camera delivered a
+        # clean 25.0 fps while the encoder queue discarded 42.6% of it; scoring the capture rate returned "pass" on a
+        # 14.34 Hz recording.
+        persisted = self._recorded_samples if self._persisted_samples is None else self._persisted_samples
+        average_rate = persisted / duration if duration else 0.0
+        quality = "pass" if persisted > 0 and report.status not in ("error", "missing") else "fail"
+        if quality == "pass" and (report.dropoutPct >= MAX_DROPOUT_PCT or (report.targetRateHz and average_rate < report.targetRateHz * 0.8)):
             quality = "warning"
         return RecordingArtifact(
             sensorId=self.sensor_id,
             relativePath=str(self.path.relative_to(self.session_dir)).replace("\\", "/"),
             format=self.path.suffix.lstrip(".") or "binary",
-            sampleCount=self._recorded_samples,
+            sampleCount=persisted,
             bytes=self.path.stat().st_size,
             sha256=sha256_file(self.path),
             startedAt=self.started_at,
@@ -263,7 +273,7 @@ class Sensor:
             gapCount=self._gap_count,
             totalGapSec=round(self._total_gap_s,3),
             longestGapSec=round(self._longest_gap_s,3),
-            availabilityPct=round(100 * self._recorded_samples / max(1,self._recorded_samples+self._dropped_samples),3),
+            availabilityPct=round(100 * persisted / max(1,persisted+self._dropped_samples),3),
         )
 
 
@@ -570,6 +580,8 @@ class CsiSensor(SerialLineSensor):
         self._csi_since_check = 0
         self._csi_stats: dict[str, object] = {}
         self._csi_reset = False
+        self._csi_last_raw_timestamp: int | None = None
+        self._csi_timestamp_epochs = 0
 
     def on_open(self, serial_port) -> None:
         """Pulse the auto-reset line so a receiver asleep after a replug starts streaming.
@@ -638,12 +650,24 @@ class CsiSensor(SerialLineSensor):
         if len(parts) < 8:
             return None
         try:
-            timestamp = parts[0]
+            timestamp = self._unwrap_device_timestamp(int(parts[0]))
             packet_id = parts[1]
             rssi = float(parts[2])
         except (ValueError, IndexError):
             return None
         return [timestamp, packet_id, rssi, line], f"RSSI {rssi:g} dBm"
+
+    def _unwrap_device_timestamp(self, raw: int) -> int:
+        """Extend the receiver's 32-bit microsecond counter so it keeps increasing past its 71.6 minute wrap.
+
+        The counter is board uptime, not capture time, so the headroom is whatever is left when recording starts:
+        session 0101JUMR began at 233 s of uptime and ended with 36 min to spare. A rig powered on during setup
+        and recorded an hour later wraps mid-session, and the timestamps go backwards.
+        """
+        if self._csi_last_raw_timestamp is not None and raw < self._csi_last_raw_timestamp - CSI_TIMESTAMP_WRAP // 2:
+            self._csi_timestamp_epochs += 1
+        self._csi_last_raw_timestamp = raw
+        return raw + self._csi_timestamp_epochs * CSI_TIMESTAMP_WRAP
 
     def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
         rssi = float(values[2]); amplitudes = csi_amplitudes(str(values[3]))
@@ -718,6 +742,71 @@ def frontierx_subscribe_payload(user_id: str, server_number: int) -> str:
     return json.dumps({"action":"sendmessage","data":{"userid":str(user_id),"role":"USER","type":"STREAMING","server":f"server{server_number}"}},separators=(",",":"))
 
 
+def frontierx_clock_offset_ms(lags_ms: Iterable[float]) -> float | None:
+    """Transport delay between the Frontier X device clock and the host clock, as the smallest lag observed.
+
+    Packets arrive over a WebSocket in ~1 s bursts, so an individual arrival time says almost nothing about when
+    its samples were measured: in session 0101JUMR the lag ranged 3.84-21.02 s, 17.2 s of pure queueing jitter.
+    The floor of that distribution is the one arrival that queued the least, so it is the best estimate of the
+    fixed part of the delay. Measured on that session the floor drifts -4.7 ppm (8.5 ms over 32 min), well under
+    its own 14.3 ms scatter, so a constant beats a fitted line - there is no drift to fit, only noise.
+    """
+    floor = None
+    for lag in lags_ms:
+        if floor is None or lag < floor:
+            floor = lag
+    return floor
+
+
+def restamp_frontierx_csv(path: Path) -> dict | None:
+    """Rewrite an ecg.csv so host_epoch_ns comes from the device clock, using the whole file's arrival floor.
+
+    The live writer tracks the floor as it goes, so its earliest rows carry whatever the floor was worth after a
+    handful of packets. This second pass sees every arrival and re-stamps uniformly. It also upgrades a file
+    written before arrival_epoch_ns existed, where host_epoch_ns still holds the arrival time.
+    """
+    if not path.exists():
+        return None
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    if len(rows) < 2:
+        return None
+    header = rows[0]
+    legacy = "arrival_epoch_ns" not in header
+    try:
+        host_at, mono_at, sample_at = (header.index(name) for name in ("host_epoch_ns", "monotonic_s", "sample_time_ms"))
+        index_at = header.index("sample_index")
+        arrival_at = host_at if legacy else header.index("arrival_epoch_ns")
+    except ValueError:
+        return None
+    body = [row for row in rows[1:] if len(row) == len(header)]
+    if not body:
+        return None
+    lags = [int(row[arrival_at]) / 1e6 - float(row[sample_at]) for row in body]
+    offset_ms = frontierx_clock_offset_ms(lags)
+    if offset_ms is None:
+        return None
+    # Anchor tying monotonic_s to the epoch clock. In a legacy file monotonic_s runs from the packet's arrival
+    # plus sample_index/rate, so back out both to recover the instant the recording origin fell on.
+    first = body[0]
+    if legacy:
+        origin_ns = int(first[arrival_at]) - round((float(first[mono_at]) - int(first[index_at]) / FRONTIERX_SAMPLE_RATE_HZ) * 1e9)
+    else:
+        origin_ns = int(first[host_at]) - round(float(first[mono_at]) * 1e9)
+    for row in body:
+        arrival = row[arrival_at]
+        host_ns = round((float(row[sample_at]) + offset_ms) * 1e6)
+        row[host_at] = str(host_ns)
+        row[mono_at] = f"{(host_ns - origin_ns) / 1e9:.6f}"
+        if legacy:
+            row.insert(mono_at + 1, arrival)
+    if legacy:
+        header.insert(mono_at + 1, "arrival_epoch_ns")
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        csv.writer(handle).writerows([header, *body])
+    return {"offsetSec": round(offset_ms / 1000.0, 3), "jitterSec": round((max(lags) - offset_ms) / 1000.0, 3), "rows": len(body)}
+
+
 class FrontierXEcgSensor(Sensor):
     """Capture Frontier X live-share ECG packets through the vendor WebSocket."""
 
@@ -731,6 +820,13 @@ class FrontierXEcgSensor(Sensor):
         self.accepted_packets = 0
         self.duplicate_packets = 0
         self.missed_packets = 0
+        # Smallest arrival lag seen so far; see frontierx_clock_offset_ms. Converges within a few packets
+        # (3.88 s after one packet against a 3.84 s final floor on session 0101JUMR).
+        self.clock_offset_ms: float | None = None
+        self.arrival_jitter_ms = 0.0
+        # Epoch instant of the monotonic recording origin, so monotonic_s stays a pure function of host_epoch_ns
+        # and a re-stamp can recover both from either one.
+        self.epoch_at_origin_ns: int | None = None
 
     def accept_packet(self, packet: dict) -> dict | None:
         """Validate and deduplicate one wire packet for recording and telemetry."""
@@ -773,7 +869,7 @@ class FrontierXEcgSensor(Sensor):
         with self.path.open("a",newline="",buffering=1) as csv_handle,self.raw_path.open("a",encoding="utf-8",buffering=1) as raw_handle:
             writer = csv.writer(csv_handle)
             if self.path.stat().st_size == 0:
-                writer.writerow(["host_epoch_ns","monotonic_s","packet_no","session_start_ms","sample_time_ms","sample_index","raw_count","scaled_value","heart_rate"])
+                writer.writerow(["host_epoch_ns","monotonic_s","arrival_epoch_ns","packet_no","session_start_ms","sample_time_ms","sample_index","raw_count","scaled_value","heart_rate"])
             while not self._stop.is_set():
                 socket_client = None
                 server_number = random.randint(1,FRONTIERX_SERVER_COUNTS[self.domain])
@@ -810,19 +906,30 @@ class FrontierXEcgSensor(Sensor):
                                 continue
                             counts = accepted["counts"]
                             scaled = [value * FRONTIERX_SCALE_PER_COUNT for value in counts]
-                            host_epoch_ns = time.time_ns()
-                            monotonic_s = time.monotonic() - self.origin_mono
+                            arrival_epoch_ns = time.time_ns()
+                            if self.epoch_at_origin_ns is None:
+                                self.epoch_at_origin_ns = arrival_epoch_ns - round((time.monotonic() - self.origin_mono) * 1e9)
                             base_ms = accepted["timestamp"] + accepted["packetNo"] * 1000
+                            # Timestamp from the device clock, not from arrival. base_ms is exact - the device emits
+                            # one packet per second and 125 samples inside it, giving deltas of exactly 8 ms with no
+                            # gaps - so the only unknown is the fixed transport delay, tracked as the running floor.
+                            lag_ms = arrival_epoch_ns / 1e6 - base_ms
+                            if self.clock_offset_ms is None or lag_ms < self.clock_offset_ms:
+                                self.clock_offset_ms = lag_ms
+                            self.arrival_jitter_ms = max(self.arrival_jitter_ms, lag_ms - self.clock_offset_ms)
                             if self._recording.is_set():
                                 raw_handle.write(json.dumps(packet,separators=(",",":")) + "\n")
                                 for index,(count,value) in enumerate(zip(counts,scaled)):
-                                    writer.writerow([host_epoch_ns,f"{monotonic_s + index / FRONTIERX_SAMPLE_RATE_HZ:.6f}",accepted["packetNo"],accepted["timestamp"],round(base_ms + index * 1000 / FRONTIERX_SAMPLE_RATE_HZ),index,count,value,accepted["heartRate"] if accepted["heartRate"] is not None else ""])
+                                    sample_time_ms = base_ms + index * 1000 / FRONTIERX_SAMPLE_RATE_HZ
+                                    host_epoch_ns = round((sample_time_ms + self.clock_offset_ms) * 1e6)
+                                    monotonic_s = (host_epoch_ns - self.epoch_at_origin_ns) / 1e9
+                                    writer.writerow([host_epoch_ns,f"{monotonic_s:.6f}",arrival_epoch_ns,accepted["packetNo"],accepted["timestamp"],round(sample_time_ms),index,count,value,accepted["heartRate"] if accepted["heartRate"] is not None else ""])
                             with self._lock:
                                 self._series.extend(round(value,6) for value in scaled)
                             latest = f"HR {accepted['heartRate']} bpm" if accepted["heartRate"] is not None else "ECG samples arriving"
                             packet_total = self.accepted_packets + self.missed_packets
                             packet_loss = round(100 * self.missed_packets / packet_total,3) if packet_total else 0.0
-                            metrics = {"heartRate":accepted["heartRate"] if accepted["heartRate"] is not None else "Unavailable","packetNo":accepted["packetNo"],"acceptedPackets":self.accepted_packets,"duplicatePackets":self.duplicate_packets,"missedPackets":self.missed_packets,"packetLossPct":packet_loss,"source":"Frontier X live API"}
+                            metrics = {"heartRate":accepted["heartRate"] if accepted["heartRate"] is not None else "Unavailable","packetNo":accepted["packetNo"],"acceptedPackets":self.accepted_packets,"duplicatePackets":self.duplicate_packets,"missedPackets":self.missed_packets,"packetLossPct":packet_loss,"transportDelaySec":round(self.clock_offset_ms / 1000.0,2),"arrivalJitterSec":round(self.arrival_jitter_ms / 1000.0,2),"source":"Frontier X live API"}
                             wire_bytes = len(raw_message) if isinstance(raw_message,bytes) else len(str(raw_message).encode("utf-8"))
                             self.sample(latest,wire_bytes if self._recording.is_set() else 0,len(counts),FRONTIERX_SAMPLE_RATE_HZ,None,metrics,["Frontier X stream connected","ECG packet format validated","ECG samples arriving","Packet sequence monitored"])
                 except Exception as exc:
@@ -984,7 +1091,33 @@ def to_y16(frame, width: int, height: int):
     raise ValueError(f"Unexpected Y16 frame {array.dtype} {array.shape}")
 
 
-def lock_camera_settings(capture, cv2, system: str) -> dict:
+V4L2_LOCK_CONTROLS = {"exposure": "auto_exposure=1", "wbTemperature": "white_balance_automatic=0"}
+
+
+def lock_camera_settings_v4l2(device: str) -> dict | None:
+    """Freeze auto exposure and white balance through v4l2-ctl, for cameras OpenCV cannot drive.
+
+    Session 0101JUMR's Sony ILCE-6700 returned -1.0 from every CAP_PROP_* getter and setter, so the OpenCV path
+    reported locked=false and auto exposure ran free for 32 minutes on the primary rPPG camera - the one confound
+    rPPG cannot tolerate, since the AE loop responds to the same clip brightness the protocol is manipulating.
+    """
+    if not isinstance(device, str) or not device.startswith("/dev/"):
+        return None
+    import subprocess
+    applied, failed = [], []
+    for name, control in V4L2_LOCK_CONTROLS.items():
+        try:
+            result = subprocess.run(["v4l2-ctl", "-d", device, "--set-ctrl", control],
+                                    capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        (applied if result.returncode == 0 else failed).append(name)
+    if not applied:
+        return None
+    return {"locked": not failed, "backend": "v4l2-ctl", "applied": applied, "failed": failed}
+
+
+def lock_camera_settings(capture, cv2, system: str, device: object = None) -> dict:
     """Freeze auto exposure, white balance, and gain at their settled values so brightness does not drift under rPPG."""
     props = {"exposure": cv2.CAP_PROP_EXPOSURE, "gain": cv2.CAP_PROP_GAIN, "wbTemperature": cv2.CAP_PROP_WB_TEMPERATURE}
     settled = {name: capture.get(prop) for name, prop in props.items()}
@@ -998,7 +1131,14 @@ def lock_camera_settings(capture, cv2, system: str) -> dict:
     auto_exposure = capture.get(cv2.CAP_PROP_AUTO_EXPOSURE)
     auto_wb = capture.get(cv2.CAP_PROP_AUTO_WB)
     locked = abs(auto_exposure - manual_exposure) < 1e-6 and auto_wb == 0
-    return {"locked": bool(locked), "settled": settled, "readback": readback, "autoExposure": auto_exposure, "autoWhiteBalance": auto_wb}
+    result = {"locked": bool(locked), "settled": settled, "readback": readback, "autoExposure": auto_exposure, "autoWhiteBalance": auto_wb}
+    if not locked and system == "Linux":
+        fallback = lock_camera_settings_v4l2(device)
+        if fallback:
+            result.update({key: value for key, value in fallback.items() if key != "locked"})
+            result["locked"] = fallback["locked"]
+            result["openCvLocked"] = bool(locked)
+    return result
 
 
 class FrameRecorder:
@@ -1018,6 +1158,7 @@ class FrameRecorder:
         self.written = 0
         self.dropped = 0
         self.error = ""
+        self.started_mono = time.monotonic()
         self._thread = threading.Thread(target=self._run, name=f"meridian-writer-{video_path.stem}", daemon=True)
         self._thread.start()
 
@@ -1155,7 +1296,7 @@ class CameraSensor(Sensor):
                 measured = (len(frame_times)-1)/max(0.001,frame_times[-1]-frame_times[0]) if len(frame_times)>1 else fps
                 if lock_pending and current - started >= self.WARMUP_SEC:
                     lock_pending = False
-                    settings["lock"] = lock_camera_settings(capture, cv2, system)
+                    settings["lock"] = lock_camera_settings(capture, cv2, system, self.source)
                 if (settings["lock"] is not None or not lock_pending) and not settings.get("written"):
                     settings["source"] = "file" if file_source else "camera"
                     settings["written"] = True
@@ -1184,9 +1325,20 @@ class CameraSensor(Sensor):
                     queued = recorder.submit(frame,host_epoch_ns,current)
                     if not queued:
                         self.record_dropped(1)
+                    # What landed in the file, which is what the manifest and the quality gate must score.
+                    self._persisted_samples = recorder.written
                 locked = (settings["lock"] or {}).get("locked")
-                metrics = {"width":width,"height":height,"fps":round(measured,2),"droppedFrames":dropped+(recorder.dropped if recorder else 0),"codec":settings["codec"]}
+                encoder_dropped = recorder.dropped if recorder else 0
+                written_fps = recorder.written / max(0.001, current - recorder.started_mono) if recorder and recorder.written else None
+                metrics = {"width":width,"height":height,"fps":round(measured,2),"droppedFrames":dropped+encoder_dropped,"codec":settings["codec"]}
                 validation = ["Hardware detected","Frames arriving","Preview available","Frame rate measured"]
+                if recorder is not None:
+                    metrics["writtenFps"] = round(written_fps,2) if written_fps else 0.0
+                    metrics["encoderDropped"] = encoder_dropped
+                    # The camera keeping up says nothing about the encoder keeping up - that is what went unnoticed
+                    # for a whole session, so it gets its own line rather than living inside a metrics dict.
+                    validation.append("Encoder keeping up with the camera" if not encoder_dropped
+                                      else f"Encoder dropping frames: {encoder_dropped} discarded, {round(written_fps or 0,1)} fps reaching the file")
                 if settings["lock"] is not None:
                     metrics["settingsLocked"] = bool(locked)
                     validation.append("Exposure and white balance locked" if locked else "Exposure or white balance could not be locked")

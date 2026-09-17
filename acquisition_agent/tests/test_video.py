@@ -106,12 +106,25 @@ class VideoTests(unittest.TestCase):
         for bpm in (50, 75, 120, 165):
             f = bpm / 60
             trace = [(100 + 0.3 * np.sin(2 * np.pi * f * t) + rng.normal(0, 0.1), 120 + 0.8 * np.sin(2 * np.pi * f * t) + 0.5 * np.sin(2 * np.pi * 0.2 * t) + rng.normal(0, 0.1), 160 + 0.2 * np.sin(2 * np.pi * f * t) + rng.normal(0, 0.1)) for t in times]
-            estimate, quality = pos_heart_rate(times, trace)
+            estimate, quality, _, _ = pos_heart_rate(times, trace)
             self.assertAlmostEqual(estimate, bpm, delta=2)
             self.assertGreater(quality, 0.3)
-        _, noise_quality = pos_heart_rate(times, [(100 + rng.normal(0, 0.3), 120 + rng.normal(0, 0.3), 160 + rng.normal(0, 0.3)) for _ in times])
+        _, noise_quality, _, _ = pos_heart_rate(times, [(100 + rng.normal(0, 0.3), 120 + rng.normal(0, 0.3), 160 + rng.normal(0, 0.3)) for _ in times])
         self.assertLess(noise_quality, 0.3)
         self.assertIsNone(pos_heart_rate(times[:60], [(1.0, 1.0, 1.0)] * 60))
+
+    def test_pos_heart_rate_reports_the_half_rate_candidate(self):
+        """A trace with power at both f and 2f must expose f as a candidate, not silently pick the harmonic."""
+        rng = np.random.default_rng(7)
+        times = [i / 30 for i in range(12 * 30)]
+        f = 55 / 60
+        trace = [(100 + 0.1 * np.sin(2 * np.pi * f * t) + 0.3 * np.sin(2 * np.pi * 2 * f * t) + rng.normal(0, 0.05),
+                  120 + 0.3 * np.sin(2 * np.pi * f * t) + 0.8 * np.sin(2 * np.pi * 2 * f * t) + rng.normal(0, 0.05),
+                  160 + 0.05 * np.sin(2 * np.pi * f * t) + 0.2 * np.sin(2 * np.pi * 2 * f * t) + rng.normal(0, 0.05)) for t in times]
+        estimate, _, half, half_quality = pos_heart_rate(times, trace)
+        self.assertAlmostEqual(estimate, 110, delta=3)
+        self.assertAlmostEqual(half, 55, delta=3)
+        self.assertGreater(half_quality, 0.0)
 
     def test_live_rppg_reports_no_face_on_blank_frames(self):
         live = LiveRppg()
