@@ -51,7 +51,8 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(instructor, /START SESSION/);
   assert.match(instructor, /Session ledger/);
   assert.match(instructor, /EXPORT MANIFEST/);
-  assert.match(instructor, /isNewerSnapshot/);
+  // Stale replies are rejected in lib/event-sync.ts (applyReply, via isNewerSnapshot), tested in event-sync.test.mjs.
+  assert.match(instructor, /applyReply\(/);
   assert.match(subject, /serverNow\(\)/);
   for (const mode of ["overview","protocol","review"]) assert.match(instructor,new RegExp(`"${mode}"`));
   assert.match(protocol, /WILLIAMS6/);

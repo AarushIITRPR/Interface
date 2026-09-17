@@ -32,6 +32,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, defaultProtocolTemplate, estimateRemaining, shortLabel, wordListIndexFor } from "@/lib/protocol";
 import { WORD_LIST_EVENTS } from "@/lib/tasks";
+import { applyReply, latestSequence, type PartialSnapshot } from "@/lib/event-sync";
 import { resolveBufferSlot, resolveClipSlot } from "@/lib/protocol-template";
 import { EMOTIONS as CLIP_KINDS_EDITABLE } from "@/lib/types";
 import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, startChecks, withConsentDefaults, type MetadataField, type StartCheck } from "@/lib/rig";
@@ -64,14 +65,15 @@ async function api(body: Record<string, unknown>) {
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Unable to save the session.");
-  return data.session as SessionSnapshot;
+  return data.session as PartialSnapshot;
 }
 
-async function load(code: string) {
-  const response = await fetch(`/api/sessions?code=${encodeURIComponent(code)}`, { cache: "no-store" });
+async function load(code: string, since?: number) {
+  const query = since === undefined ? "" : `&since=${since}`;
+  const response = await fetch(`/api/sessions?code=${encodeURIComponent(code)}${query}`, { cache: "no-store" });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Session not found.");
-  return data.session as SessionSnapshot;
+  return data.session as PartialSnapshot;
 }
 
 async function listSessions() {
@@ -94,13 +96,26 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
   const snapshotStatus = useRef<string | null>(null);
   useEffect(() => { snapshotStatus.current = snapshot?.status ?? null; }, [snapshot?.status]);
 
-  const accept = useCallback((next: SessionSnapshot) => {
-    if (next.code !== activeCode.current) return;
-    setSnapshot((current) => !current || current.code !== next.code || isNewerSnapshot(next, current) ? next : current);
+  // The snapshot on screen, readable synchronously. Replies are merged against it rather than inside a state updater,
+  // which React may run later, and it tells each request which events are already held.
+  const shownRef = useRef<SessionSnapshot | null>(null);
+  const sinceFor = useCallback((sessionCode: string) => shownRef.current?.code === sessionCode ? latestSequence(shownRef.current) : undefined, []);
+
+  /** Apply a reply if it is newer, and return the full snapshot the console now shows. */
+  const accept = useCallback((next: PartialSnapshot): SessionSnapshot | null => {
+    if (next.code !== activeCode.current) return null;
+    const current = shownRef.current;
+    const shown = applyReply(current, next);
+    if (shown && shown !== current) {
+      shownRef.current = shown;
+      setSnapshot(shown);
+    }
+    return shown;
   }, []);
 
   const openSession = useCallback((next: SessionSnapshot) => {
     activeCode.current = next.code;
+    shownRef.current = next;
     setSnapshot(next);
     setTab(["complete", "aborted"].includes(next.status) ? "review" : "overview");
   }, []);
@@ -108,15 +123,15 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
   const code = snapshot?.code || "";
   const refresh = useCallback(async () => {
     if (!code) return;
-    try { accept(await load(code)); setError(""); }
+    try { accept(await load(code, sinceFor(code))); setError(""); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to refresh the workspace."); }
-  }, [accept, code]);
+  }, [accept, code, sinceFor]);
 
   const heartbeat = useCallback(async () => {
     if (!code) return;
-    try { accept(await api({ code, action: "heartbeat" })); }
+    try { accept(await api({ code, action: "heartbeat", since: sinceFor(code) })); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "The workspace lost synchronization."); }
-  }, [accept, code]);
+  }, [accept, code, sinceFor]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -173,8 +188,9 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
   const act = useCallback<Act>(async (action, payload = {}) => {
     if (!code) return null;
     try {
-      const next = await api({ code, action, payload });
-      accept(next);
+      const reply = await api({ code, action, payload, since: sinceFor(code) });
+      // Callers get the full, merged snapshot, never the partial reply.
+      const next = accept(reply) ?? (reply.eventsSince === undefined ? reply : null);
       setError("");
       setNotice(actionNotice(action));
       window.setTimeout(() => setNotice("Workspace synchronized"), 2200);
@@ -184,7 +200,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
       setError(reason instanceof Error ? reason.message : "Unable to update the session.");
       return null;
     }
-  }, [accept, code]);
+  }, [accept, code, sinceFor]);
   useEffect(() => { actRef.current = act; }, [act]);
 
   const navigateTo = useCallback(async (target: number) => {
@@ -192,12 +208,11 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
     const direction = target < snapshot.stepIndex ? -1 : 1;
     let cursor = snapshot;
     for (let index = 0; index < Math.abs(target - snapshot.stepIndex); index += 1) {
-      const next = await api({ code: cursor.code, action: "navigate", payload: { direction } });
-      cursor = next;
-      accept(next);
+      const next = accept(await api({ code: cursor.code, action: "navigate", payload: { direction }, since: sinceFor(cursor.code) }));
+      if (next) cursor = next;
     }
     setNotice("Protocol position saved");
-  }, [accept, snapshot]);
+  }, [accept, sinceFor, snapshot]);
 
   // Open a session named in the URL, the convention the subject display already uses (subject-portal.tsx:138).
   // This is the only way into a specific session once the console is past its launcher, and it is what makes the
@@ -613,11 +628,6 @@ function formatBytes(value: number) { if (!value) return "0 MB"; if (value < 104
 function safeSnapshot(snapshot: SessionSnapshot) { const { acquisitionToken: omitted, ...safe } = snapshot; void omitted; return safe; }
 function download(name: string, content: string, type: string) { const url = URL.createObjectURL(new Blob([content], { type })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url); }
 /** Newer protocol revision wins; within one revision, the later server read carries fresher telemetry. */
-function isNewerSnapshot(next: SessionSnapshot, current: SessionSnapshot) {
-  if (next.revision !== current.revision) return next.revision > current.revision;
-  return Date.parse(next.serverTime ?? "") >= Date.parse(current.serverTime ?? "");
-}
-
 function subjectMediaLabel(snapshot: SessionSnapshot) {
   const media = snapshot.subjectMedia;
   if (!media) return "Subject display not connected";

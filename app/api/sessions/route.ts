@@ -1,4 +1,5 @@
 import { getOperatorUser } from "@/app/operator-auth";
+import { parseSince, trimEvents } from "@/lib/event-sync";
 import { TemplateError, sanitizeTemplate } from "@/lib/protocol-template";
 import { DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, SAM_POINTS } from "@/lib/tasks";
 import { summarizeCohort } from "@/lib/cohort";
@@ -28,13 +29,15 @@ export async function GET(request: Request) {
   if (!code) return Response.json({ error:"Session code is required." },{status:400});
   if (!subjectView && !operator) return unauthorized();
   const session = await getSession(code);
-  return session ? Response.json({ session:subjectView ? toSubjectSnapshot(session) : session, ...clockStamps(receivedAt) }) : Response.json({ error:"Session not found." },{status:404});
+  // The console says which events it already holds, so a poll carries only newer ones.
+  const since = parseSince(url.searchParams.get("since"));
+  return session ? Response.json({ session:subjectView ? toSubjectSnapshot(session) : trimEvents(session, since), ...clockStamps(receivedAt) }) : Response.json({ error:"Session not found." },{status:404});
 }
 
 export async function POST(request: Request) {
   const receivedAt = new Date().toISOString();
   try {
-    const body = await request.json() as { action?:string; code?:string; participantId?:number; operator?:string; view?:string; demo?:boolean; protocol?:unknown; payload?:Record<string,unknown> };
+    const body = await request.json() as { action?:string; code?:string; participantId?:number; operator?:string; view?:string; demo?:boolean; protocol?:unknown; since?:unknown; payload?:Record<string,unknown> };
     const subjectView = body.view === "subject";
     const operator = subjectView ? null : await getOperatorUser();
     if (body.action === "create") {
@@ -55,7 +58,7 @@ export async function POST(request: Request) {
     if (!subjectView && !operator) return unauthorized();
     const payload = subjectView ? sanitizeSubjectPayload(body.action,body.payload ?? {}) : body.payload ?? {};
     const session = body.action === "annotationChunk" ? await appendAnnotationChunk(body.code.trim().toUpperCase(),payload) : await mutateSession(body.code,body.action,payload);
-    return session ? Response.json({session:subjectView ? toSubjectSnapshot(session) : session,...clockStamps(receivedAt)}) : Response.json({error:"Session not found."},{status:404});
+    return session ? Response.json({session:subjectView ? toSubjectSnapshot(session) : trimEvents(session, parseSince(body.since)),...clockStamps(receivedAt)}) : Response.json({error:"Session not found."},{status:404});
   } catch (error) {
     return Response.json({error:error instanceof Error ? error.message : "Unable to save the session."},{status:500});
   }

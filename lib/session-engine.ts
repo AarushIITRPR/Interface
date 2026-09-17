@@ -6,7 +6,7 @@ import { STIMULI, stimulusById } from "./stimuli";
 import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, requiredSensorsReady, sanitizeFields, stalePreflightReport, startChecks, withConsentDefaults } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
 import { SAM_POINTS, WORD_LIST_EVENTS, wordListResult } from "./tasks";
-import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type ProtocolTemplate, type SessionSnapshot, type SubjectSnapshot } from "./types";
+import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type Assignment, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type ProtocolTemplate, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
 const bindings = () => env as unknown as Bindings;
@@ -218,6 +218,10 @@ export async function createSession(participantId: number, operator: string, opt
   const template = options.protocol ?? await activeTemplate();
   const assignment = template ? { ...base, protocol: template } : base;
   const demo = Boolean(options.demo);
+  // The template already lives in the assignment. The first event names it rather than carrying a second ~20 KB copy
+  // that every console poll used to re-send.
+  const { protocol: _template, ...assignmentWithoutTemplate } = assignment as Assignment;
+  void _template;
   const createdAt = now();
   const snapshot: SessionSnapshot = {
     id: uid("ses"), code: sessionCode(assignment.pid), revision: 1, participantId: assignment.pid,
@@ -227,7 +231,7 @@ export async function createSession(participantId: number, operator: string, opt
     bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt,subjectLastSeenAt:null,
     acquisitionToken:acquisitionToken(), acquisition:emptyAcquisition(), recordings:[], requiredSensors:["face","audio","oximeter"], hardwareGateOverride:false,deviceConfig:{...DEFAULT_DEVICE_CONFIG},configRevision:1,configurationLocked:false,recordingStartedAt:null,preflightTest:{status:"idle",detail:"Not run",completedAt:null}, demo, createdAt, updatedAt:createdAt,
   };
-  const event = appendEvent(snapshot,{ eventType:demo ? "demo_prepared" : "session_prepared", label:demo ? "Demo run prepared" : "Session prepared", detail:`${demo ? "Demo, participant" : "Participant"} ${assignment.pid}, emotion row ${assignment.row}, task order ${assignment.bufferRow}`, severity:demo ? "warn" : "info", source:"operator", metadata:{ assignment, demo } });
+  const event = appendEvent(snapshot,{ eventType:demo ? "demo_prepared" : "session_prepared", label:demo ? "Demo run prepared" : "Session prepared", detail:`${demo ? "Demo, participant" : "Participant"} ${assignment.pid}, emotion row ${assignment.row}, task order ${assignment.bufferRow}`, severity:demo ? "warn" : "info", source:"operator", metadata:{ assignment:assignmentWithoutTemplate, template:template ? { id:template.id, version:template.version, label:template.label } : null, demo } });
   snapshot.revision = 2;
   snapshot.writeId = uid("w");
   const db = bindings().DB;
