@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 from . import __version__
 from .export import HostClock, auxiliary_files, build_bundle, event_marker
 from .preview import PreviewServer
-from .sensors import CameraOptions, CameraSensor, FrontierXEcgSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor, restamp_frontierx_csv
+from .sensors import CHECKSUM_PENDING, CameraOptions, CameraSensor, FrontierXEcgSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor, restamp_frontierx_csv, sha256_file
 
 
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
@@ -77,6 +77,31 @@ class ClockEstimator:
         self.samples.append((round_trip, clock_offset_ms(command,sent_at,received_at,self.offset_ms)))
         self.offset_ms = min(self.samples)[1]
         return self.offset_ms
+
+
+def write_manifest(session_dir: Path, code: str, recordings: list[dict], checksums: str) -> None:
+    """Write manifest.json atomically, so an interrupted write never leaves a truncated file."""
+    manifest = {"sessionCode":code,"finalizedAt":iso_now(),"checksums":checksums,"recordings":recordings,"auxiliaryFiles":auxiliary_files(session_dir)}
+    path = session_dir / "manifest.json"
+    temporary = path.with_name("manifest.json.tmp")
+    temporary.write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def finalize_manifest(session_dir: Path, code: str, recordings: list[dict], hasher=sha256_file) -> list[dict]:
+    """Record what was captured first, then spend the minutes checksumming it.
+
+    Hashing a session's video is slow - about 5 minutes for 57 GB on the lab disk - and used to happen before the
+    manifest existed, so closing the agent in that window left a session with no manifest at all. Now the manifest is
+    on disk, marked pending, before the first byte is hashed.
+    """
+    write_manifest(session_dir, code, recordings, CHECKSUM_PENDING)
+    completed = [
+        {**item, "sha256": hasher(session_dir / item["relativePath"])} if item.get("sha256") == CHECKSUM_PENDING else item
+        for item in recordings
+    ]
+    write_manifest(session_dir, code, completed, "complete")
+    return completed
 
 
 class MeridianHttpError(RuntimeError):
@@ -341,7 +366,12 @@ class MeridianAgent:
 
     def export_only(self) -> int:
         manifest = json.loads((self.session_dir / "manifest.json").read_text(encoding="utf-8"))
-        self.export_bundle(manifest.get("recordings",[]))
+        recordings = manifest.get("recordings",[])
+        if manifest.get("checksums") == CHECKSUM_PENDING:
+            # The recording agent was stopped while checksumming; finish the job before exporting.
+            print("Manifest checksums were never completed; computing them now")
+            recordings = finalize_manifest(self.session_dir, manifest.get("sessionCode", self.code), recordings)
+        self.export_bundle(recordings)
         return 0
 
     def start(self) -> None:
@@ -394,9 +424,8 @@ class MeridianAgent:
                     restamped = restamp_frontierx_csv(sensor.path)
                     if restamped:
                         print(f"ECG re-stamped from the device clock: transport delay {restamped['offsetSec']}s, arrival jitter {restamped['jitterSec']}s removed")
-            artifacts = [artifact.payload() for sensor in self.sensors if (artifact := sensor.artifact())]
-            manifest = {"sessionCode":self.code,"finalizedAt":iso_now(),"recordings":artifacts,"auxiliaryFiles":auxiliary_files(self.session_dir)}
-            (self.session_dir / "manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+            pending = [artifact.payload() for sensor in self.sensors if (artifact := sensor.artifact(hash_file=False))]
+            artifacts = finalize_manifest(self.session_dir, self.code, pending)
             try:
                 command = self.request("finalize",recordings=artifacts)
                 self.write_events(command)

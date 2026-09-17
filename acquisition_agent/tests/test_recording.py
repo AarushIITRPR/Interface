@@ -1,4 +1,6 @@
 import csv
+import hashlib
+import json
 import tempfile
 import time
 import unittest
@@ -6,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from meridian_agent.agent import ClockEstimator, clock_offset_ms, unique_session_dir
+from meridian_agent.agent import ClockEstimator, clock_offset_ms, finalize_manifest, unique_session_dir
 from meridian_agent.sensors import FrameRecorder, SimulatedSensor, audio_level_pct
 
 
@@ -135,3 +137,46 @@ def _epoch(value):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManifestFinalizeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "face").mkdir()
+        (self.root / "face" / "face.mkv").write_bytes(b"video bytes")
+        (self.root / "gsr").mkdir()
+        (self.root / "gsr" / "gsr.csv").write_bytes(b"host_epoch_ns,conductance_us\n")
+        self.recordings = [
+            {"sensorId": "face", "relativePath": "face/face.mkv", "sha256": "pending"},
+            {"sensorId": "gsr", "relativePath": "gsr/gsr.csv", "sha256": "pending"},
+        ]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_a_manifest_exists_before_any_file_is_hashed(self):
+        def interrupted(path):
+            raise KeyboardInterrupt("agent closed while hashing")
+        with self.assertRaises(KeyboardInterrupt):
+            finalize_manifest(self.root, "0001TEST", self.recordings, hasher=interrupted)
+        manifest = json.loads((self.root / "manifest.json").read_text())
+        self.assertEqual(manifest["checksums"], "pending")
+        self.assertEqual([item["relativePath"] for item in manifest["recordings"]], ["face/face.mkv", "gsr/gsr.csv"])
+        self.assertFalse((self.root / "manifest.json.tmp").exists(), "the atomic write leaves no temporary file")
+
+    def test_the_finished_manifest_carries_real_checksums(self):
+        completed = finalize_manifest(self.root, "0001TEST", self.recordings)
+        manifest = json.loads((self.root / "manifest.json").read_text())
+        self.assertEqual(manifest["checksums"], "complete")
+        expected = hashlib.sha256(b"video bytes").hexdigest()
+        self.assertEqual(manifest["recordings"][0]["sha256"], expected)
+        self.assertEqual(completed[0]["sha256"], expected)
+        self.assertNotIn("pending", json.dumps(manifest["recordings"]))
+
+    def test_an_interrupted_manifest_can_be_completed_later(self):
+        with self.assertRaises(KeyboardInterrupt):
+            finalize_manifest(self.root, "0001TEST", self.recordings, hasher=lambda path: (_ for _ in ()).throw(KeyboardInterrupt()))
+        pending = json.loads((self.root / "manifest.json").read_text())["recordings"]
+        finalize_manifest(self.root, "0001TEST", pending)
+        self.assertEqual(json.loads((self.root / "manifest.json").read_text())["checksums"], "complete")

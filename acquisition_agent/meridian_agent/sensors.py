@@ -38,6 +38,9 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+CHECKSUM_PENDING = "pending"
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -243,7 +246,8 @@ class Sensor:
                     pass
             return result
 
-    def artifact(self) -> RecordingArtifact | None:
+    def artifact(self, hash_file: bool = True) -> RecordingArtifact | None:
+        """The manifest entry for this stream. `hash_file=False` defers the checksum, which takes minutes for video."""
         if not self.path or not self.path.exists():
             return None
         report = self._final_report or self.report()
@@ -262,7 +266,7 @@ class Sensor:
             format=self.path.suffix.lstrip(".") or "binary",
             sampleCount=persisted,
             bytes=self.path.stat().st_size,
-            sha256=sha256_file(self.path),
+            sha256=sha256_file(self.path) if hash_file else CHECKSUM_PENDING,
             startedAt=self.started_at,
             endedAt=self.ended_at or iso_now(),
             quality=quality,
