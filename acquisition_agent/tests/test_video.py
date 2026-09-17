@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from meridian_agent.rppg import LiveRppg, pos_heart_rate
-from meridian_agent.sensors import FrameRecorder, VIDEO_CODECS, Y16Writer, gb_per_hour, lock_camera_settings, to_y16
+from meridian_agent.sensors import FfmpegWriter, FrameRecorder, VIDEO_CODECS, Y16Writer, ffmpeg_available, gb_per_hour, lock_camera_settings, to_y16
 
 
 class FakeCapture:
@@ -134,3 +134,46 @@ class VideoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(ffmpeg_available(), "ffmpeg is not installed")
+class FfmpegWriterTests(unittest.TestCase):
+    def test_frames_come_back_bit_for_bit_and_the_log_is_cleaned_up(self):
+        rng = np.random.default_rng(1)
+        frames = [rng.integers(0, 256, (48, 64, 3), dtype=np.uint8) for _ in range(5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "face.mkv"
+            writer = FfmpegWriter(str(path), 25.0, (64, 48))
+            for frame in frames:
+                writer.write(frame)
+            writer.release()
+            self.assertFalse((Path(tmp) / "face.ffmpeg.log").exists(), "a clean run leaves no log behind")
+            capture = cv2.VideoCapture(str(path))
+            decoded = []
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                decoded.append(frame)
+            self.assertEqual(len(decoded), 5)
+            for original, back in zip(frames, decoded):
+                np.testing.assert_array_equal(original, back)
+
+    def test_a_frame_of_the_wrong_size_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = FfmpegWriter(str(Path(tmp) / "face.mkv"), 25.0, (64, 48))
+            with self.assertRaises(ValueError):
+                writer.write(np.zeros((48, 32, 3), dtype=np.uint8))
+            writer.release()
+
+    def test_a_recorder_keeps_the_writer_error_instead_of_raising(self):
+        class Broken:
+            def write(self, frame):
+                raise BrokenPipeError("encoder went away")
+            def release(self):
+                raise RuntimeError("ffmpeg exited with code 1")
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = FrameRecorder(Path(tmp) / "face.mkv", 25.0, time.monotonic(), lambda *args: Broken())
+            recorder.submit(np.zeros((4, 4, 3), dtype=np.uint8), time.time_ns(), time.monotonic())
+            recorder.close()
+            self.assertIn("encoder went away", recorder.error)

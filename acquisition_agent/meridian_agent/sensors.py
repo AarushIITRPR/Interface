@@ -1059,6 +1059,67 @@ def gb_per_hour(width: int, height: int, fps: float, bytes_per_pixel: float, sha
     return width * height * bytes_per_pixel * fps * share * 3600 / 1e9
 
 
+FFMPEG_THREADS = max(1, min(8, os.cpu_count() or 1))
+
+
+def ffmpeg_available() -> bool:
+    import shutil
+    return shutil.which("ffmpeg") is not None
+
+
+class FfmpegWriter:
+    """Lossless FFV1 through an ffmpeg process, using FFV1's multithreaded (level 3, sliced) mode.
+
+    OpenCV's FFV1 writer encodes on one core. On the lab machine it managed 74.7 ms per 1080p frame - 13.3 fps -
+    which is why session 0101JUMR's face camera landed at 14.3 fps with 43% of its frames dropped. The same frames
+    through this writer take 18.4 ms (54.5 fps), bit-for-bit lossless and slightly smaller, because no alpha plane
+    is coded. OpenCV's files probe as `bgra`; these probe as `bgr0`, where the 0 is padding, not stored data.
+    """
+
+    def __init__(self, path: str, fps: float, size: tuple[int, int]):
+        import shutil
+        import subprocess
+        executable = shutil.which("ffmpeg")
+        if not executable:
+            raise FileNotFoundError("ffmpeg is not installed")
+        self.path = Path(path)
+        self.size = size
+        self.log_path = self.path.with_name(f"{self.path.stem}.ffmpeg.log")
+        self._log = self.log_path.open("w", encoding="utf-8")
+        width, height = size
+        command = [
+            executable, "-hide_banner", "-nostats", "-loglevel", "error", "-y",
+            "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", f"{fps:g}", "-i", "-",
+            # Level 3 is FFV1's sliced mode, the only one that encodes on several cores. Every frame is a keyframe
+            # and every slice carries a CRC, so a damaged archive shows where, instead of silently decoding wrong.
+            "-c:v", "ffv1", "-level", "3", "-g", "1", "-slices", "16", "-slicecrc", "1",
+            "-threads", str(FFMPEG_THREADS), "-pix_fmt", "gbrp", str(self.path),
+        ]
+        self._process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=self._log)
+
+    def write(self, frame) -> None:
+        import numpy as np
+        array = np.asarray(frame)
+        if array.ndim != 3 or array.shape[2] < 3 or (array.shape[1], array.shape[0]) != self.size:
+            raise ValueError(f"Frame {array.shape} does not match the {self.size[0]}x{self.size[1]} recording")
+        if self._process.poll() is not None:
+            raise RuntimeError(f"ffmpeg stopped with code {self._process.returncode}; see {self.log_path.name}")
+        # A full pipe blocks here, which is the backpressure FrameRecorder's queue is sized to absorb.
+        self._process.stdin.write(np.ascontiguousarray(array[:, :, :3], dtype=np.uint8).tobytes())
+
+    def release(self) -> None:
+        try:
+            if self._process.stdin and not self._process.stdin.closed:
+                self._process.stdin.close()
+            code = self._process.wait(timeout=120)
+        finally:
+            self._log.close()
+        if code == 0 and self.log_path.stat().st_size == 0:
+            self.log_path.unlink()
+        elif code != 0:
+            raise RuntimeError(f"ffmpeg exited with code {code}; see {self.log_path.name}")
+
+
 class Y16Writer:
     """Lossless 16-bit thermal frames: little-endian uint16 concatenated, described by a JSON sidecar."""
 
@@ -1202,7 +1263,12 @@ class FrameRecorder:
             self.error = f"{type(exc).__name__}: {str(exc)[:120]}"
         finally:
             if writer is not None:
-                writer.release()
+                # Closing an encoder can fail on its own (ffmpeg exits non-zero); keep the first error, never raise
+                # out of the writer thread, where nobody would see it.
+                try:
+                    writer.release()
+                except Exception as exc:
+                    self.error = self.error or f"{type(exc).__name__}: {str(exc)[:120]}"
 
 
 class CameraSensor(Sensor):
@@ -1216,6 +1282,7 @@ class CameraSensor(Sensor):
         codec = VIDEO_CODECS.get(self.options.codec, VIDEO_CODECS["ffv1"])
         self.path = session_dir / sensor_id / (f"{sensor_id}_y16.raw" if self.radiometric else f"{sensor_id}{codec[1]}")
         self.estimated_gb_per_hour = 18.0
+        self.writer_backend = "y16-raw" if self.radiometric else ("ffmpeg-ffv1-sliced" if self.options.codec == "ffv1" and ffmpeg_available() else f"opencv-{self.options.codec}")
         self._preview_lock = threading.Lock()
         self._preview_frame: bytes | None = None
 
@@ -1237,6 +1304,10 @@ class CameraSensor(Sensor):
         def open_writer(path: str, fps: float, size: tuple[int,int]):
             if self.radiometric:
                 return Y16Writer(path, fps, size, options.thermal_units)
+            if options.codec == "ffv1" and ffmpeg_available():
+                self.writer_backend = "ffmpeg-ffv1-sliced"
+                return FfmpegWriter(path, fps, size)
+            self.writer_backend = f"opencv-{options.codec}"
             writer = cv2.VideoWriter(path,cv2.VideoWriter_fourcc(*fourcc),fps,size)
             return writer if writer.isOpened() else None
 
@@ -1265,7 +1336,7 @@ class CameraSensor(Sensor):
             fps = requested_fps if 1 <= requested_fps <= 240 else 30.0
             self.estimated_gb_per_hour = gb_per_hour(width, height, fps, 2 if self.radiometric else 3, 1.0 if self.radiometric else share)
             self.set_state("connected",f"{width}x{height} at {fps:.1f} fps, {'Y16 raw' if self.radiometric else options.codec}")
-            settings: dict = {"sensor": self.sensor_id, "codec": "y16-raw" if self.radiometric else options.codec, "width": width, "height": height,
+            settings: dict = {"sensor": self.sensor_id, "codec": "y16-raw" if self.radiometric else options.codec, "writer": self.writer_backend, "width": width, "height": height,
                               "fps": fps, "requested": {"width": options.width, "height": options.height, "fps": options.fps}, "lock": None}
             started = time.monotonic()
             lock_pending = options.lock_settings and not self.radiometric and not file_source
