@@ -584,7 +584,7 @@ function AnnotationScreen({step,src,act,audioEnabled,paused}:{step:SubjectStep;s
     {/* Registered protocol stimuli intentionally omit captions, which would alter the research material. */}
     {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
     <video ref={video} className="annotation-video" src={mediaUrl(src)} autoPlay playsInline muted={!audioEnabled} onPlaying={onPlaying} onEnded={onEnded} />
-    <div ref={grid} className="annotation-grid" role="slider" tabIndex={0} aria-label="Valence and arousal" aria-valuetext={`valence ${marker.valence.toFixed(1)}, arousal ${marker.arousal.toFixed(1)}`} onPointerDown={fromPointer} onPointerMove={fromPointer}>
+    <div ref={grid} className="annotation-grid" role="slider" tabIndex={0} aria-label="Valence and arousal" aria-valuemin={-1} aria-valuemax={1} aria-valuenow={Number(marker.valence.toFixed(2))} aria-valuetext={`valence ${marker.valence.toFixed(1)}, arousal ${marker.arousal.toFixed(1)}`} onPointerDown={fromPointer} onPointerMove={fromPointer}>
       <span className="axis top">Excited</span><span className="axis bottom">Calm</span><span className="axis left">Unpleasant</span><span className="axis right">Pleasant</span>
       <i style={{left:`${(marker.valence+1)*50}%`,top:`${(1-marker.arousal)*50}%`}} />
     </div>
