@@ -79,49 +79,77 @@ test("list assignment is a Latin square over emotion order and task order", () =
   }
 });
 
-test("recall scoring separates hits, near misses, intrusions and repeats", () => {
-  const list = tasks.WORD_LISTS[0];
-  const score = tasks.scoreRecall(list, "Apples, chain; dog\nRIVER river   bicycles");
-  assert.deepEqual(score.hits, ["apple", "river", "bicycle"]);
-  assert.deepEqual(score.near, [{ typed: "chain", word: "chair" }]);
-  assert.deepEqual(score.intrusions, ["dog"]);
-  assert.equal(score.repeats, 1);
-  assert.equal(score.hitsLenient, 4);
-  assert.equal(score.total, 10);
-  assert.equal(score.misses.length, 7);
-  // Short tokens are never stretched into a near miss: too many four-letter words are one letter apart.
-  assert.deepEqual(tasks.scoreRecall(list, "aple").near, []);
-  assert.equal(tasks.scoreRecall(list, "").hits.length, 0);
+test("look-alikes are aligned with the lists, unique, and never a studied word", () => {
+  assert.equal(tasks.WORD_LURES.length, tasks.WORD_LISTS.length);
+  for (const [index, lures] of tasks.WORD_LURES.entries()) {
+    assert.equal(lures.length, tasks.WORD_LISTS[index].length, `list ${index + 1} has one look-alike per word`);
+  }
+  const lures = tasks.WORD_LURES.flat();
+  const studied = new Set(tasks.WORD_LISTS.flat());
+  assert.equal(new Set(lures).size, lures.length, "a look-alike is used twice");
+  assert.deepEqual(lures.filter((word) => studied.has(word)), [], "a look-alike is a studied word somewhere");
+  const colours = tasks.TASK_COLOURS.map((colour) => colour.name.toLowerCase());
+  assert.deepEqual(lures.filter((word) => colours.includes(word)), []);
+  assert.ok(lures.every((word) => /^[a-z]{3,9}$/.test(word)));
+  // The pair from the request.
+  assert.equal(tasks.WORD_LURES[0][tasks.WORD_LISTS[0].indexOf("bicycle")], "cycle");
 });
 
-test("delayed recall reports retention and a delay measured on the server clock", () => {
-  const list = tasks.WORD_LISTS[0];
-  const start = Date.parse("2026-09-17T10:00:00Z");
-  const immediate = tasks.wordListResult({
-    phase: "immediate", list, listIndex: 0,
-    raw: { response: "apple river chair music", studyMs: 30000, recallMs: 40000 },
-    receivedAt: start + 100_000, stepStartedAt: start,
-  });
-  assert.equal(immediate.eventType, "wordlist_recall");
-  assert.equal(immediate.metadata.hits, 4);
-  // Study ended 40 s before the submission arrived.
-  assert.equal(immediate.metadata.studyEndedAt, new Date(start + 60_000).toISOString());
+test("the recognition test mixes ten studied words and ten look-alikes, reproducibly, without long runs", () => {
+  for (let listIndex = 0; listIndex < tasks.WORD_LISTS.length; listIndex++) {
+    for (let seed = 1; seed <= 60; seed++) {
+      const items = tasks.recognitionItemsFor(listIndex, seed);
+      assert.equal(items.length, 20);
+      assert.deepEqual(items.filter((item) => item.type === "old").map((item) => item.word).sort(), [...tasks.WORD_LISTS[listIndex]].sort());
+      assert.deepEqual(items.filter((item) => item.type === "lure").map((item) => item.word).sort(), [...tasks.WORD_LURES[listIndex]].sort());
+      let run = 0;
+      items.forEach((item, i) => { run = i > 0 && item.type === items[i - 1].type ? run + 1 : 1; assert.ok(run <= tasks.WORD_LIST.maxRun, `run of ${run} for seed ${seed}`); });
+      assert.deepEqual(tasks.recognitionItemsFor(listIndex, seed), items, "same seed, same order");
+    }
+  }
+  assert.notEqual(tasks.recognitionSeed("0001ABCD"), tasks.recognitionSeed("0001ABCE"));
+  assert.equal(tasks.recognitionSeed("0001ABCD"), tasks.recognitionSeed("0001ABCD"));
+});
 
-  const delayed = tasks.wordListResult({
-    phase: "delayed", list, listIndex: 0,
-    raw: { response: "apple river" },
-    receivedAt: start + 720_000, stepStartedAt: start + 660_000,
-    immediate: immediate.metadata,
-  });
-  assert.equal(delayed.eventType, "wordlist_delayed_recall");
-  assert.equal(delayed.metadata.hits, 2);
-  assert.equal(delayed.metadata.retentionPct, 50);
-  // From the end of study to the start of the delayed step, not to when typing finished.
-  assert.equal(delayed.metadata.delaySec, 600);
-  assert.equal(delayed.metadata.recallSec, 60);
+test("recognition scoring counts each shown word once and ignores anything else", () => {
+  const items = tasks.recognitionItemsFor(0, 42);
+  const studied = new Set(tasks.WORD_LISTS[0]);
+  // Yes to 8 studied words and 2 look-alikes; No to the rest.
+  const oldWords = items.filter((item) => item.type === "old").map((item) => item.word);
+  const lureWords = items.filter((item) => item.type === "lure").map((item) => item.word);
+  const yes = new Set([...oldWords.slice(0, 8), ...lureWords.slice(0, 2)]);
+  const answers = items.map((item) => ({ word: item.word, answer: yes.has(item.word) ? "yes" : "no", rtMs: 900 }));
+  answers.push({ word: oldWords[9], answer: "yes", rtMs: 100 });       // a second answer to a word: ignored
+  answers.push({ word: "dragon", answer: "yes", rtMs: 100 });          // not in this test: ignored
+  answers.push({ word: oldWords[0], answer: "maybe", rtMs: 100 });     // not a valid answer: ignored
+  const score = tasks.scoreRecognition(items, answers);
+  assert.deepEqual([score.hits, score.misses, score.falseAlarms, score.correctRejections], [8, 2, 2, 8]);
+  assert.equal(score.answered, 20);
+  assert.equal(score.hitRate, 0.8);
+  assert.equal(score.falseAlarmRate, 0.2);
+  // Log-linear corrected rates: H = 8.5/11, F = 2.5/11.
+  assert.equal(score.dPrime, 1.5);
+  assert.equal(score.criterion, 0);
+  assert.equal(score.meanRtMs, 900);
+  const bicycle = score.trialData.find((trial) => trial.word === "cycle");
+  assert.equal(bicycle.type, "lure");
+  assert.ok(score.trialData.every((trial) => trial.type === (studied.has(trial.word) ? "old" : "lure")));
+  // Nothing answered: counts are zero and rates stay finite.
+  const empty = tasks.scoreRecognition(items, "not a list");
+  assert.equal(empty.answered, 0);
+  assert.ok(Number.isFinite(empty.dPrime));
+});
 
-  // A delayed recall with nothing before it reports no delay rather than inventing one.
-  const orphan = tasks.wordListResult({ phase: "delayed", list, listIndex: 0, raw: { response: "apple" }, receivedAt: start, stepStartedAt: start });
-  assert.equal(orphan.metadata.delaySec, null);
-  assert.equal(orphan.metadata.retentionPct, null);
+test("the recognition result is scored against the session's own list and order", () => {
+  const seed = tasks.recognitionSeed("0001TEST");
+  const items = tasks.recognitionItemsFor(2, seed);
+  const answers = items.map((item) => ({ word: item.word, answer: item.type === "old" ? "yes" : "no", rtMs: 700 }));
+  const result = tasks.wordListRecognitionResult({ listIndex: 2, seed, raw: { answers, studyMs: 20000 } });
+  assert.equal(result.eventType, "wordlist_recognition");
+  assert.equal(result.metadata.hits, 10);
+  assert.equal(result.metadata.falseAlarms, 0);
+  assert.equal(result.metadata.studyMs, 20000);
+  assert.deepEqual(result.metadata.words, [...tasks.WORD_LISTS[2]]);
+  assert.match(result.label, /10\/10 recognised, 0 look-alikes accepted/);
+  assert.equal(tasks.WORD_LIST.studySec, 20);
 });

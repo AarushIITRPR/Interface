@@ -7,7 +7,7 @@ export const PROTOCOL_VERSION = "v9";
 export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"] as const;
 export type Emotion = (typeof EMOTIONS)[number];
 export type BufferKind = "stroop" | "nback" | "conversation";
-export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "questionnaire" | "annotation" | "wordlist" | "wordlist_delayed" | "end";
+export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "questionnaire" | "annotation" | "wordlist" | "end";
 
 /** Optional protocol blocks, chosen per session during setup and fixed once recording starts. */
 export type ProtocolOptions = {
@@ -16,7 +16,7 @@ export type ProtocolOptions = {
   extendedExertion: boolean;
   neutralClip: boolean;
   annotationReplay: boolean;
-  /** Word list study with immediate recall after Part 3, and delayed recall after the body scan. */
+  /** Word list study and yes/no recognition test after Part 3. */
   wordList?: boolean;
 };
 export type SessionStatus = "setup" | "running" | "paused" | "complete" | "aborted";
@@ -309,8 +309,10 @@ export type SubjectStep = Pick<ProtocolStep,
   "id" | "index" | "type" | "subjectPrompt" | "durationSec" | "safety" | "fixation" | "advance" | "questionnaireId" | "breathsPerMin"
 > & {
   variant: "box_breathing" | "breath_hold" | "paced_breathing" | null;
-  /** The list to study. Sent for the study step only: the delayed recall step must not carry it. */
+  /** The list to study, for the word list step. */
   words?: string[];
+  /** The recognition test: studied words and look-alikes in test order, deliberately without saying which is which. */
+  testWords?: string[];
 };
 
 export type SubjectSnapshot = {

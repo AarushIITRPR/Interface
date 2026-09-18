@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { QUESTIONNAIRES } from "@/lib/questionnaires";
 import { startTicker } from "@/lib/ticker";
-import { BREATH_HOLD_MAX_SEC, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, WORD_LIST, WORD_LIST_EVENTS, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
+import { BREATH_HOLD_MAX_SEC, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, WORD_LIST, WORD_LIST_EVENT, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
 // Step timers use the server clock so a subject computer with a skewed clock cannot shorten or stretch timed steps.
@@ -235,7 +235,7 @@ function subjectPresentation(step:SubjectStep) {
   if(step.type==="sam") return {label:"Short response",title:<>Choose what<br/><i>fits best.</i></>,description:"Choose the response that feels closest."};
   if(step.type==="stroop") return {label:"Attention task",title:<>Respond<br/><i>accurately.</i></>,description:"Follow the instruction shown on the screen."};
   if(step.type==="nback") return {label:"Memory task",title:<>Stay with<br/><i>the sequence.</i></>,description:"Follow the instruction shown on the screen."};
-  if(step.type==="wordlist"||step.type==="wordlist_delayed") return {label:"Memory task",title:<>Remember<br/><i>the words.</i></>,description:"Follow the instruction shown on the screen."};
+  if(step.type==="wordlist") return {label:"Memory task",title:<>Remember<br/><i>the words.</i></>,description:"Follow the instruction shown on the screen."};
   if(step.type==="conversation") return {label:"Speaking task",title:<>Speak<br/><i>naturally.</i></>,description:"Speak at a comfortable pace."};
   if(step.type==="washout"||step.fixation) return {label:"Baseline task",title:<>Keep your eyes<br/><i>at the centre.</i></>,description:"Stay with the centre of the screen."};
   if(step.type==="bodyscan") return {label:"Rest task",title:<>Settle<br/><i>into stillness.</i></>,description:"Stay still and follow the instruction."};
@@ -251,7 +251,6 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
   if (step.type === "stroop") return <StroopTask step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "wordlist") return <WordListTask step={step} act={act} paused={snapshot.status !== "running"} />;
-  if (step.type === "wordlist_delayed") return <DelayedRecallTask step={step} act={act} />;
   if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
   if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
@@ -400,24 +399,18 @@ function StroopTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<
   return <section className="task-screen"><div className="stroop-word" style={{color:showing?trial.hex:undefined}}>{showing?trial.word.toUpperCase():"+"}</div><div className="colour-buttons">{TASK_COLOURS.map(colour=><button key={colour.name} style={{background:colour.hex}} disabled={!showing||paused} onClick={event=>record(colour.name,event.timeStamp)}>{colour.name}</button>)}</div></section>;
 }
 
-/**
- * The recall box. Autocorrect and spellcheck are off: a browser that "fixes" a typo would silently turn a near miss
- * into a hit, or a hit into another word. It shows no example words, since any word shown here could be recalled.
- */
-function RecallBox({prompt,onSubmit}:{prompt:string;onSubmit:(text:string)=>void}) {
-  const [text,setText]=useState("");
-  return <section className="subject-center wordlist-recall"><h1>{prompt}</h1>
-    <textarea aria-label="Words you remember" value={text} onChange={event=>setText(event.target.value)} spellCheck={false} autoCorrect="off" autoCapitalize="none" autoComplete="off" placeholder="Type each word you remember, separated by spaces or commas." />
-    <button className="paper-button" onClick={()=>onSubmit(text)}>{text.trim()?"Done":"I cannot remember any"}</button>
-  </section>;
-}
+type RecognitionAnswer={word:string;answer:"yes"|"no";rtMs:number|null};
 
-/** Word list: study the whole list for a fixed time, then free recall. The server scores what was typed. */
+/**
+ * Word list: study all ten words for a fixed time, then a yes/no recognition test, one word at a time. The test mixes
+ * the studied words with look-alikes and the display is never told which is which; the server scores the answers.
+ */
 function WordListTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
-  const words=step.words??[];
-  const [stage,setStage]=useState<"intro"|"study"|"recall"|"sent">("intro");
+  const words=step.words??[]; const testWords=useMemo(()=>step.testWords??[],[step.testWords]);
+  const [stage,setStage]=useState<"intro"|"study"|"instructions"|"test"|"sent">("intro");
   const [remainingMs,setRemainingMs]=useState<number>(WORD_LIST.studySec*1000);
-  const studyEnded=useRef(0); const shownMs=useRef(0);
+  const [index,setIndex]=useState(0); const [showing,setShowing]=useState(false);
+  const shownMs=useRef(0); const onset=useRef(0); const answers=useRef<RecognitionAnswer[]>([]); const done=useRef(false);
   useEffect(()=>{
     // Study time only runs while the words are visible: a pause hides them and stops the clock.
     if(stage!=="study"||paused)return;
@@ -425,30 +418,48 @@ function WordListTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Recor
     const id=window.setInterval(()=>{
       const now=performance.now(); shownMs.current+=now-last; last=now;
       const left=WORD_LIST.studySec*1000-shownMs.current;
-      if(left<=0){window.clearInterval(id);studyEnded.current=now;setRemainingMs(0);setStage("recall");return;}
+      if(left<=0){window.clearInterval(id);setRemainingMs(0);setStage("instructions");return;}
       setRemainingMs(left);
     },100);
     return()=>window.clearInterval(id);
   },[stage,paused]);
-  if(!words.length)return <CenteredInstruction text="Please wait." />;
-  if(stage==="intro")return <section className="subject-center"><h1>{step.subjectPrompt}</h1><p className="wordlist-intro">You will see {words.length} words for {WORD_LIST.studySec} seconds. Afterwards, type as many as you can remember, in any order. You will be asked about them again later.</p><button className="paper-button" onClick={()=>setStage("study")}>Begin</button></section>;
+  useEffect(()=>{
+    // A short blank between words, then the next word and its response clock.
+    if(stage!=="test"||paused||showing)return;
+    const id=window.setTimeout(()=>{onset.current=performance.now();setShowing(true);},WORD_LIST.gapMs);
+    return()=>window.clearTimeout(id);
+  },[stage,paused,showing,index]);
+  // Resuming from a pause restarts the response clock for the visible word.
+  useEffect(()=>{if(!paused&&showing)onset.current=performance.now();},[paused,showing]);
+  const answer=useCallback((value:"yes"|"no",eventTime:number)=>{
+    if(stage!=="test"||!showing||paused||done.current)return;
+    answers.current.push({word:testWords[index],answer:value,rtMs:Math.round(eventTime-onset.current)});
+    setShowing(false);
+    if(index+1<testWords.length){setIndex(index+1);return;}
+    done.current=true; setStage("sent");
+    const metadata={answers:answers.current,studyMs:Math.round(shownMs.current)};
+    sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:WORD_LIST_EVENT,label:"Word list recognition completed",metadata}));
+  },[act,index,paused,showing,stage,step.id,testWords]);
+  useEffect(()=>{
+    if(stage!=="test")return;
+    const key=(event:KeyboardEvent)=>{const k=event.key.toLowerCase();if(k==="y")answer("yes",performance.now());if(k==="n")answer("no",performance.now());};
+    window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);
+  },[answer,stage]);
+  if(!words.length||!testWords.length)return <CenteredInstruction text="Please wait." />;
+  if(stage==="intro")return <section className="subject-center"><h1>{step.subjectPrompt}</h1><p className="wordlist-intro">You will see {words.length} words for {WORD_LIST.studySec} seconds. Try to remember them.</p><button className="paper-button" onClick={()=>setStage("study")}>Begin</button></section>;
   if(stage==="study")return <section className="task-screen wordlist-study"><ol className="wordlist-words" aria-label="Words to remember">{paused?null:words.map(word=><li key={word}>{word}</li>)}</ol><time>{paused?"Paused":`${Math.ceil(remainingMs/1000)} s`}</time></section>;
+  if(stage==="instructions")return <section className="subject-center"><h1>Was the word on the list?</h1><p className="wordlist-intro">Words will appear one at a time. Some are from the list and some only look or mean nearly the same. Answer <strong>Yes</strong> only if it is exactly a word you saw. You can also press Y or N.</p><button className="paper-button" onClick={()=>setStage("test")}>Start</button></section>;
   if(stage==="sent")return <section className="subject-center"><h1>Thank you.</h1></section>;
-  return <RecallBox prompt="Type the words you remember." onSubmit={text=>{
-    setStage("sent");
-    const metadata={response:text,studyMs:Math.round(shownMs.current),recallMs:Math.round(performance.now()-studyEnded.current)};
-    sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:WORD_LIST_EVENTS.immediate,label:"Word list recalled",metadata}));
-  }} />;
-}
-
-/** Delayed recall of the same list. The list is never sent to this step. */
-function DelayedRecallTask({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [sent,setSent]=useState(false);
-  if(sent)return <section className="subject-center"><h1>Thank you.</h1></section>;
-  return <RecallBox prompt={step.subjectPrompt} onSubmit={text=>{
-    setSent(true);
-    sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:WORD_LIST_EVENTS.delayed,label:"Delayed recall submitted",metadata:{response:text}}));
-  }} />;
+  const visible=showing&&!paused;
+  return <section className="task-screen wordlist-test">
+    <p className="wordlist-progress">{index+1} of {testWords.length}</p>
+    <div className={`wordlist-probe ${visible?"":"blank"}`} aria-live="polite">{visible?testWords[index]:"+"}</div>
+    {/* The labels are one word so they can be read at a glance; the full meaning stays on the accessible name. */}
+    <div className="wordlist-answers">
+      <button className="paper-button wordlist-answer" aria-label="Yes, it was on the list" disabled={!visible} onClick={event=>answer("yes",event.timeStamp)}>YES</button>
+      <button className="paper-button wordlist-answer" aria-label="No, it was not on the list" disabled={!visible} onClick={event=>answer("no",event.timeStamp)}>NO</button>
+    </div>
+  </section>;
 }
 
 /** N-back with a short practice block (with feedback) and a pre-generated scored block. */

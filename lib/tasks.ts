@@ -177,12 +177,16 @@ function inverseNormal(p: number) {
 export const BREATH_HOLD_MAX_SEC = 60;
 
 export const WORD_LIST = {
-  /** How long the whole list stays on screen before recall. */
-  studySec: 30,
+  /** How long the whole list stays on screen before the recognition test. */
+  studySec: 20,
+  /** Blank screen between test words, so one word's response cannot carry into the next. */
+  gapMs: 300,
+  /** Longest allowed run of studied, or of look-alike, words in the test. */
+  maxRun: 3,
 } as const;
 
 /**
- * Six recall lists of ten concrete, emotionally neutral nouns: one word per semantic category within a list, four to
+ * Six study lists of ten concrete, emotionally neutral nouns: one word per semantic category within a list, four to
  * eight letters, no Stroop colour words, no word shared between lists.
  *
  * List 1 is the list from protocol_console_optimized.html, kept so results stay comparable with anything run on that
@@ -209,125 +213,113 @@ export function wordListIndex(emotionRow: number, taskRow: number): number {
   return (((emotionRow - 1) + (taskRow - 1)) % WORD_LISTS.length + WORD_LISTS.length) % WORD_LISTS.length;
 }
 
-export type RecallScore = {
-  hits: string[];
-  /** Typed words one letter away from a list word, with the word they resemble. Not counted as hits. */
-  near: Array<{ typed: string; word: string }>;
-  intrusions: string[];
-  repeats: number;
-  misses: string[];
-  total: number;
-  hitsLenient: number;
-};
-
-function editDistanceIsOne(a: string, b: string): boolean {
-  if (a === b || Math.abs(a.length - b.length) > 1) return false;
-  let i = 0, j = 0, edits = 0;
-  while (i < a.length && j < b.length) {
-    if (a[i] === b[j]) { i++; j++; continue; }
-    if (++edits > 1) return false;
-    if (a.length > b.length) i++;
-    else if (b.length > a.length) j++;
-    else { i++; j++; }
-  }
-  return edits + (a.length - i) + (b.length - j) === 1;
-}
-
 /**
- * Score free recall against a list.
- *
- * A token is a hit when it matches a list word exactly or with a plural ending. A token one letter away from a list
- * word is a near miss and is kept separate: "chain" is a different word from "chair", and whether it counts belongs to
- * the analyst, not to the scorer. `hitsLenient` adds the near misses for anyone who wants typo-tolerant scoring.
- * The prototype scored exact matches only, so "apples" counted as an intrusion and as a missed "apple" at once.
+ * One look-alike per studied word, in the same order as WORD_LISTS: a near-synonym, a close relative, or a word that
+ * contains it ("bicycle" and "cycle"). Mixed into the recognition test so a Yes has to mean "this exact word", not
+ * "something like it". Several are chosen to be familiar in Indian English (flyover, torch, tabla, sitar, fort).
+ * Hand-picked, not normed.
  */
-export function scoreRecall(list: readonly string[], text: string): RecallScore {
-  const words = list.map((word) => word.toLowerCase());
-  const tokens = (text || "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
-  const hitIndexes = new Set<number>();
-  const nearIndexes = new Set<number>();
-  const near: RecallScore["near"] = [];
-  const intrusions: string[] = [];
-  let repeats = 0;
-  const plural = (token: string, word: string) => token === `${word}s` || token === `${word}es` || (word.endsWith("s") && token === word.slice(0, -1));
-  for (const token of tokens) {
-    const exact = words.findIndex((word) => word === token || plural(token, word));
-    if (exact >= 0) {
-      if (hitIndexes.has(exact)) repeats += 1; else hitIndexes.add(exact);
-      continue;
-    }
-    const close = token.length >= 5 ? words.findIndex((word) => editDistanceIsOne(token, word)) : -1;
-    if (close >= 0) {
-      near.push({ typed: token, word: words[close] });
-      nearIndexes.add(close);
-      continue;
-    }
-    intrusions.push(token);
+export const WORD_LURES: readonly (readonly string[])[] = [
+  ["pear", "stream", "seat", "song", "yard", "pen", "sea", "lantern", "cycle", "pane"],
+  ["loaf", "woods", "counter", "penny", "watch", "bunny", "flask", "mist", "mallet", "coat"],
+  ["lime", "flyover", "rug", "teapot", "cushion", "lamb", "glass", "fiddle", "hamper", "globe"],
+  ["butter", "canyon", "bench", "missile", "quilt", "pony", "purse", "tabla", "seal", "comb"],
+  ["radish", "dune", "torch", "plate", "drape", "hawk", "map", "sitar", "harbour", "pouch"],
+  ["garlic", "hill", "footstool", "ladle", "tortoise", "hat", "keyboard", "fort", "glider", "stone"],
+];
+
+export const WORD_LIST_EVENT = "wordlist_recognition";
+
+export type RecognitionItem = { index: number; word: string; type: "old" | "lure" };
+
+/** A stable seed from a session code, so a reloaded display shows the test in the same order. */
+export function recognitionSeed(code: string): number {
+  let hash = 0x811c9dc5;
+  for (const character of code) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  const lenient = new Set([...hitIndexes, ...nearIndexes]);
-  return {
-    hits: words.filter((_, index) => hitIndexes.has(index)),
-    near,
-    intrusions,
-    repeats,
-    misses: words.filter((_, index) => !hitIndexes.has(index)),
-    total: words.length,
-    hitsLenient: lenient.size,
-  };
+  return hash >>> 0;
 }
 
-export const WORD_LIST_EVENTS = { immediate: "wordlist_recall", delayed: "wordlist_delayed_recall" } as const;
+/** The ten studied words and their ten look-alikes, shuffled with no long run of either kind. */
+export function recognitionTrials(list: readonly string[], lures: readonly string[], random: Random, maxRun: number = WORD_LIST.maxRun): RecognitionItem[] {
+  const kinds = [...list.map(() => true), ...lures.map(() => false)];
+  let order = shuffle(kinds, random);
+  for (let attempt = 0; attempt < 1000 && longestRun(order) > maxRun; attempt++) order = shuffle(kinds, random);
+  const olds = shuffle([...list], random);
+  const news = shuffle([...lures], random);
+  return order.map((isOld, index) => ({ index, word: (isOld ? olds : news).shift() as string, type: isOld ? "old" : "lure" }));
+}
 
-const boundedMs = (value: unknown, max: number) => {
+/** The test a session shows and is scored against: always built the same way, from its list and its seed. */
+export function recognitionItemsFor(listIndex: number, seed: number): RecognitionItem[] {
+  return recognitionTrials(WORD_LISTS[listIndex], WORD_LURES[listIndex], seededRandom(seed));
+}
+
+export type RecognitionAnswer = { word: string; answer: "yes" | "no"; rtMs: number | null };
+export type RecognitionTrial = { i: number; word: string; type: "old" | "lure"; answer: "yes" | "no" | null; correct: boolean | null; rtMs: number | null };
+
+const bounded = (value: unknown, max: number) => {
   const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, Math.min(max, Math.round(number))) : 0;
+  return value === null || value === undefined || !Number.isFinite(number) ? null : Math.max(0, Math.min(max, Math.round(number)));
 };
-const tenths = (value: number) => Math.round(value * 10) / 10;
 
 /**
- * The event recorded when a participant submits a recall, scored on the server.
+ * Score a recognition test against the items that were shown.
  *
- * The subject display sends only what was typed and two durations it measured with its own monotonic clock. The
- * study end time is placed on the server clock as `receivedAt - recallMs`, so the study-to-test delay never depends
- * on the display's wall clock. Delay runs from the end of study to the start of the delayed step: how long the
- * participant then took to type is reported separately and does not stretch the retention interval.
+ * Only words from this test count, and only the first answer to each; anything else the display sends is ignored.
+ * d' and the criterion c use the log-linear correction summarizeNBack applies, so perfect scores stay finite.
  */
-export function wordListResult(input: {
-  phase: "immediate" | "delayed";
-  list: readonly string[];
-  listIndex: number;
-  raw: Record<string, unknown>;
-  receivedAt: number;
-  stepStartedAt: number;
-  /** Metadata of the latest immediate recall, when scoring a delayed one. */
-  immediate?: Record<string, unknown>;
-}): { eventType: string; label: string; metadata: Record<string, unknown> } {
-  const response = String(input.raw.response ?? "").slice(0, 2000);
-  const score = scoreRecall(input.list, response);
-  const common = {
-    phase: input.phase, listIndex: input.listIndex, words: [...input.list], response,
-    hits: score.hits.length, hitsLenient: score.hitsLenient, intrusions: score.intrusions.length, repeats: score.repeats,
-    total: score.total, recalled: score.hits, near: score.near, intrusionWords: score.intrusions, misses: score.misses,
-    recallSec: tenths((input.receivedAt - input.stepStartedAt) / 1000),
-  };
-  if (input.phase === "immediate") {
-    const recallMs = boundedMs(input.raw.recallMs, 600_000);
-    return {
-      eventType: WORD_LIST_EVENTS.immediate,
-      label: `Word list recalled: ${score.hits.length}/${score.total}`,
-      metadata: { ...common, studyMs: boundedMs(input.raw.studyMs, 120_000), recallMs, studyEndedAt: new Date(input.receivedAt - recallMs).toISOString() },
-    };
+export function scoreRecognition(items: readonly RecognitionItem[], answers: unknown) {
+  const byWord = new Map<string, RecognitionAnswer>();
+  for (const raw of Array.isArray(answers) ? answers : []) {
+    const entry = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    const word = String(entry.word ?? "").toLowerCase();
+    const answer = entry.answer === "yes" || entry.answer === "no" ? entry.answer : null;
+    if (!answer || byWord.has(word) || !items.some((item) => item.word === word)) continue;
+    byWord.set(word, { word, answer, rtMs: bounded(entry.rtMs, 120_000) });
   }
-  const studyEndedAt = typeof input.immediate?.studyEndedAt === "string" ? Date.parse(input.immediate.studyEndedAt) : NaN;
-  const immediateHits = Number(input.immediate?.hits);
+  const trialData: RecognitionTrial[] = items.map((item) => {
+    const given = byWord.get(item.word);
+    const answer = given?.answer ?? null;
+    return { i: item.index, word: item.word, type: item.type, answer, correct: answer === null ? null : (answer === "yes") === (item.type === "old"), rtMs: given?.rtMs ?? null };
+  });
+  const count = (type: "old" | "lure", answer: "yes" | "no") => trialData.filter((trial) => trial.type === type && trial.answer === answer).length;
+  const hits = count("old", "yes");
+  const misses = count("old", "no");
+  const falseAlarms = count("lure", "yes");
+  const correctRejections = count("lure", "no");
+  const hitRate = (hits + 0.5) / (hits + misses + 1);
+  const falseAlarmRate = (falseAlarms + 0.5) / (falseAlarms + correctRejections + 1);
+  const rts = trialData.map((trial) => trial.rtMs).filter((rt): rt is number => rt !== null);
+  // `|| 0` folds a rounded -0 into 0, e.g. a criterion that is exactly neutral.
+  const round2 = (value: number) => Math.round(value * 100) / 100 || 0;
   return {
-    eventType: WORD_LIST_EVENTS.delayed,
-    label: `Delayed recall: ${score.hits.length}/${score.total}`,
-    metadata: {
-      ...common,
-      delaySec: Number.isFinite(studyEndedAt) ? tenths((input.stepStartedAt - studyEndedAt) / 1000) : null,
-      immediateHits: Number.isFinite(immediateHits) ? immediateHits : null,
-      retentionPct: Number.isFinite(immediateHits) && immediateHits > 0 ? Math.round((100 * score.hits.length) / immediateHits) : null,
-    },
+    hits, misses, falseAlarms, correctRejections,
+    answered: hits + misses + falseAlarms + correctRejections,
+    total: items.length,
+    hitRate: round2(hits / Math.max(1, hits + misses)),
+    falseAlarmRate: round2(falseAlarms / Math.max(1, falseAlarms + correctRejections)),
+    dPrime: round2(inverseNormal(hitRate) - inverseNormal(falseAlarmRate)),
+    criterion: round2(-(inverseNormal(hitRate) + inverseNormal(falseAlarmRate)) / 2),
+    meanRtMs: rts.length ? Math.round(rts.reduce((sum, value) => sum + value, 0) / rts.length) : null,
+    trialData,
+  };
+}
+
+/**
+ * The event recorded when a participant finishes the recognition test, scored on the server against the session's
+ * own list and order. The display reports only which word got which answer.
+ */
+export function wordListRecognitionResult(input: { listIndex: number; seed: number; raw: Record<string, unknown> }) {
+  const list = WORD_LISTS[input.listIndex];
+  const lures = WORD_LURES[input.listIndex];
+  const items = recognitionItemsFor(input.listIndex, input.seed);
+  const score = scoreRecognition(items, input.raw.answers);
+  return {
+    eventType: WORD_LIST_EVENT,
+    label: `Word list: ${score.hits}/${list.length} recognised, ${score.falseAlarms} look-alikes accepted`,
+    metadata: { listIndex: input.listIndex, seed: input.seed, words: [...list], lures: [...lures], studyMs: bounded(input.raw.studyMs, 120_000), ...score },
   };
 }

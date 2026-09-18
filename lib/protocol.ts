@@ -1,4 +1,4 @@
-import { WORD_LIST_STEPS, defaultTemplate, renderPlan } from "./protocol-template";
+import { WORD_LIST_STEP, defaultTemplate, renderPlan } from "./protocol-template";
 import { STIMULI, chooseStimuli, stimulusById, type ClipKind } from "./stimuli";
 import { WORD_LISTS, wordListIndex } from "./tasks";
 import { DEFAULT_CLIP_SECONDS, EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolOptions, type ProtocolStep, type ProtocolTemplate } from "./types";
@@ -113,7 +113,7 @@ function createPlan(a: Assignment): ProtocolStep[] {
   }
   const block = (pair:[Emotion,Emotion], kind:BufferKind, phase:string, withGate=true) => { clip(pair[0],phase); rating(pair[0],phase); washout(phase); clip(pair[1],phase); rating(pair[1],phase); buffer(kind,phase); if(withGate) gate(phase, `After ${phase}`); };
   block(a.block1,a.buf1,"Part 1"); block(a.block2,a.buf2,"Part 2"); block(a.block3,a.buf3,"Part 3",false);
-  if (options.wordList) add({ ...WORD_LIST_STEPS.immediate });
+  if (options.wordList) add({ ...WORD_LIST_STEP });
   gate("Movement and breathing","Before physiological sweep","Settle before physiological sweep");
   add({ type:"sweep", title:"Seated rest", subjectPrompt:"Sit comfortably and stay still.", operatorScript:"Sit comfortably and stay still for a short moment.", operatorNote:"20 second seated anchor.", phase:"Movement and breathing", durationSec:20, advance:"timer", estimatedSec:20 });
   add({ type:"sweep", title:"Box breathing", subjectPrompt:"Follow the circle.", operatorScript:"Breathe in as the circle grows, hold, breathe out as it shrinks, then hold again.", operatorNote:"Use the registered media when available, otherwise use the visual pacer.", phase:"Movement and breathing", durationSec:45, advance:"timer", estimatedSec:45 });
@@ -127,7 +127,6 @@ function createPlan(a: Assignment): ProtocolStep[] {
   add({ type:"sweep", title:"Brief exertion", safetyKey:"exertion", subjectPrompt:"March in place or do sit-to-stands.", operatorScript:"March in place or do comfortable sit-to-stands.", operatorNote:`${exertionSec} second exertion period. Skip if contraindicated.`, phase:"Movement and breathing", durationSec:exertionSec, safety:true, advance:"timer", estimatedSec:exertionSec });
   add({ type:"sweep", title:"Post-exertion recovery", subjectPrompt:"Sit down. Stay still.", operatorScript:"Sit back down and stay still while your breathing settles.", operatorNote:"60 second recovery after exertion.", phase:"Movement and breathing", durationSec:60, advance:"timer", estimatedSec:60 });
   add({ type:"bodyscan", title:"Guided body scan", subjectPrompt:"Get comfortable. Close your eyes.", operatorScript:"Sit comfortably, close your eyes, and follow the guided audio.", operatorNote:"Four minute guided body scan.", phase:"Relaxation", durationSec:240, advance:"timer", estimatedSec:240 });
-  if (options.wordList) add({ ...WORD_LIST_STEPS.delayed });
   add({ type:"recovery", title:"Return to normal", subjectPrompt:"Open your eyes when you are ready.", operatorScript:"Open your eyes whenever you are ready.", operatorNote:"Final eyes-open return and BP.", phase:"Relaxation", durationSec:60, bp:true, bpLabel:"Relaxed final", advance:"timer", estimatedSec:60 });
   if (options.questionnaires) questionnaire("panas_post", "Current mood (PANAS, end)", "Relaxation", 75);
   if (options.annotationReplay) {

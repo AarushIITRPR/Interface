@@ -31,7 +31,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, defaultProtocolTemplate, estimateRemaining, shortLabel, wordListIndexFor } from "@/lib/protocol";
-import { WORD_LIST_EVENTS } from "@/lib/tasks";
+import { WORD_LIST_EVENT } from "@/lib/tasks";
 import { applyReply, latestSequence, type PartialSnapshot } from "@/lib/event-sync";
 import { resolveBufferSlot, resolveClipSlot } from "@/lib/protocol-template";
 import { EMOTIONS as CLIP_KINDS_EDITABLE } from "@/lib/types";
@@ -429,7 +429,7 @@ function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateT
           {step.type === "gate" ? <fieldset className="live-context-control"><legend>Return-to-baseline check</legend><GatePhysiology gate={gate ?? null} /><label><input type="checkbox" checked={settled} onChange={(event) => setSettled(event.target.checked)} />Subject settled and breathing regularly</label>{needsOverride ? <label className="live-gate-override">Override reason<input value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} placeholder="Why continue before physiology has recovered?" /></label> : null}</fieldset> : null}
           {step.type === "nback" ? <fieldset className="live-context-control inline"><legend>N-back difficulty</legend>{[1, 2, 3].map((level) => <button className={snapshot.nbackLevel === level ? "selected" : ""} key={level} onClick={() => void act("nbackLevel", { level })}>{level}-back</button>)}</fieldset> : null}
           {step.bp ? <BloodPressurePanel snapshot={snapshot} step={step} plan={plan} act={act} now={now} /> : null}
-          {step.type === "wordlist" || step.type === "wordlist_delayed" ? <WordListPanel snapshot={snapshot} step={step} /> : null}
+          {step.type === "wordlist" ? <WordListPanel snapshot={snapshot} step={step} /> : null}
           <fieldset className="live-context-control notes">
             <legend>Observation</legend>
             <form onSubmit={(event) => { event.preventDefault(); const body = note.trim(); if (!body) return; void act("note", { body, category: "observation" }).then((next) => { if (next) setNote(""); }); }}>
@@ -888,13 +888,10 @@ function ProtocolBuilder({ assignment }: { assignment: Assignment }) {
   const slotName = (slot: ProtocolSlot) => slot.title || `${slot.type}${slot.clipSlot ? ` (${slot.clipSlot})` : slot.bufferSlot ? ` (task ${slot.bufferSlot})` : ""}`;
 
   const preview = buildPlan({ ...assignment, protocol: template });
-  const studyAt = template.slots.findIndex((slot) => slot.type === "wordlist");
-  const delayedAt = template.slots.findIndex((slot) => slot.type === "wordlist_delayed");
   const warnings = [
     ...template.slots.filter((slot) => slot.minDurationSec && (slot.durationSec ?? 0) < slot.minDurationSec)
       .map((slot) => `${slot.title || slot.key} is under its ${slot.minDurationSec}s floor.`),
     ...CLIP_KINDS_EDITABLE.filter((clip) => !template.clips?.[clip]?.src).map((clip) => `No clip file for ${clip}.`),
-    ...(delayedAt >= 0 && (studyAt < 0 || studyAt > delayedAt) ? ["Delayed word recall needs the word list study step before it. Saving will be refused."] : []),
   ];
 
   const save = async () => {
@@ -1098,19 +1095,17 @@ function BloodPressurePanel({ snapshot, step, plan, act, now }: { snapshot: Sess
   </fieldset>;
 }
 
-/** What the operator needs during recall: which list is in play, and the score once it lands. */
+/** What the operator needs during the word list: which list is in play, and the score once it lands. */
 function WordListPanel({ snapshot, step }: { snapshot: SessionSnapshot; step: ProtocolStep }) {
   const list = wordListIndexFor(snapshot.assignment) + 1;
-  const eventType = step.type === "wordlist" ? WORD_LIST_EVENTS.immediate : WORD_LIST_EVENTS.delayed;
-  const result = [...snapshot.events].reverse().find((event) => event.eventType === eventType && event.stepId === step.id)?.metadata;
+  const result = [...snapshot.events].reverse().find((event) => event.eventType === WORD_LIST_EVENT && event.stepId === step.id)?.metadata;
   return <fieldset className="live-context-control wordlist">
-    <legend>Word list {list} · {step.type === "wordlist" ? "study and recall" : "delayed recall"}</legend>
+    <legend>Word list {list} · study and recognise</legend>
     {result ? <p>
-      <strong>{String(result.hits)}/{String(result.total)}</strong> recalled
-      {Number(result.hitsLenient) > Number(result.hits) ? `, ${Number(result.hitsLenient) - Number(result.hits)} near miss` : ""}
-      {Number(result.intrusions) ? `, ${String(result.intrusions)} not on the list` : ""}
-      {result.retentionPct != null ? ` · ${String(result.retentionPct)}% of the immediate score` : ""}
-      {result.delaySec != null ? ` · ${Math.round(Number(result.delaySec) / 60)} min after study` : ""}
-    </p> : <p>Waiting for the participant. The score appears here when they submit.</p>}
+      <strong>{String(result.hits)}/{String(Number(result.hits) + Number(result.misses))}</strong> recognised
+      {` · ${String(result.falseAlarms)} look-alike${Number(result.falseAlarms) === 1 ? "" : "s"} wrongly accepted`}
+      {` · d′ ${String(result.dPrime)}`}
+      {result.meanRtMs != null ? ` · ${String(result.meanRtMs)} ms per word` : ""}
+    </p> : <p>Waiting for the participant. The score appears here when they finish.</p>}
   </fieldset>;
 }

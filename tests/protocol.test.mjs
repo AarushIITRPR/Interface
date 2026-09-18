@@ -208,19 +208,19 @@ test("a template clip replaces its registry source instead of preloading both", 
   assert.equal(happyClip.estimatedSec, base.clips.happy.durationSec + 5);
 });
 
-test("word list recall is on by default, and placed after Part 3 and after the body scan", () => {
+test("the word list is one step, on by default, just before the sweep gate", () => {
   const plan = protocol.buildPlan(protocol.assignFor(1));
-  const types = plan.map((step) => step.type);
-  const study = types.indexOf("wordlist");
-  const delayed = types.indexOf("wordlist_delayed");
-  assert.ok(study > 0 && delayed > study);
-  assert.equal(plan[study + 1].title, "Settle before physiological sweep");
-  assert.equal(plan[delayed - 1].type, "bodyscan");
+  const wordLists = plan.filter((step) => step.type === "wordlist");
+  assert.equal(wordLists.length, 1, "exactly one word list step, with no later check");
+  const at = plan.indexOf(wordLists[0]);
+  assert.equal(plan[at + 1].title, "Settle before physiological sweep");
+  assert.equal(wordLists[0].title, "Word list: study and recognise");
+  assert.equal(wordLists[0].estimatedSec, 65);
   // Sessions stored before the option existed keep their plan.
   const { wordList, ...older } = protocol.DEFAULT_PROTOCOL_OPTIONS;
   assert.equal(wordList, true);
   const olderPlan = protocol.buildPlan({ ...protocol.assignFor(1), options: older });
-  assert.ok(!olderPlan.some((step) => step.type.startsWith("wordlist")));
+  assert.ok(!olderPlan.some((step) => step.type === "wordlist"));
 });
 
 test("each participant gets the list their counterbalancing rows select", () => {
@@ -235,16 +235,6 @@ test("each participant gets the list their counterbalancing rows select", () => 
   assert.equal(protocol.wordListIndexFor(older), 1);
 });
 
-test("a delayed recall step cannot come before, or without, the study step", () => {
-  const base = protocol.defaultProtocolTemplate();
-  const study = base.slots.find((slot) => slot.type === "wordlist");
-  const delayed = base.slots.find((slot) => slot.type === "wordlist_delayed");
-  const without = base.slots.filter((slot) => slot.type !== "wordlist");
-  assert.throws(() => template.sanitizeTemplate({ ...base, slots: without }), /needs the word list study step/);
-  const reordered = [delayed, ...base.slots.filter((slot) => slot !== delayed)];
-  assert.throws(() => template.sanitizeTemplate({ ...base, slots: reordered }), /needs the word list study step/);
-  assert.ok(study && template.sanitizeTemplate(base));
-});
 
 test("saving always advances the version, whatever version the draft carries", () => {
   const active = { ...protocol.defaultProtocolTemplate(), version: 1 };

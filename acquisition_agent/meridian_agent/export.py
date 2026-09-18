@@ -280,7 +280,7 @@ def _write_tsv(path: Path, header: list[str], rows: list[list]) -> None:
 
 CONSENT_BY_SENSOR = {"face": "shareFaceVideo", "face2": "shareFaceVideo", "thermal": "shareThermalVideo", "audio": "shareAudio", "oximeter": "sharePhysiology", "ecg": "sharePhysiology",
                      "emg": "sharePhysiology", "gsr": "sharePhysiology", "resp": "sharePhysiology", "csi": "shareWifi", "csi2": "shareWifi"}
-RESPONSE_FILES = {"ratings.tsv", "tasks.tsv", "stroop_trials.tsv", "nback_trials.tsv", "wordlist.tsv", "questionnaire_items.tsv", "questionnaire_scores.tsv", "annotations.tsv"}
+RESPONSE_FILES = {"ratings.tsv", "tasks.tsv", "stroop_trials.tsv", "nback_trials.tsv", "wordlist.tsv", "wordlist_trials.tsv", "questionnaire_items.tsv", "questionnaire_scores.tsv", "annotations.tsv"}
 
 
 def consent_allows(consent: dict, key: str | None) -> bool:
@@ -455,16 +455,15 @@ def environment_summary(path: Path) -> dict | None:
     return summary
 
 
-WORD_LIST_EVENTS = ("wordlist_recall", "wordlist_delayed_recall")
-# Per-trial and per-word detail lives in its own table; tasks.tsv keeps one readable summary per task.
-SUMMARY_EXCLUDED = {"trialData", "clientTime", "words", "recalled", "near", "intrusionWords", "misses", "response"}
-WORDLIST_COLUMNS = ["onset_s", "step_id", "phase", "list", "hits", "hits_lenient", "intrusions", "repeats", "total",
-                    "delay_s", "retention_pct", "immediate_hits", "recall_s", "study_ms", "recalled", "near", "intrusion_words",
-                    "misses", "words", "response"]
+WORD_LIST_EVENTS = ("wordlist_recognition",)
+# Per-trial and per-word detail lives in its own tables; tasks.tsv keeps one readable summary per task.
+SUMMARY_EXCLUDED = {"trialData", "clientTime", "words", "lures"}
+WORDLIST_COLUMNS = ["onset_s", "step_id", "list", "seed", "hits", "misses", "false_alarms", "correct_rejections", "answered",
+                    "total", "hit_rate", "false_alarm_rate", "d_prime", "criterion", "mean_rt_ms", "study_ms", "words", "lures"]
 
 
 def write_wordlist(out: Path, task_events: list[dict], origin_ns: int | None) -> None:
-    """One row per recall attempt. Delay runs from the end of study to the start of the delayed step, on the server clock."""
+    """One row per recognition test: counts, rates, d' and criterion. Per-word answers go to wordlist_trials.tsv."""
     joined = lambda values: ";".join(str(value) for value in values or [])
     rows = []
     for marker in task_events:
@@ -473,14 +472,11 @@ def write_wordlist(out: Path, task_events: list[dict], origin_ns: int | None) ->
         meta = marker["metadata"]
         rows.append([
             # Numbered from 1, as the console shows it.
-            _seconds(marker["hostEpochNs"], origin_ns), marker["stepId"], meta.get("phase"),
-            None if meta.get("listIndex") is None else int(meta["listIndex"]) + 1,
-            meta.get("hits"), meta.get("hitsLenient"), meta.get("intrusions"), meta.get("repeats"), meta.get("total"),
-            meta.get("delaySec"), meta.get("retentionPct"), meta.get("immediateHits"), meta.get("recallSec"), meta.get("studyMs"),
-            joined(meta.get("recalled")), joined(f"{item.get('typed')}>{item.get('word')}" for item in meta.get("near") or []),
-            joined(meta.get("intrusionWords")), joined(meta.get("misses")), joined(meta.get("words")),
-            # Typed free text: tabs and newlines would break the table.
-            " ".join(str(meta.get("response") or "").split()),
+            _seconds(marker["hostEpochNs"], origin_ns), marker["stepId"],
+            None if meta.get("listIndex") is None else int(meta["listIndex"]) + 1, meta.get("seed"),
+            meta.get("hits"), meta.get("misses"), meta.get("falseAlarms"), meta.get("correctRejections"), meta.get("answered"),
+            meta.get("total"), meta.get("hitRate"), meta.get("falseAlarmRate"), meta.get("dPrime"), meta.get("criterion"),
+            meta.get("meanRtMs"), meta.get("studyMs"), joined(meta.get("words")), joined(meta.get("lures")),
         ])
     if rows:
         _write_tsv(out / "wordlist.tsv", WORDLIST_COLUMNS, rows)
@@ -489,6 +485,7 @@ def write_wordlist(out: Path, task_events: list[dict], origin_ns: int | None) ->
 TRIAL_TABLES = {
     "stroop_complete": ("stroop_trials.tsv", ["i", "word", "ink", "congruent", "response", "rtMs", "correct", "timedOut"]),
     "nback_complete": ("nback_trials.tsv", ["index", "position", "target", "responded", "rtMs", "outcome"]),
+    "wordlist_recognition": ("wordlist_trials.tsv", ["i", "word", "type", "answer", "correct", "rtMs"]),
 }
 
 

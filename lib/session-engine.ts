@@ -5,7 +5,7 @@ import { QUESTIONNAIRES, scoreQuestionnaire, validAnswers } from "./questionnair
 import { STIMULI, stimulusById } from "./stimuli";
 import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, requiredSensorsReady, sanitizeFields, stalePreflightReport, startChecks, withConsentDefaults } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
-import { SAM_POINTS, WORD_LIST_EVENTS, wordListResult } from "./tasks";
+import { SAM_POINTS, recognitionItemsFor, recognitionSeed, wordListRecognitionResult } from "./tasks";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type Assignment, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type ProtocolTemplate, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
@@ -382,8 +382,11 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
       variant: current.mediaKey === "boxBreathing" || current.title === "Box breathing" ? "box_breathing"
         : current.safetyKey === "breath_hold" || current.title === "Breath hold" ? "breath_hold"
         : current.breathsPerMin ? "paced_breathing" : null,
-      // Only the study step carries the list. Sending it to the delayed step would put the answers on screen.
-      ...(current.type === "wordlist" ? { words: [...wordListFor(snapshot.assignment)] } : {}),
+      // The test words go out in test order and unlabelled: which ones were studied stays on the server.
+      ...(current.type === "wordlist" ? {
+        words: [...wordListFor(snapshot.assignment)],
+        testWords: recognitionItemsFor(wordListIndexFor(snapshot.assignment), recognitionSeed(snapshot.code)).map((item) => item.word),
+      } : {}),
     } : null,
   };
 }
@@ -523,16 +526,13 @@ export async function mutateSession(code: string, action: string, payload: Actio
       appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{...rating}});
       advance(current,"Response submitted","subject");
     }
-    const recallStep = step?.type === "wordlist" || step?.type === "wordlist_delayed";
-    if (action === "taskComplete" && running && (step?.type === "stroop" || step?.type === "nback" || recallStep || step?.advance === "subject")) {
+    const wordListStep = step?.type === "wordlist";
+    if (action === "taskComplete" && running && (step?.type === "stroop" || step?.type === "nback" || wordListStep || step?.advance === "subject")) {
       const raw = (payload.metadata as Record<string,unknown>) ?? {};
-      // Recall is scored here against the session's own list; the display only reports what was typed.
-      const result = recallStep && step ? wordListResult({
-        phase: step.type === "wordlist" ? "immediate" : "delayed",
-        list: wordListFor(current.assignment), listIndex: wordListIndexFor(current.assignment), raw,
-        receivedAt: Date.now(), stepStartedAt: Date.parse(current.stepStartedAt),
-        immediate: latestEvent(current, WORD_LIST_EVENTS.immediate)?.metadata,
-      }) : { eventType:String(payload.eventType ?? "task_complete"), label:String(payload.label ?? "Task completed"), metadata:raw };
+      // Scored here against the session's own list and test order; the display only reports which word got which answer.
+      const result = wordListStep
+        ? wordListRecognitionResult({ listIndex: wordListIndexFor(current.assignment), seed: recognitionSeed(current.code), raw })
+        : { eventType:String(payload.eventType ?? "task_complete"), label:String(payload.label ?? "Task completed"), metadata:raw };
       appendEvent(current,{ ...result, source:"subject" });
       advance(current,"Task completed","subject");
     }

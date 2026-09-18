@@ -22,7 +22,7 @@ import {
 
 export const CLIP_SLOTS: readonly ClipSlot[] = ["neutral", "b1a", "b1b", "b2a", "b2b", "b3a", "b3b"];
 export const MEDIA_KEYS: readonly MediaKey[] = ["washout", "boxBreathing", "bodyScan", "fixation"];
-const STEP_TYPES: readonly StepType[] = ["setup","baseline","clip","sam","washout","gate","stroop","nback","conversation","sweep","bodyscan","recovery","questionnaire","annotation","wordlist","wordlist_delayed","end"];
+const STEP_TYPES: readonly StepType[] = ["setup","baseline","clip","sam","washout","gate","stroop","nback","conversation","sweep","bodyscan","recovery","questionnaire","annotation","wordlist","end"];
 const ADVANCE_MODES: readonly ProtocolStep["advance"][] = ["operator","timer","media","task","gate","subject"];
 /** A duration longer than this is a typo, not a protocol. */
 const MAX_DURATION_SEC = 3600;
@@ -87,13 +87,17 @@ export function defaultMedia(): Partial<Record<MediaKey, string>> {
 }
 
 /** Immediate and delayed word list recall, as step definitions both plan builders use. */
-/** Slot keys for the two recall steps, so the builder and the sanitizer can find them. */
-export const WORD_LIST_KEYS = { immediate: "wordlist-recall", delayed: "wordlist-delayed" } as const;
+/** Slot key for the word list step, so the builder can find it. */
+export const WORD_LIST_KEY = "wordlist-recognition";
 
-export const WORD_LIST_STEPS = {
-  immediate: { type:"wordlist", title:"Word list: study and recall", subjectPrompt:"Study the words. You will be asked to recall them.", operatorScript:"You will see ten words for thirty seconds. Study them, then type as many as you can remember, in any order.", operatorNote:"Immediate free recall, scored automatically. The same list is recalled again after the body scan.", phase:"Part 3", advance:"task", estimatedSec:95 },
-  delayed: { type:"wordlist_delayed", title:"Word list: delayed recall", subjectPrompt:"Type the words you studied earlier.", operatorScript:"Do you remember the list of words from earlier? Type as many as you can recall, even ones you are not sure about.", operatorNote:"Delayed free recall of the same list, scored against the immediate attempt. The delay since study is recorded.", phase:"Relaxation", advance:"task", estimatedSec:45 },
-} as const satisfies Record<string, Omit<ProtocolStep, "id" | "index">>;
+/** The word list step, shared by createPlan and defaultSlots so the two stay identical. */
+export const WORD_LIST_STEP = {
+  type:"wordlist", title:"Word list: study and recognise",
+  subjectPrompt:"Study the words. Then say which ones you saw.",
+  operatorScript:"You will see ten words for twenty seconds. Then words appear one at a time: press Yes only if it is exactly a word from the list, No if it is not.",
+  operatorNote:"Recognition memory: the 10 studied words mixed with 10 look-alikes, scored automatically (hits, false alarms, d-prime).",
+  phase:"Part 3", advance:"task", estimatedSec:65,
+} as const satisfies Omit<ProtocolStep, "id" | "index">;
 
 const SETUP_SLOT: ProtocolSlot = { key:"setup", type:"setup", title:"Sensor and synchronization check", subjectPrompt:"Look toward the screen and stay still.", operatorScript:"Stay fairly still and keep facing the screen while the recording is checked.", operatorNote:"Verify every required stream and trigger synchronization before continuing.", phase:"Getting settled", advance:"operator", estimatedSec:30 };
 
@@ -146,7 +150,7 @@ export function defaultSlots(options: ProtocolOptions, pacedMinSec: (rate: numbe
     slots.push(clipSlotDef("clip-neutral", "neutral", "Neutral control"), ratingSlotDef("rating-neutral", "neutral", "Neutral control"), washoutSlot("washout-neutral", "Neutral control", { requiresClip:"neutral" }));
   }
   slots.push(...blockSlots(1, options), ...blockSlots(2, options), ...blockSlots(3, options));
-  if (options.wordList) slots.push({ key:WORD_LIST_KEYS.immediate, ...WORD_LIST_STEPS.immediate });
+  if (options.wordList) slots.push({ key:WORD_LIST_KEY, ...WORD_LIST_STEP });
   slots.push(gateSlot("gate-sweep", "Movement and breathing", "Before physiological sweep", "Settle before physiological sweep"));
   slots.push({ key:"seated-rest", type:"sweep", title:"Seated rest", subjectPrompt:"Sit comfortably and stay still.", operatorScript:"Sit comfortably and stay still for a short moment.", operatorNote:"20 second seated anchor.", phase:"Movement and breathing", durationSec:20, advance:"timer", estimatedSec:20 });
   slots.push({ key:"box-breathing", type:"sweep", title:"Box breathing", subjectPrompt:"Follow the circle.", operatorScript:"Breathe in as the circle grows, hold, breathe out as it shrinks, then hold again.", operatorNote:"Use the registered media when available, otherwise use the visual pacer.", phase:"Movement and breathing", durationSec:45, advance:"timer", estimatedSec:45, mediaKey:"boxBreathing" });
@@ -160,7 +164,6 @@ export function defaultSlots(options: ProtocolOptions, pacedMinSec: (rate: numbe
   slots.push({ key:"exertion", type:"sweep", title:"Brief exertion", safetyKey:"exertion", subjectPrompt:"March in place or do sit-to-stands.", operatorScript:"March in place or do comfortable sit-to-stands.", operatorNote:`${exertionSec} second exertion period. Skip if contraindicated.`, phase:"Movement and breathing", durationSec:exertionSec, safety:true, advance:"timer", estimatedSec:exertionSec });
   slots.push({ key:"post-exertion", type:"sweep", title:"Post-exertion recovery", subjectPrompt:"Sit down. Stay still.", operatorScript:"Sit back down and stay still while your breathing settles.", operatorNote:"60 second recovery after exertion.", phase:"Movement and breathing", durationSec:60, advance:"timer", estimatedSec:60 });
   slots.push({ key:"bodyscan", type:"bodyscan", title:"Guided body scan", subjectPrompt:"Get comfortable. Close your eyes.", operatorScript:"Sit comfortably, close your eyes, and follow the guided audio.", operatorNote:"Four minute guided body scan.", phase:"Relaxation", durationSec:240, advance:"timer", estimatedSec:240, mediaKey:"bodyScan" });
-  if (options.wordList) slots.push({ key:WORD_LIST_KEYS.delayed, ...WORD_LIST_STEPS.delayed });
   slots.push({ key:"return-to-normal", type:"recovery", title:"Return to normal", subjectPrompt:"Open your eyes when you are ready.", operatorScript:"Open your eyes whenever you are ready.", operatorNote:"Final eyes-open return and BP.", phase:"Relaxation", durationSec:60, bp:true, bpLabel:"Relaxed final", advance:"timer", estimatedSec:60 });
   if (options.questionnaires) slots.push(questionnaireSlot("panas-post", "panas_post", "Current mood (PANAS, end)", "Relaxation", 75));
   if (options.annotationReplay) {
@@ -299,13 +302,6 @@ export function sanitizeTemplate(raw: unknown, previous?: ProtocolTemplate): Pro
       ...(slot.safetyKey ? { safetyKey: str(slot.safetyKey) as ProtocolSlot["safetyKey"] } : {}),
     };
   });
-
-  // Delayed recall scores against what the participant studied, so it cannot stand alone or come first.
-  const studyAt = slots.findIndex((slot) => slot.type === "wordlist");
-  const delayedAt = slots.findIndex((slot) => slot.type === "wordlist_delayed");
-  if (delayedAt >= 0 && (studyAt < 0 || studyAt > delayedAt)) {
-    throw new TemplateError("Delayed word recall needs the word list study step earlier in the protocol.");
-  }
 
   const clips = sanitizeClips(input.clips, previous);
   // A clip slot with nothing behind it renders an empty screen for however long the operator waits. The neutral

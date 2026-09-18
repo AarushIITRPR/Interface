@@ -134,13 +134,18 @@ class ExportTests(unittest.TestCase):
         session = json.loads((out / "session.json").read_text())
         self.assertEqual(session["clock"]["recordingStartHostEpochNs"], ns(0))
 
-    def test_word_list_recall_gets_its_own_table_and_consent(self):
+    def test_word_list_recognition_gets_its_own_tables_and_consent(self):
         fixture = export_fixture()
-        recall = {"phase": "delayed", "listIndex": 0, "hits": 2, "hitsLenient": 3, "intrusions": 1, "repeats": 0, "total": 10,
-                  "delaySec": 600.0, "retentionPct": 50, "immediateHits": 4, "recallSec": 60.0,
-                  "recalled": ["apple", "river"], "near": [{"typed": "chain", "word": "chair"}], "intrusionWords": ["dog"],
-                  "misses": ["chair"], "words": ["apple", "river", "chair"], "response": "apple\triver\nchain dog"}
-        fixture["events"].insert(-1, event(11, "wordlist_delayed_recall", 58, 2, "s02-clip-happy", attempt=2, metadata=recall))
+        trials = [
+            {"i": 0, "word": "bicycle", "type": "old", "answer": "yes", "correct": True, "rtMs": 850},
+            {"i": 1, "word": "cycle", "type": "lure", "answer": "yes", "correct": False, "rtMs": 1200},
+            {"i": 2, "word": "river", "type": "old", "answer": "no", "correct": False, "rtMs": 990},
+        ]
+        recognition = {"listIndex": 0, "seed": 1234, "hits": 1, "misses": 1, "falseAlarms": 1, "correctRejections": 0,
+                       "answered": 3, "total": 20, "hitRate": 0.5, "falseAlarmRate": 1.0, "dPrime": -0.43, "criterion": -0.22,
+                       "meanRtMs": 1013, "studyMs": 20000, "words": ["bicycle", "river"], "lures": ["cycle", "stream"],
+                       "trialData": trials}
+        fixture["events"].insert(-1, event(11, "wordlist_recognition", 58, 2, "s02-clip-happy", attempt=2, metadata=recognition))
         fixture["consent"] = {"values": {"participation": "Yes", "shareResponses": "No"}}
 
         build_bundle(fixture, self.root, HostClock(0.0, 0.0, ns(0), 0.0), [])
@@ -149,22 +154,23 @@ class ExportTests(unittest.TestCase):
         rows = list(csv.DictReader((out / "wordlist.tsv").open(), delimiter="\t"))
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual((row["phase"], row["hits"], row["hits_lenient"], row["delay_s"], row["retention_pct"]), ("delayed", "2", "3", "600.0", "50"))
-        self.assertEqual(row["near"], "chain>chair")
-        self.assertEqual(row["list"], "1")
-        self.assertEqual(row["recalled"], "apple;river")
-        # Typed text cannot break the table.
-        self.assertEqual(row["response"], "apple river chain dog")
-        # The summary stays readable: per-word detail lives in wordlist.tsv only.
+        self.assertEqual((row["list"], row["seed"], row["hits"], row["false_alarms"], row["d_prime"], row["study_ms"]),
+                         ("1", "1234", "1", "1", "-0.43", "20000"))
+        self.assertEqual(row["lures"], "cycle;stream")
+        per_word = list(csv.DictReader((out / "wordlist_trials.tsv").open(), delimiter="\t"))
+        self.assertEqual([(t["word"], t["type"], t["answer"], t["correct"]) for t in per_word],
+                         [("bicycle", "old", "yes", "True"), ("cycle", "lure", "yes", "False"), ("river", "old", "no", "False")])
+        self.assertEqual(per_word[0]["seed"], "1234")
+        # The summary stays readable: per-word detail lives in the two word list tables only.
         summary = (out / "tasks.tsv").read_text()
-        self.assertIn("wordlist_delayed_recall", summary)
-        self.assertNotIn("intrusionWords", summary)
-        # Recall is a response, so it follows the participant's response-sharing consent.
+        self.assertIn("wordlist_recognition", summary)
+        self.assertNotIn("trialData", summary)
+        # Recognition answers are responses, so both tables follow the participant's response-sharing consent.
         manifest = json.loads((out / "share_manifest.json").read_text())
-        entry = next(item for item in manifest["files"] if item["path"].endswith("wordlist.tsv"))
-        self.assertEqual(entry["consentField"], "shareResponses")
-        # The participant declined to share responses, so the recall table is withheld.
-        self.assertFalse(entry["share"])
+        for name in ("wordlist.tsv", "wordlist_trials.tsv"):
+            entry = next(item for item in manifest["files"] if item["path"].endswith(name))
+            self.assertEqual(entry["consentField"], "shareResponses")
+            self.assertFalse(entry["share"])
 
     def test_photodiode_edges_and_sync_latency(self):
         path = self.root / "photodiode.csv"

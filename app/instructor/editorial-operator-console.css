@@ -334,13 +334,26 @@
 .live-builder-preview-links a, .live-builder-preview-links button { display: inline-flex; gap: 6px; align-items: center; min-height: 34px; padding: 0 12px; border: 1px solid #a8543a; background: var(--live-paper); color: #a8543a; font-size: .62rem; font-weight: 800; letter-spacing: .06em; text-decoration: none; }
 .live-builder-preview-links a:hover, .live-builder-preview-links button:hover { background: #f6e9e2; }
 
-/* Word list recall */
+/* Word list: study phase, then the yes/no recognition test */
 .wordlist-intro { max-width: 560px; margin: 0; color: #5b6168; font-size: 1.05rem; line-height: 1.6; }
 .wordlist-study { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 36px; }
-.wordlist-words { display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 18px 64px; margin: 0; padding: 0; list-style: none; font-family: Georgia, serif; font-size: clamp(1.6rem, 3.2vw, 2.6rem); letter-spacing: .02em; text-transform: lowercase; }
+.wordlist-words { display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 14px 64px; margin: 0; padding: 0; list-style: none; font-family: Georgia, serif; font-size: clamp(2.3rem, 4.5vw, 3.8rem); font-weight: 700; letter-spacing: .02em; text-transform: lowercase; }
 .wordlist-study time { font-size: .8rem; font-weight: 800; letter-spacing: .08em; color: #69736f; }
-.wordlist-recall textarea { width: min(620px, 100%); min-height: 180px; padding: 16px; border: 1px solid var(--live-ink); background: var(--live-paper-light); font-size: 1.2rem; line-height: 1.5; resize: vertical; }
-@media (max-width: 560px) { .wordlist-words { grid-template-columns: 1fr; gap: 12px; } }
+.wordlist-test { gap: 36px; }
+.wordlist-progress { margin: 0; color: #7a736a; font-size: .68rem; font-weight: 800; letter-spacing: .1em; }
+/* Fixed height so a long word and a short one occupy the same box: the buttons must not shift between trials. */
+.wordlist-probe { display: grid; place-items: center; min-height: clamp(96px, 13vh, 150px); font-family: Georgia, serif; font-size: clamp(3.2rem, 7vw, 6rem); font-weight: 700; letter-spacing: .01em; text-transform: lowercase; }
+.wordlist-probe.blank { color: #9aa0a6; }
+.wordlist-answers { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px; width: min(760px, 100%); }
+/* Yes and No are deliberately identical in colour and size: the task scores response bias, which a more salient
+   answer would shift. */
+.wordlist-answer { min-height: clamp(112px, 15vh, 156px); font-size: clamp(1.5rem, 2.4vw, 2.2rem); font-weight: 800; letter-spacing: .14em; }
+@media (max-width: 560px) {
+  .wordlist-words { grid-template-columns: 1fr; gap: 12px; font-size: clamp(1.8rem, 8vw, 2.6rem); }
+  .wordlist-probe { min-height: 84px; font-size: clamp(2.6rem, 12vw, 4rem); }
+  .wordlist-answers { gap: 14px; }
+  .wordlist-answer { min-height: 96px; font-size: 1.4rem; }
+}
 
 /* Blood pressure cuff window, operator notes, word list result */
 .live-context-control.bp .live-bp-hint, .live-context-control.bp .live-bp-cuff { grid-column: 1 / -1; }
