@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .segments import ProxyOptions
+
 PAUSE_START_EVENTS = {"session_paused", "operator_lost", "sensor_lost"}
 # Matches POINT_ARTIFACT_WINDOW in lib/rig.ts: the operator presses after noticing the event.
 POINT_ARTIFACT_BEFORE_S = 3.0
@@ -306,7 +308,7 @@ def write_share_manifest(out: Path, export: dict, session_dir: Path, artifacts: 
     return manifest
 
 
-def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: list[dict], derive_video: bool = False, bids: bool = True) -> dict:
+def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: list[dict], derive_video: bool = False, bids: bool = True, tasks: ProxyOptions | None = None) -> dict:
     """Write export/ (events, steps, ratings, tasks, session.json, QA report) and return the QA report."""
     out = session_dir / "export"
     out.mkdir(exist_ok=True)
@@ -336,7 +338,7 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
     _write_tsv(out / "ratings.tsv", ["onset_s", "clip_emotion", "valence", "arousal", "dominance", "scale_points", "felt_emotion", "intensity", "familiarity"],
         [[_seconds(clock.server_to_host_ns(r.get("createdAt")), origin_ns), r.get("emotion"), r.get("valence"), r.get("arousal"), r.get("dominance"),
           r.get("scalePoints", 10), r.get("discreteEmotion"), r.get("intensity"), r.get("familiarity")] for r in export.get("ratings", [])])
-    task_events = [m for m in markers if m["eventType"] in ("stroop_complete", "nback_complete", "breath_hold_complete", *WORD_LIST_EVENTS)]
+    task_events = [m for m in markers if m["eventType"] in ("stroop_complete", "nback_complete", "breath_hold_complete", "reading_complete", *WORD_LIST_EVENTS)]
     _write_tsv(out / "tasks.tsv", ["onset_s", "event_type", "step_id", "summary"],
         [[_seconds(m["hostEpochNs"], origin_ns), m["eventType"], m["stepId"], {key: value for key, value in m["metadata"].items() if key not in SUMMARY_EXCLUDED}] for m in task_events])
     write_trial_tables(out, task_events)
@@ -397,6 +399,10 @@ def build_bundle(export: dict, session_dir: Path, clock: HostClock, artifacts: l
         bids_events.sort(key=lambda row: float(row[0]) if row[0] not in ("", None) else float("inf"))
         write_bids(out, export, session_dir, artifacts, origin_ns, bids_events, out)
     write_share_manifest(out, export, session_dir, artifacts)
+    if tasks is not None:
+        # Last, so the face colour trace the derivatives step may have just written can be sliced with everything else.
+        from .segments import task_folders
+        report["taskFolders"] = task_folders(session_dir, windows, artifacts, origin_ns, tasks)
     return report
 
 

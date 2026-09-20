@@ -130,4 +130,30 @@ recordings/session_CODE_TIMESTAMP/
 
 Every stream contains a host timestamp or is anchored to the common monotonic session clock. The agent continues recording during temporary network loss. Raw sensor files are never sent through browser polling.
 
+### Per-task folders
+
+`--extract-tasks` adds a `tasks/` folder beside those, one folder per step attempt, holding that step's slice of every
+modality: a small compressed video proxy, the frame timestamps, the physio rows, the face colour trace when the export
+derived one, and a `step.json` with the window. `index.tsv` lists what was written.
+
+```text
+recordings/session_CODE_TIMESTAMP/tasks/
+  index.tsv
+  s12-clip-fear/
+    step.json  face_proxy.mp4  face_frames.csv  audio.wav  ecg.csv  gsr.csv  ...
+```
+
+The masters are never touched; these are working copies. On session 0101JUMR one 73-second clip step came out at 2.3 MB
+against 1.73 GB of lossless master, and decoding it takes **0.25 s instead of 23.3 s** — which is the point, because
+recording is already efficient to seek and the saving is entirely in the repeat read.
+
+Measured on that session: 55 steps, three cameras, **7.4 minutes** to extract, **0.78 GB** of task folders against
+57 GB of masters. Run it once, after the participant has left.
+
+**The proxy is lossy: do not use it for rPPG.** Compression destroys the sub-1% colour modulation rPPG measures. Use
+`face_colour_trace.tsv` (written when the export ran with `--derive-video`), or the lossless master.
+
+Cuts are mapped through `<sensor>_frames.csv`, never through wall-clock offsets: dropped frames are absent from the
+container while it keeps claiming a constant rate, so video time and session time drift apart whenever frames are lost.
+
 The acquisition token is a per-session secret. It is visible only in the instructor portal and must not be shown to the subject or committed to source control.

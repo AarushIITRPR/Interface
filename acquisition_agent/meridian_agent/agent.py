@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from . import __version__
 from .export import HostClock, auxiliary_files, build_bundle, event_marker
 from .preview import PreviewServer
+from .segments import ProxyOptions
 from .sensors import CHECKSUM_PENDING, CameraOptions, CameraSensor, FrontierXEcgSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor, restamp_frontierx_csv, sha256_file
 
 
@@ -349,9 +350,16 @@ class MeridianAgent:
 
     def export_bundle(self, artifacts: list[dict]) -> None:
         data = self.request_export()
+        tasks = ProxyOptions(height=max(0,getattr(self.args,"task_proxy_height",480)),crf=getattr(self.args,"task_proxy_crf",20)) \
+            if getattr(self.args,"extract_tasks",False) else None
         report = build_bundle(data,self.session_dir,HostClock.now(self.clock_offset_ms,self.origin_mono),artifacts,
-                              derive_video=getattr(self.args,"derive_video",False),bids=not getattr(self.args,"no_bids",False))
+                              derive_video=getattr(self.args,"derive_video",False),bids=not getattr(self.args,"no_bids",False),tasks=tasks)
         print(f"Analysis bundle written to {self.session_dir / 'export'} ({report['stepsFlagged']} of {report['stepCount']} step attempts flagged)")
+        folders = report.get("taskFolders")
+        if folders:
+            print(f"Task folders written to {self.session_dir / 'tasks'} ({folders['folders']} steps, {folders['bytes'] / 1e9:.2f} GB)")
+            for note in folders["missing"]:
+                print(f"  not cut - {note}")
 
     def request_export(self) -> dict:
         payload = json.dumps({"code":self.code,"token":self.token,"action":"export"},separators=(",",":")).encode("utf-8")
@@ -482,6 +490,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--simulate-all",action="store_true",help="Use deterministic simulated streams for integration testing")
     result.add_argument("--export-to",default="",help="Write the analysis bundle for an existing recording directory without recording")
     result.add_argument("--derive-video",action="store_true",help="Also decode face video for a colour trace and offline rPPG heart rate (slow)")
+    # On request, not automatically: three cameras over a 32-minute session measured 7.4 minutes, which does not
+    # belong at the end of a session with a participant still in the chair.
+    result.add_argument("--extract-tasks",action="store_true",help="Also write tasks/: one folder per step with a video proxy and that step's physio rows (slow)")
+    result.add_argument("--task-proxy-height",type=int,default=480,help="Proxy video height; 0 keeps the recorded size")
+    result.add_argument("--task-proxy-crf",type=int,default=20,help="Proxy video quality, lower is better and larger")
     result.add_argument("--no-bids",action="store_true",help="Skip the BIDS-style copy of the export")
     result.add_argument("--lsl",action="store_true",help="Publish events and live telemetry as Lab Streaming Layer streams (requires pylsl)")
     return result
