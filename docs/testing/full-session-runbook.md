@@ -1,87 +1,150 @@
-# Meridian full-session runbook
+# Meridian full-session runbook — first official trial, 21 September 2026
 
-Session: **09004JW4** (participant 900). Clip order for this session: disgust > happy > surprise > sad > fear > anger. Task order: conversation > N-back > Stroop.
-The protocol has 43 steps and takes about 50 minutes. Plan on 75 minutes including setup.
+Protocol **version 13**. Participant **131**: **35 steps, about 40 minutes** of protocol. Plan on **75 minutes**
+including setup. Emotion order for this participant: **surprise > disgust > fear > happy > anger > sad**. Tasks:
+**N-back (Part 1) > Stroop (Part 3)**; this participant does **not** do the conversation step.
 
-## Fix first (seen when this session was created)
-- **Sony a6700:** shows up as "USB Bus-powered Device" (054c:0d68), not as a camera. Turn **USB Streaming** back on in the camera menu. Face camera 2 and the audio both come from it.
-- **FLIR thermal:** not detected. Replug it straight into the PC (it's optional for this session).
-- **Oximeter:** port open, but no data until a finger is inserted.
-- **GSR:** 0.00 uS. Electrodes aren't on skin yet.
-- **ECG:** subscribed, but no data. Start live streaming in the Frontier X app.
+> Create the session **fresh on the morning of the trial**. A session keeps the protocol version it was created
+> with forever, so a session made before today would run the old protocol.
 
-## A. Before the participant arrives (15 min)
-1. Check disk space: one full session is about **75 GB** (two lossless cameras plus thermal).
-2. Plug cameras straight into rear PC ports; don't use the Huasheng hub. Sony: USB Streaming on, 720p.
-3. Set the Sony's exposure, ISO, and white balance **manually**; it ignores the software lock.
-4. Room: fixed lighting (lights on, blinds closed), door closed, phones silent, no one walking behind the participant.
-5. CSI empty-room baseline (if CSI matters): nobody in the room, **Recording setup > CSI setup > SAVE CSI SETUP > RECORD EMPTY ROOM** (60 s).
-6. Open two browser tabs **on this PC**:
-   - Instructor: `http://localhost:3000/instructor` > session **09004JW4**. **Keep this tab open the whole session.** If it closes, the session pauses automatically.
-   - Subject display (participant screen): `http://localhost:3000/subject` > enter **09004JW4** > CONNECT. Wait until it has loaded the media.
+## A. Known state of the rig (from the 16–17 September audit, nothing fixed since)
 
-## B. With the participant (15 min)
-1. Explain the session and get **signed consent**. In **Recording setup**: Consent > SAVE CONSENT (their real sharing choices).
-2. **Safety screening:** ask all 6 questions > SAVE SCREENING. A "yes" automatically skips breath hold, standing, or exertion.
-3. **Participant details:** skin type, age band, sex, eyewear, facial hair, makeup, caffeine/nicotine/exercise in last 2 h, heart-rate medication, camera distances > SAVE PARTICIPANT DETAILS.
-4. Sensors on:
-   - ECG strap: wet the electrodes, snug under the chest, Frontier X app streaming (phone plugged in, screen awake).
-   - Oximeter on the **non-dominant** index finger; hand resting on the table.
-   - GSR electrodes on two fingers of the **same** hand as the oximeter, after the skin has been in contact for about 5 minutes.
-   - DJI mics: **mic 1 on the participant** near the collar, **mic 2 on the operator**. Mic 1 is the left channel, mic 2 the right — swap them and the operator's voice lands in the participant's channel for the whole session.
-   - Seat 50-80 cm from the cameras, face centred in both previews, no hair over the forehead.
-5. Wait for signals to look right in **Overview**: ECG HR plausible (50-100 at rest), oximeter HR within 8 bpm of ECG, GSR above 0.5 uS and fairly stable, both face previews show the face, audio meter moves when they speak.
+These are not faults to chase on the day. Expect them, and do not let them stop the session:
+
+- **Skin conductance (GSR) is unusable.** It reads near zero and the export will not emit SCR counts. It is not a
+  required stream. Do not spend the morning re-taping electrodes.
+- **No respiration belt.** The paced-breathing steps have no independent breathing reference, so `breathing_rate`
+  will be `n/a` for every step.
+- **No photodiode.** `sync_check.tsv` will be empty and display latency stays unmeasured.
+- **ECG and oximeter heart rate disagree by about 4 bpm** (13.6 bpm at worst). The console shows the disagreement
+  live. It is not a timing artefact; do not stop a session over it.
+- **Preflight passing is not evidence the data is good.** On 16 September preflight reported `"failed": []` on a rig
+  with three damaged streams. Judge the signals by eye in Overview, not by the green badge.
+
+## B. Before the participant arrives (20 min)
+
+1. **Disk.** One full session is about 75 GB. Recordings go to `acquisition_agent/recordings` on `/media/ai/OneTB`.
+   Check free space: `df -h /media/ai/OneTB`. Keep at least 150 GB free. Never record to the NVMe system disk.
+2. **Free the serial ports.** Stop anything else that opens them, in particular the **Breathing-Rate Streamlit
+   dashboard** (it was running on port 8502 during preparation). `ss -ltnp | grep 8502` shows it.
+3. **Cameras into the rear PC ports directly.** No USB hub — the Huasheng 2.0 hub reset three times in testing.
+   Sony a6700: **USB Streaming on**, 720p, and set exposure, ISO and white balance **manually**; it ignores the
+   software lock.
+4. **Power and interruptions.** Both screens set to never sleep, machine on mains, notifications off, phones
+   silent, door closed, blinds closed, lights fixed.
+5. **Start the server** from `/media/ai/OneTB/aarush_new_interface`: `npm run dev -- --port 3000`. Wait until
+   `http://localhost:3000/instructor` answers.
+   **Do not edit or save any file in the repository while a session is running** — the dev server watches files and
+   a save reloads the subject display mid-protocol. (Git tag for today's state: `trial-2026-09-21`.)
+6. **Open two tabs on this PC.**
+   - Instructor: `http://localhost:3000/instructor` > create the session for participant 131 > note the **code** and
+     the **acquisition token**. **Keep this tab open and in the foreground the whole session**: the session pauses
+     itself whenever no instructor tab is live.
+   - Subject display: `http://localhost:3000/subject` > enter the code > CONNECT. If it jumps straight into a
+     different session, press **CHANGE SESSION**: the display remembers the last code it used.
+   **Keep the subject display as the foreground window on its screen.** Chrome throttles timers in background tabs,
+   which stretches the word list and the pacers.
+7. **Start the acquisition agent** (one command, per session), from `acquisition_agent`:
+   `./start-linux.sh <CODE> <TOKEN>` — or spell the ports out:
+   `.venv/bin/python -m meridian_agent --code <CODE> --token <TOKEN> --csi COM_or_/dev/tty… --emg … --ecg …`
+   The virtualenv lives at `acquisition_agent/.venv`. The console's Setup view should show the agent online within
+   a few seconds.
+8. **CSI empty-room baseline** (if CSI matters): nobody in the room, **Recording setup > CSI setup > SAVE CSI SETUP
+   > RECORD EMPTY ROOM** (60 s).
+9. **Media check:** the subject display must finish downloading all clips before Start is allowed. Watch for the
+   "media ready" state.
+
+## C. With the participant (15 min)
+
+1. Explain the session, get **signed consent**, then **Recording setup > Consent > SAVE CONSENT** with their real
+   sharing choices.
+2. **Safety screening:** ask all six questions and SAVE. Note: version 13 contains no breath hold, standing or
+   exertion, so a "yes" no longer changes the session. Ask anyway — it is an ethics requirement, and it is logged.
+3. **Participant details:** skin type, age band, sex, eyewear, facial hair, makeup, caffeine/nicotine/exercise in
+   the last 2 h, heart-rate medication, camera distances. No names.
+4. **Sensors on:**
+   - ECG strap: wet electrodes, snug under the chest, Frontier X app streaming, phone charging and awake.
+   - Oximeter on the **non-dominant** index finger, hand resting still on the table.
+   - EMG (if used today) per its own placement notes; check the trace moves with a deliberate contraction.
+   - DJI mics: **mic 1 on the participant** (left channel), **mic 2 on the operator** (right channel). Swapping
+     them puts the operator's voice in the participant's channel for the whole session.
+   - Seat 50–80 cm from the cameras, face centred in both previews, hair off the forehead.
+5. Wait for **Overview** to look right: ECG heart rate plausible at rest (50–100), oximeter within ~8 bpm of it
+   (expect a few bpm of disagreement), both face previews showing the face, audio meter moving when they speak.
 6. **RUN PREFLIGHT** until it passes, then **START SESSION**.
 
-## C. Running the protocol (about 50 min)
-Use the **play/pause** and **ADVANCE** buttons in the instructor console. Most steps advance by themselves; the ones you control are marked **(you)**.
+## D. Running the protocol (about 40 minutes)
 
-| # | Step | Time | What you do |
+Most steps advance themselves. The ones you control are marked **(you)**.
+
+| # | Step | Length | What you do |
 |---|---|---|---|
-| 0 | Sensor and synchronization check | (you) | Confirm all sensors green, then ADVANCE |
-| 1-2 | PANAS mood, TIPI personality | participant | Stay quiet; they answer on screen |
-| 3 | Resting baseline, eyes open | 2 min | Silence, no movement in the room |
-| 4 | Resting baseline, eyes closed | 1.5 min | Silence |
-| 5-11 | **Part 1:** disgust clip, rating, washout, happy clip, rating, **conversation (3 min)**, return-to-baseline gate | ~9 min | Conversation: talk with them naturally for 3 min (the only step where talking is intended). Gate: wait for HR and GSR to settle |
-| 12-19 | **Part 2:** surprise clip, rating, washout, sad clip, rating, **N-back** (practice first), NASA-TLX, gate | ~10 min | Don't help with the task |
-| 20-27 | **Part 3:** fear clip, rating, washout, anger clip, rating, **Stroop**, NASA-TLX, settle gate | ~10 min | Don't help with the task |
-| 28-38 | **Movement and breathing:** seated rest, box breathing, paced breathing 6/10/15/20 per min, breath hold (max 60 s), head movement and speaking, standing, 60 s exertion (marching in place), recovery | ~9 min | Watch them for dizziness during breath hold, standing, exertion. Stop if unwell |
-| 39-41 | Guided body scan (4 min), return to normal, PANAS end | ~6 min | Silence |
-| 42 | Session complete | (you) | End the session (section E) |
+| 0 | Sensor and synchronization check | (you) | Confirm the streams, then ADVANCE |
+| 1–2 | PANAS mood, TIPI personality | participant | Stay quiet |
+| 3 | Resting baseline, eyes open | 2 min | Silence, no movement in the room. Take the resting BP reading |
+| 4–11 | **Part 1:** surprise clip, rating, washout, disgust clip, rating, **N-back**, NASA-TLX, gate | ~10 min | Don't help with the task. Gate: 25 s, passes when HR and skin conductance settle |
+| 12–17 | **Part 2:** fear clip, rating, washout, happy clip, rating, gate | ~8 min | No task in Part 2 in this version |
+| 18–24 | **Part 3:** anger clip, rating, washout, sad clip, rating, **Stroop**, NASA-TLX | ~10 min | The Stroop screen warns them each word disappears after ~2 s |
+| 25 | Word list: study and recognise | ~1 min | Ten words for 20 s with a countdown, then 20 yes/no words |
+| 26 | **Read aloud** | ~1 min **(participant ends it)** | They read the passage aloud once at a normal pace, then press **Done**. Don't rush them; it stops by itself at 2 min |
+| 27–30 | Seated rest 20 s, **box breathing 64 s (4 rounds)**, paced breathing 6/min 60 s, 20/min 40 s | ~3 min | Silent on-screen bar. The marker holds 4 s at the top and bottom — that pause is intentional |
+| 31–32 | Guided body scan (4 min), return to normal | ~4.5 min | Silence. Final BP reading |
+| 33 | PANAS end | participant | Stay quiet |
+| 34 | Session complete | (you) | End the session (section F) |
 
-**Return-to-baseline gates:** they pass when heart rate and skin conductance are back near the resting baseline for 15 s. If a gate won't pass (for example GSR drifting), override it **with a written reason**.
+**Return-to-baseline gates** pass when heart rate and skin conductance are back near the resting baseline for 15 s.
+With GSR broken, expect to **override with a written reason** — that is normal today, and the override is logged.
 
-**Artifact hotkeys** (press in the instructor console whenever something happens):
-T talking (on/off) · L left seat (on/off) · O operator in view (on/off) · C cough/sneeze · M large movement · D door/other people · P phone.
+**Artifact hotkeys** in the instructor console: T talking · L left seat · O operator in view · C cough/sneeze ·
+M large movement · D door/other people · P phone.
 
-## D. Do's and don'ts
+## E. Do's and don'ts
 
 **Do**
-- Keep the instructor tab open and visible; the session pauses itself if it closes.
+- Keep the instructor tab open and the subject display in the foreground.
 - Mark every disturbance with the hotkeys straight away.
-- Keep lighting, camera position, and exposure unchanged for the whole session.
-- Keep the Frontier X phone app open, screen awake, and charging.
-- Ask the participant to keep the oximeter/GSR hand still on the table.
-- Pause (play/pause button) for anything unplanned: bathroom, discomfort, sensor falling off. Resume only when signals are back.
-- Watch the Overview for red sensors; fix and note them in the session messages.
+- Keep lighting, camera position and exposure unchanged for the whole session.
+- Keep the Frontier X phone app open, awake and charging.
+- Pause for anything unplanned; resume only when signals are back.
 - Stop immediately if the participant feels unwell. Their safety comes before the recording.
 
 **Don't**
-- Don't unplug or replug USB devices while recording. The cameras can't reconnect without restarting the agent.
-- Don't use the Huasheng USB 2.0 hub for cameras; it reset three times during testing.
-- Don't talk, move, or stand behind the participant except in the conversation step.
-- Don't change the Sony's settings, zoom, or position after START SESSION.
-- Don't close the subject display or let the participant screen sleep.
-- Don't let other programs use the ESP32 port (for example the Breathing-Rate Streamlit dashboard).
-- Don't skip the screening or override a gate without writing why.
-- Don't enter names in participant details; use categories only.
+- Don't edit any file in the repository while recording.
+- Don't unplug or replug USB devices while recording; the cameras cannot reconnect without restarting the agent.
+- Don't use the USB hub for cameras.
+- Don't talk, move, or stand behind the participant.
+- Don't change the Sony's settings, zoom or position after START SESSION.
+- Don't let the subject display sleep, go to the background, or be closed.
+- Don't let another program hold the ESP32 port.
+- Don't enter names in participant details; categories only.
 
-## E. Ending
-1. At step 42 (or to stop early), press **End session** in the instructor console.
-2. Wait for "Analysis bundle written" (about 2-3 minutes for a full session); don't close anything before then.
-3. Remove sensors; thank the participant.
-4. Check `export/qa_report.md` in `.local-run/recordings/session_09004JW4_*`:
-   - Every step at least 95% coverage for the required streams
-   - ECG and oximeter heart rate agree
-   - GSR above 0 uS the whole time
-   - Face frames equal the frame timestamp rows
+## F. Ending — and the one rule that has already cost a session
+
+1. At step 34 (or to stop early), press **End session**.
+2. Wait for **"Analysis bundle written"** in the agent terminal (2–3 minutes for a full session). Don't close
+   anything before it appears.
+3. **Do not reopen, replay or navigate the finished session in the instructor console before the export is done.**
+   On 17 September a completed session was walked backwards through 24 steps in the console; that rewrote its record
+   to `paused, step 5` and added 48 phantom events, and the export has still not been salvaged.
+4. Remove sensors; thank the participant.
+5. Check `export/qa_report.md` in `acquisition_agent/recordings/session_<CODE>_*/`:
+   - every step at least 95% coverage for the required streams (face, audio, oximeter);
+   - ECG and oximeter heart rate within a few bpm of each other;
+   - face frames equal to the frame-timestamp rows;
+   - `tasks.tsv` contains `stroop_complete`, `nback_complete`, `wordlist_recognition` and `reading_complete`;
+   - expect `breathing_rate` to be `n/a` and `sync_check.tsv` to be empty — that is the missing belt and photodiode,
+     not a fault of this session.
+6. **Back up before anything else:** copy `.wrangler/state` (the session database) and the session's recording
+   folder to the archive drive. The database is the only copy of the session record the export depends on.
+
+## G. If something goes wrong
+
+| Symptom | Do this |
+|---|---|
+| Session says paused by itself | An instructor tab closed or lost focus. Reopen it and press resume |
+| Agent terminal dies | Restart it with the **same code and token**; it rejoins and keeps recording to the same folder |
+| A camera drops out | Note it with a hotkey, carry on, and do not replug during recording |
+| Subject display shows the wrong session | Press CHANGE SESSION and enter today's code; it remembers the previous one |
+| Subject display sleeps or goes blank | Wake it, press resume, and mark the gap with a hotkey |
+| Power cut | After reboot, restart the server, recover the session by code in the console, restart the agent with the same code and token |
+| Participant distressed | Safety stop button, bottom right of the subject display, then pause and attend to them |
