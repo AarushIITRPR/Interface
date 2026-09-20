@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { QUESTIONNAIRES } from "@/lib/questionnaires";
 import { startTicker } from "@/lib/ticker";
-import { BREATH_HOLD_MAX_SEC, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, WORD_LIST, WORD_LIST_EVENT, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
+import { BOX_BREATHING_PHASE_SEC, BOX_BREATHING_ROUNDS, BREATH_HOLD_MAX_SEC, READING_EVENT, READING_MAX_SEC, READING_PASSAGE, READING_WORDS, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, WORD_LIST, WORD_LIST_EVENT, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
 // Step timers use the server clock so a subject computer with a skewed clock cannot shorten or stretch timed steps.
@@ -236,6 +236,7 @@ function subjectPresentation(step:SubjectStep) {
   if(step.type==="stroop") return {label:"Attention task",title:<>Respond<br/><i>accurately.</i></>,description:"Follow the instruction shown on the screen."};
   if(step.type==="nback") return {label:"Memory task",title:<>Stay with<br/><i>the sequence.</i></>,description:"Follow the instruction shown on the screen."};
   if(step.type==="wordlist") return {label:"Memory task",title:<>Remember<br/><i>the words.</i></>,description:"Follow the instruction shown on the screen."};
+  if(step.type==="reading") return {label:"Reading task",title:<>Read<br/><i>aloud.</i></>,description:"Read at your normal speaking pace."};
   if(step.type==="conversation") return {label:"Speaking task",title:<>Speak<br/><i>naturally.</i></>,description:"Speak at a comfortable pace."};
   if(step.type==="washout"||step.fixation) return {label:"Baseline task",title:<>Keep your eyes<br/><i>at the centre.</i></>,description:"Stay with the centre of the screen."};
   if(step.type==="bodyscan") return {label:"Rest task",title:<>Settle<br/><i>into stillness.</i></>,description:"Stay still and follow the instruction."};
@@ -251,9 +252,10 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
   if (step.type === "stroop") return <StroopTask step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "wordlist") return <WordListTask step={step} act={act} paused={snapshot.status !== "running"} />;
+  if (step.type === "reading") return <ReadingScreen step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
-  if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
+  if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "sweep" && step.variant === "paced_breathing") return <PacedBreathingScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "questionnaire") return <QuestionnaireScreen step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "annotation") return <AnnotationScreen step={step} src={snapshot.mediaSrc} act={act} audioEnabled={audioEnabled} paused={snapshot.status !== "running"} />;
@@ -394,7 +396,8 @@ function StroopTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<
     return()=>clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[started,paused,showing,index]);
-  if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
+  // The deadline is the part participants get wrong on the first trials, so the intro states it before they start.
+  if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><p className="wordlist-intro">{trials.length} words, one at a time. Each one disappears after about {Math.round(STROOP.deadlineMs/1000)} seconds, so answer as quickly as you can and go with your first instinct.</p><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
   const trial=trials[index];
   return <section className="task-screen"><div className="stroop-word" style={{color:showing?trial.hex:undefined}}>{showing?trial.word.toUpperCase():"+"}</div><div className="colour-buttons">{TASK_COLOURS.map(colour=><button key={colour.name} style={{background:colour.hex}} disabled={!showing||paused} onClick={event=>record(colour.name,event.timeStamp)}>{colour.name}</button>)}</div></section>;
 }
@@ -447,7 +450,7 @@ function WordListTask({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Recor
   },[answer,stage]);
   if(!words.length||!testWords.length)return <CenteredInstruction text="Please wait." />;
   if(stage==="intro")return <section className="subject-center"><h1>{step.subjectPrompt}</h1><p className="wordlist-intro">You will see {words.length} words for {WORD_LIST.studySec} seconds. Try to remember them.</p><button className="paper-button" onClick={()=>setStage("study")}>Begin</button></section>;
-  if(stage==="study")return <section className="task-screen wordlist-study"><ol className="wordlist-words" aria-label="Words to remember">{paused?null:words.map(word=><li key={word}>{word}</li>)}</ol><time>{paused?"Paused":`${Math.ceil(remainingMs/1000)} s`}</time></section>;
+  if(stage==="study")return <section className="task-screen wordlist-study"><ol className="wordlist-words" aria-label="Words to remember">{paused?null:words.map(word=><li key={word}>{word}</li>)}</ol><time className={!paused&&remainingMs<=5000?"low":""}>{paused?"Paused":<>{Math.ceil(remainingMs/1000)}<span>seconds left</span></>}</time></section>;
   if(stage==="instructions")return <section className="subject-center"><h1>Was the word on the list?</h1><p className="wordlist-intro">Words will appear one at a time. Some are from the list and some only look or mean nearly the same. Answer <strong>Yes</strong> only if it is exactly a word you saw. You can also press Y or N.</p><button className="paper-button" onClick={()=>setStage("test")}>Start</button></section>;
   if(stage==="sent")return <section className="subject-center"><h1>Thank you.</h1></section>;
   const visible=showing&&!paused;
@@ -508,11 +511,48 @@ function NBackTask({step,level,act,paused}:{step:SubjectStep;level:number;act:(a
   return <section className={`task-screen ${feedback?`nback-feedback-${feedback}`:""}`}><div className="nback-grid">{Array.from({length:NBACK.positions},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" onClick={event=>press(event.timeStamp)}>Match</button></section>;
 }
 
-function BreathingScreen({step,snapshot,act,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;src:string;audioEnabled:boolean}) {
-  const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);const remaining=useRemaining(step,snapshot,done);const phase=Math.floor((((step.durationSec??0)-remaining)/4)%4);const label=["In","Hold","Out","Hold"][phase];
-  return <section className={`subject-center breathing-screen ${src?"with-media":""}`}>
-    {src ? <ProtocolVideo className="breathing-video" src={src} audioEnabled={audioEnabled} loop paused={snapshot.status !== "running"} /> : null}
-    <div className="breathing-content"><h1>{step.subjectPrompt}</h1><div className={`breathing-circle phase-${phase}`}><span>{label}</span></div><small>{Math.ceil(remaining)}</small></div>
+/**
+ * Box breathing on the same bar the paced-breathing step uses: the marker rises for four seconds, waits at the top
+ * for the hold, falls, then waits at the bottom. A hold is a level that stops changing, so the pause is the cue.
+ */
+function BreathingScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
+  const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
+  const remaining=useRemaining(step,snapshot,done);
+  const elapsed=(step.durationSec??0)-remaining;
+  const phase=Math.floor((elapsed/BOX_BREATHING_PHASE_SEC)%4); const within=(elapsed%BOX_BREATHING_PHASE_SEC)/BOX_BREATHING_PHASE_SEC;
+  const label=["Breathe in","Hold","Breathe out","Hold"][phase];
+  const level=phase===0?within:phase===1?1:phase===2?1-within:0;
+  const round=Math.min(BOX_BREATHING_ROUNDS,Math.floor(elapsed/(BOX_BREATHING_PHASE_SEC*4))+1);
+  return <section className="subject-center paced-breathing">
+    <h1>{label}</h1>
+    <div className="paced-bar" aria-hidden="true"><i style={{height:`${Math.round(8+level*92)}%`}} /></div>
+    <small>Round {round} of {BOX_BREATHING_ROUNDS} &middot; {Math.ceil(BOX_BREATHING_PHASE_SEC-(elapsed%BOX_BREATHING_PHASE_SEC))} &middot; {Math.ceil(remaining)}</small>
+  </section>;
+}
+
+/**
+ * Read aloud: one fixed passage, the same for every participant, on one static screen. Nothing scrolls, because
+ * this recording is also a camera measurement and head movement is what breaks it. The subject ends the step.
+ */
+function ReadingScreen({step,act,paused}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;paused:boolean}) {
+  const [started,setStarted]=useState(false); const [sent,setSent]=useState(false);
+  const start=useRef(0); const doneRef=useRef(false);
+  const finish=useCallback((capped:boolean)=>{
+    if(doneRef.current)return; doneRef.current=true; setSent(true);
+    const readingMs=Math.round(performance.now()-start.current);
+    sendUntilAccepted(()=>act("taskComplete",{expectedStepId:step.id,eventType:READING_EVENT,label:capped?"Reading stopped at the time limit":"Passage read aloud",metadata:{readingMs,words:READING_WORDS,capped,maxSec:READING_MAX_SEC}}));
+  },[act,step.id]);
+  useEffect(()=>{
+    if(!started||paused||doneRef.current)return;
+    start.current=performance.now();
+    const id=window.setTimeout(()=>finish(true),READING_MAX_SEC*1000);
+    return()=>window.clearTimeout(id);
+  },[started,paused,finish]);
+  if(sent)return <section className="subject-center"><h1>Thank you.</h1></section>;
+  if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><p className="wordlist-intro">The passage stays on the screen while you read. Read it once, aloud, at your normal speaking pace, then press Done.</p><button className="paper-button" disabled={paused} onClick={()=>setStarted(true)}>Begin</button></section>;
+  return <section className="task-screen reading-screen">
+    <p className="reading-passage">{READING_PASSAGE}</p>
+    <button className="paper-button" disabled={paused} onClick={()=>finish(false)}>Done</button>
   </section>;
 }
 

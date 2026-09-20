@@ -153,3 +153,32 @@ test("the recognition result is scored against the session's own list and order"
   assert.match(result.label, /10\/10 recognised, 0 look-alikes accepted/);
   assert.equal(tasks.WORD_LIST.studySec, 20);
 });
+
+test("box breathing runs whole rounds of four equal phases", () => {
+  // A step that is not a whole number of rounds would end mid-breath.
+  const cycle = tasks.BOX_BREATHING_PHASE_SEC * 4;
+  assert.equal(cycle, 16);
+  assert.equal(tasks.BOX_BREATHING_SEC, tasks.BOX_BREATHING_ROUNDS * cycle);
+  assert.equal(tasks.BOX_BREATHING_SEC % cycle, 0);
+});
+
+test("the read-aloud passage takes about a minute and cannot prime the other tasks", () => {
+  const words = tasks.READING_PASSAGE.split(/\s+/).filter(Boolean);
+  assert.equal(tasks.READING_WORDS, words.length);
+  // Brysbaert (2019) puts oral reading at 183 wpm on average and lower for second-language readers; this range
+  // keeps the passage near a minute across that span without running long.
+  assert.ok(words.length >= 140 && words.length <= 160, `passage is ${words.length} words`);
+  assert.ok(words.length / 183 * 60 >= 40, "not so short that it is over before breathing settles");
+  assert.ok(words.length / 120 * 60 <= 90, "still under the cap for a slow reader");
+  assert.ok(tasks.READING_MAX_SEC > words.length / 100 * 60, "the cap cannot cut off a slow reader");
+  // The passage must not prime the Stroop colours or seed the recognition test.
+  const banned = new Set([
+    ...tasks.WORD_LISTS.flat(),
+    ...tasks.WORD_LURES.flat(),
+    ...tasks.TASK_COLOURS.map((colour) => colour.name.toLowerCase()),
+  ]);
+  const clashes = words
+    .map((word) => word.toLowerCase().replace(/[^a-z']/g, ""))
+    .filter((word) => banned.has(word) || (word.endsWith("s") && banned.has(word.slice(0, -1))));
+  assert.deepEqual(clashes, [], "passage shares words with the Stroop colours or the word list");
+});

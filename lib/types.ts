@@ -7,7 +7,7 @@ export const PROTOCOL_VERSION = "v9";
 export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"] as const;
 export type Emotion = (typeof EMOTIONS)[number];
 export type BufferKind = "stroop" | "nback" | "conversation";
-export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "questionnaire" | "annotation" | "wordlist" | "end";
+export type StepType = "setup" | "baseline" | "clip" | "sam" | "washout" | "gate" | "stroop" | "nback" | "conversation" | "sweep" | "bodyscan" | "recovery" | "questionnaire" | "annotation" | "wordlist" | "reading" | "end";
 
 /** Optional protocol blocks, chosen per session during setup and fixed once recording starts. */
 export type ProtocolOptions = {
@@ -18,6 +18,8 @@ export type ProtocolOptions = {
   annotationReplay: boolean;
   /** Word list study and yes/no recognition test after Part 3. */
   wordList?: boolean;
+  /** Read-aloud passage after Part 3: the same fixed text for every participant. */
+  reading?: boolean;
 };
 export type SessionStatus = "setup" | "running" | "paused" | "complete" | "aborted";
 export type SensorStatus = "connected" | "recording" | "delayed" | "missing" | "error" | "unknown";
@@ -354,7 +356,8 @@ export const DEFAULT_MEDIA: MediaConfig = {
     disgust: "/protocol-media/disgust.mp4",
   },
   washout: "",
-  boxBreathing: "/protocol-media/relaxing-nature.mp4",
+  // Box breathing is a silent on-screen pacer: a background track would compete with the four-second holds.
+  boxBreathing: "",
   bodyScan: "/protocol-media/bodyscan.mp4",
   fixation: "",
 };

@@ -1,12 +1,12 @@
-import { WORD_LIST_STEP, defaultTemplate, renderPlan } from "./protocol-template";
+import { READ_ALOUD_STEP, WORD_LIST_STEP, defaultTemplate, renderPlan } from "./protocol-template";
 import { STIMULI, chooseStimuli, stimulusById, type ClipKind } from "./stimuli";
-import { WORD_LISTS, wordListIndex } from "./tasks";
+import { BOX_BREATHING_ROUNDS, BOX_BREATHING_SEC, WORD_LISTS, wordListIndex } from "./tasks";
 import { DEFAULT_CLIP_SECONDS, EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolOptions, type ProtocolStep, type ProtocolTemplate } from "./types";
 
 /** Blocks enabled for new sessions. Annotation replay adds about 15 minutes, so it is opt-in. */
-export const DEFAULT_PROTOCOL_OPTIONS: ProtocolOptions = { questionnaires: true, pacedBreathing: true, extendedExertion: true, neutralClip: true, annotationReplay: false, wordList: true };
+export const DEFAULT_PROTOCOL_OPTIONS: ProtocolOptions = { questionnaires: true, pacedBreathing: true, extendedExertion: true, neutralClip: true, annotationReplay: false, wordList: true, reading: true };
 /** Sessions created before v9 have no options and keep the v8 plan. */
-const V8_OPTIONS: ProtocolOptions = { questionnaires: false, pacedBreathing: false, extendedExertion: false, neutralClip: false, annotationReplay: false, wordList: false };
+const V8_OPTIONS: ProtocolOptions = { questionnaires: false, pacedBreathing: false, extendedExertion: false, neutralClip: false, annotationReplay: false, wordList: false, reading: false };
 export const PACED_BREATHING_RATES = [6, 10, 15, 20] as const;
 /** Cycles needed before a breathing rate estimate is stable rather than a guess at a partial waveform. */
 const PACED_BREATHING_MIN_CYCLES = 6;
@@ -91,7 +91,7 @@ function createPlan(a: Assignment): ProtocolStep[] {
   const questionnaire = (id: string, title: string, phase: string, estimatedSec: number) => add({ type:"questionnaire", title, subjectPrompt:"Answer each question.", operatorScript:"Please answer each question on the screen. There are no right or wrong answers.", operatorNote:"Self-report questionnaire; answers are scored automatically.", phase, questionnaireId:id, advance:"task", estimatedSec });
   const rating = (kind: ClipKind, phase: string) => add({ type:"sam", title:`Self-report: ${kind}`, clip:kind, emo:emotionOf(kind), subjectPrompt:"Choose what fits best.", operatorScript:"Choose the response that best matches your experience. Go with your first instinct.", operatorNote:"Valence, arousal, and dominance on a 9-point SAM scale, then the main emotion felt with its intensity, then clip familiarity.", phase, advance:"task", estimatedSec:40 });
   const washout = (phase: string) => add({ type:"washout", title:"Neutral washout", subjectPrompt:"", operatorScript:"Rest your eyes on the cross and breathe normally.", operatorNote:"Neutral fixation period.", phase, durationSec:20, advance:"timer", estimatedSec:20 });
-  const gate = (phase: string, bpLabel: string, title="Return-to-baseline gate") => add({ type:"gate", title, subjectPrompt:"Sit quietly and breathe normally.", operatorScript:"Sit quietly and breathe normally while we prepare the next activity.", operatorNote:"Advance after the return-to-baseline checks are complete.", phase, durationSec:40, bp:true, bpLabel, advance:"gate", estimatedSec:45 });
+  const gate = (phase: string, bpLabel: string, title="Return-to-baseline gate") => add({ type:"gate", title, subjectPrompt:"Sit quietly and breathe normally.", operatorScript:"Sit quietly and breathe normally while we prepare the next activity.", operatorNote:"Advance after the return-to-baseline checks are complete.", phase, durationSec:25, bp:true, bpLabel, advance:"gate", estimatedSec:30 });
   const buffer = (kind: BufferKind, phase: string) => {
     if (kind === "stroop") add({ type:"stroop", title:"Stroop colour-word task", subjectPrompt:"Select the ink colour, not the word.", operatorScript:"Select the button matching the ink colour, not what the word says. Respond as quickly and accurately as you can.", operatorNote:"30 trials with reaction time and accuracy logging.", phase, advance:"task", estimatedSec:90 });
     else if (kind === "nback") add({ type:"nback", title:"N-back task", subjectPrompt:"Press Match when the position repeats from N steps ago.", operatorScript:"Press Match whenever the current position is the same as the position from N steps ago.", operatorNote:"20 scored trials with hits, misses, false alarms, and response time.", phase, advance:"task", estimatedSec:50 });
@@ -114,9 +114,10 @@ function createPlan(a: Assignment): ProtocolStep[] {
   const block = (pair:[Emotion,Emotion], kind:BufferKind, phase:string, withGate=true) => { clip(pair[0],phase); rating(pair[0],phase); washout(phase); clip(pair[1],phase); rating(pair[1],phase); buffer(kind,phase); if(withGate) gate(phase, `After ${phase}`); };
   block(a.block1,a.buf1,"Part 1"); block(a.block2,a.buf2,"Part 2"); block(a.block3,a.buf3,"Part 3",false);
   if (options.wordList) add({ ...WORD_LIST_STEP });
+  if (options.reading) add({ ...READ_ALOUD_STEP });
   gate("Movement and breathing","Before physiological sweep","Settle before physiological sweep");
   add({ type:"sweep", title:"Seated rest", subjectPrompt:"Sit comfortably and stay still.", operatorScript:"Sit comfortably and stay still for a short moment.", operatorNote:"20 second seated anchor.", phase:"Movement and breathing", durationSec:20, advance:"timer", estimatedSec:20 });
-  add({ type:"sweep", title:"Box breathing", subjectPrompt:"Follow the circle.", operatorScript:"Breathe in as the circle grows, hold, breathe out as it shrinks, then hold again.", operatorNote:"Use the registered media when available, otherwise use the visual pacer.", phase:"Movement and breathing", durationSec:45, advance:"timer", estimatedSec:45 });
+  add({ type:"sweep", title:"Box breathing", subjectPrompt:"Follow the marker.", operatorScript:"Breathe in as the marker rises, hold while it waits at the top, breathe out as it falls, then hold at the bottom.", operatorNote:`On-screen pacer only, ${BOX_BREATHING_ROUNDS} rounds of in, hold, out, hold. No audio and no background video.`, phase:"Movement and breathing", durationSec:BOX_BREATHING_SEC, advance:"timer", estimatedSec:BOX_BREATHING_SEC });
   if (options.pacedBreathing) {
     for (const rate of PACED_BREATHING_RATES) add({ type:"sweep", title:`Paced breathing: ${rate} per minute`, subjectPrompt:"Breathe in as the bar rises and out as it falls.", operatorScript:`Follow the guide at ${rate} breaths per minute. Breathe gently; do not force it.`, operatorNote:"Reference for breathing-rate estimation from video, thermal, and CSI.", phase:"Movement and breathing", durationSec:60, minDurationSec:pacedBreathingMinSec(rate), breathsPerMin:rate, advance:"timer", estimatedSec:60 });
   }

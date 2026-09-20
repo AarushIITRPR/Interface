@@ -208,12 +208,13 @@ test("a template clip replaces its registry source instead of preloading both", 
   assert.equal(happyClip.estimatedSec, base.clips.happy.durationSec + 5);
 });
 
-test("the word list is one step, on by default, just before the sweep gate", () => {
+test("the word list is one step, on by default, followed by the read-aloud passage", () => {
   const plan = protocol.buildPlan(protocol.assignFor(1));
   const wordLists = plan.filter((step) => step.type === "wordlist");
   assert.equal(wordLists.length, 1, "exactly one word list step, with no later check");
   const at = plan.indexOf(wordLists[0]);
-  assert.equal(plan[at + 1].title, "Settle before physiological sweep");
+  assert.equal(plan[at + 1].title, "Read aloud");
+  assert.equal(plan[at + 2].title, "Settle before physiological sweep");
   assert.equal(wordLists[0].title, "Word list: study and recognise");
   assert.equal(wordLists[0].estimatedSec, 65);
   // Sessions stored before the option existed keep their plan.
@@ -244,4 +245,29 @@ test("saving always advances the version, whatever version the draft carries", (
   assert.equal(template.sanitizeTemplate({ ...active, version: 99 }, { ...active, version: 5 }).version, 6);
   // A preview has no previous version to advance from, so it keeps the draft's.
   assert.equal(template.sanitizeTemplate({ ...active, version: 3 }).version, 3);
+});
+
+test("every participant reads the same passage aloud, on a step they end themselves", () => {
+  const plan = protocol.buildPlan(protocol.assignFor(1));
+  const reading = plan.filter((step) => step.type === "reading");
+  assert.equal(reading.length, 1);
+  assert.equal(reading[0].advance, "subject", "the subject ends it, so a slow reader is never cut off");
+  assert.equal(reading[0].phase, "Part 3");
+  // Task order changes per participant; the passage step does not.
+  for (const pid of [1, 7, 13, 19, 25, 31]) {
+    const other = protocol.buildPlan(protocol.assignFor(pid)).filter((step) => step.type === "reading");
+    assert.equal(other.length, 1, `participant ${pid} reads the passage`);
+  }
+  // Sessions stored before the option existed keep their plan.
+  const { reading: flag, ...older } = protocol.DEFAULT_PROTOCOL_OPTIONS;
+  assert.equal(flag, true);
+  assert.ok(!protocol.buildPlan({ ...protocol.assignFor(1), options: older }).some((step) => step.type === "reading"));
+});
+
+test("box breathing is a silent on-screen pacer of whole rounds", () => {
+  const plan = protocol.buildPlan(protocol.assignFor(1));
+  const box = plan.find((step) => step.title === "Box breathing");
+  assert.equal(box.durationSec, 64);
+  assert.equal(box.durationSec % 16, 0, "whole rounds of in, hold, out, hold");
+  assert.equal(box.mediaKey, undefined, "no background video, so no soundtrack either");
 });

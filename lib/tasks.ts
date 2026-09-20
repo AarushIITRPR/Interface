@@ -176,6 +176,27 @@ function inverseNormal(p: number) {
 /** Breath hold ends automatically at this limit. */
 export const BREATH_HOLD_MAX_SEC = 60;
 
+/** Box breathing: in, hold, out, hold, four seconds each, so one cycle is 16 s and the step is a multiple of it. */
+export const BOX_BREATHING_PHASE_SEC = 4;
+/** Rounds of box breathing: the step lasts BOX_BREATHING_ROUNDS x 4 x BOX_BREATHING_PHASE_SEC seconds. */
+export const BOX_BREATHING_ROUNDS = 4;
+export const BOX_BREATHING_SEC = BOX_BREATHING_ROUNDS * 4 * BOX_BREATHING_PHASE_SEC;
+
+/**
+ * The read-aloud passage. Every participant reads the same text, so read speech can be compared across the cohort
+ * the way spontaneous speech from the conversation step cannot.
+ *
+ * 147 words: about 48 s at the 183 wpm average for oral reading (Brysbaert 2019), and about a minute at the slower
+ * rates that review reports for readers with English as a second language. The text is deliberately neutral and
+ * concrete, because it sits inside an emotion protocol, and it shares no word with the Stroop colours or with the
+ * word-list nouns and their look-alikes, so it cannot prime either task. A test enforces all of that.
+ */
+export const READING_PASSAGE = "The public library on the main road opens at nine on every weekday. Before the doors are unlocked, two members of staff walk along the shelves with a trolley, checking that each label still matches the volumes beside it. Anything returned overnight is sorted by subject and put back in order, so that the next visitor can find it without having to ask. A junior assistant measures the empty bays, notes the figures in a folder, and joins the short morning meeting upstairs. They decide which rooms need brighter lighting, whether the study area should be moved away from the entrance, and how many trolleys to keep near the stairs. By noon the work is finished and the building is quiet again. Through the afternoon people arrive slowly: students carrying heavy bags, parents with young children, and a few older members who come mainly for the newspapers.";
+export const READING_WORDS = READING_PASSAGE.split(/\s+/).filter(Boolean).length;
+/** Reading ends by itself at this limit, so a participant who never presses Done cannot strand the session. */
+export const READING_MAX_SEC = 120;
+export const READING_EVENT = "reading_complete";
+
 export const WORD_LIST = {
   /** How long the whole list stays on screen before the recognition test. */
   studySec: 20,

@@ -13,6 +13,7 @@
  * asserts that across all 32 option combinations.
  */
 import { CLIP_KINDS, STIMULI, stimulusById, type ClipKind, type Stimulus } from "./stimuli";
+import { BOX_BREATHING_ROUNDS, BOX_BREATHING_SEC } from "./tasks";
 import {
   DEFAULT_CLIP_SECONDS, DEFAULT_MEDIA, EMOTIONS,
   type Assignment, type BufferKind, type BufferSlot, type ClipMedia, type ClipSlot, type Emotion,
@@ -22,7 +23,7 @@ import {
 
 export const CLIP_SLOTS: readonly ClipSlot[] = ["neutral", "b1a", "b1b", "b2a", "b2b", "b3a", "b3b"];
 export const MEDIA_KEYS: readonly MediaKey[] = ["washout", "boxBreathing", "bodyScan", "fixation"];
-const STEP_TYPES: readonly StepType[] = ["setup","baseline","clip","sam","washout","gate","stroop","nback","conversation","sweep","bodyscan","recovery","questionnaire","annotation","wordlist","end"];
+const STEP_TYPES: readonly StepType[] = ["setup","baseline","clip","sam","washout","gate","stroop","nback","conversation","sweep","bodyscan","recovery","questionnaire","annotation","wordlist","reading","end"];
 const ADVANCE_MODES: readonly ProtocolStep["advance"][] = ["operator","timer","media","task","gate","subject"];
 /** A duration longer than this is a typo, not a protocol. */
 const MAX_DURATION_SEC = 3600;
@@ -89,6 +90,8 @@ export function defaultMedia(): Partial<Record<MediaKey, string>> {
 /** Immediate and delayed word list recall, as step definitions both plan builders use. */
 /** Slot key for the word list step, so the builder can find it. */
 export const WORD_LIST_KEY = "wordlist-recognition";
+/** Slot key for the read-aloud step. */
+export const READ_ALOUD_KEY = "read-aloud";
 
 /** The word list step, shared by createPlan and defaultSlots so the two stay identical. */
 export const WORD_LIST_STEP = {
@@ -97,6 +100,15 @@ export const WORD_LIST_STEP = {
   operatorScript:"You will see ten words for twenty seconds. Then words appear one at a time: press Yes only if it is exactly a word from the list, No if it is not.",
   operatorNote:"Recognition memory: the 10 studied words mixed with 10 look-alikes, scored automatically (hits, false alarms, d-prime).",
   phase:"Part 3", advance:"task", estimatedSec:65,
+} as const satisfies Omit<ProtocolStep, "id" | "index">;
+
+/** Read-aloud passage, shared by createPlan and defaultSlots. Every participant reads the same text. */
+export const READ_ALOUD_STEP = {
+  type:"reading", title:"Read aloud",
+  subjectPrompt:"Read the passage aloud at a comfortable pace.",
+  operatorScript:"Read this aloud at your normal speaking pace, as if you were reading to someone. Press Done when you reach the end.",
+  operatorNote:"Read speech from a fixed passage, about a minute. The subject ends the step; the reading time is logged.",
+  phase:"Part 3", advance:"subject", estimatedSec:75,
 } as const satisfies Omit<ProtocolStep, "id" | "index">;
 
 const SETUP_SLOT: ProtocolSlot = { key:"setup", type:"setup", title:"Sensor and synchronization check", subjectPrompt:"Look toward the screen and stay still.", operatorScript:"Stay fairly still and keep facing the screen while the recording is checked.", operatorNote:"Verify every required stream and trigger synchronization before continuing.", phase:"Getting settled", advance:"operator", estimatedSec:30 };
@@ -114,7 +126,7 @@ const washoutSlot = (key: string, phase: string, extra: Partial<ProtocolSlot> = 
   ({ key, type:"washout", title:"Neutral washout", subjectPrompt:"", operatorScript:"Rest your eyes on the cross and breathe normally.", operatorNote:"Neutral fixation period.", phase, durationSec:20, advance:"timer", estimatedSec:20, mediaKey:"washout", ...extra });
 
 const gateSlot = (key: string, phase: string, bpLabel: string, title = "Return-to-baseline gate"): ProtocolSlot =>
-  ({ key, type:"gate", title, subjectPrompt:"Sit quietly and breathe normally.", operatorScript:"Sit quietly and breathe normally while we prepare the next activity.", operatorNote:"Advance after the return-to-baseline checks are complete.", phase, durationSec:40, bp:true, bpLabel, advance:"gate", estimatedSec:45 });
+  ({ key, type:"gate", title, subjectPrompt:"Sit quietly and breathe normally.", operatorScript:"Sit quietly and breathe normally while we prepare the next activity.", operatorNote:"Advance after the return-to-baseline checks are complete.", phase, durationSec:25, bp:true, bpLabel, advance:"gate", estimatedSec:30 });
 
 const replaySlotDef = (key: string, clipSlot: ClipSlot): ProtocolSlot =>
   ({ key, type:"annotation", title:"", subjectPrompt:"Watch again and keep the marker where your feeling is.", operatorScript:"Watch the clip again. Move the marker whenever your feeling changes: left to right for unpleasant to pleasant, bottom to top for calm to excited.", operatorNote:"Continuous valence and arousal sampled at 20 Hz.", phase:"Continuous rating", clipSlot, advance:"media", estimatedSec:0, ...(clipSlot === "neutral" ? { requiresClip:"neutral" as ClipKind } : {}) });
@@ -151,9 +163,10 @@ export function defaultSlots(options: ProtocolOptions, pacedMinSec: (rate: numbe
   }
   slots.push(...blockSlots(1, options), ...blockSlots(2, options), ...blockSlots(3, options));
   if (options.wordList) slots.push({ key:WORD_LIST_KEY, ...WORD_LIST_STEP });
+  if (options.reading) slots.push({ key:READ_ALOUD_KEY, ...READ_ALOUD_STEP });
   slots.push(gateSlot("gate-sweep", "Movement and breathing", "Before physiological sweep", "Settle before physiological sweep"));
   slots.push({ key:"seated-rest", type:"sweep", title:"Seated rest", subjectPrompt:"Sit comfortably and stay still.", operatorScript:"Sit comfortably and stay still for a short moment.", operatorNote:"20 second seated anchor.", phase:"Movement and breathing", durationSec:20, advance:"timer", estimatedSec:20 });
-  slots.push({ key:"box-breathing", type:"sweep", title:"Box breathing", subjectPrompt:"Follow the circle.", operatorScript:"Breathe in as the circle grows, hold, breathe out as it shrinks, then hold again.", operatorNote:"Use the registered media when available, otherwise use the visual pacer.", phase:"Movement and breathing", durationSec:45, advance:"timer", estimatedSec:45, mediaKey:"boxBreathing" });
+  slots.push({ key:"box-breathing", type:"sweep", title:"Box breathing", subjectPrompt:"Follow the marker.", operatorScript:"Breathe in as the marker rises, hold while it waits at the top, breathe out as it falls, then hold at the bottom.", operatorNote:`On-screen pacer only, ${BOX_BREATHING_ROUNDS} rounds of in, hold, out, hold. No audio and no background video.`, phase:"Movement and breathing", durationSec:BOX_BREATHING_SEC, advance:"timer", estimatedSec:BOX_BREATHING_SEC });
   if (options.pacedBreathing) {
     for (const rate of pacedRates) slots.push({ key:`paced-${rate}`, type:"sweep", title:`Paced breathing: ${rate} per minute`, subjectPrompt:"Breathe in as the bar rises and out as it falls.", operatorScript:`Follow the guide at ${rate} breaths per minute. Breathe gently; do not force it.`, operatorNote:"Reference for breathing-rate estimation from video, thermal, and CSI.", phase:"Movement and breathing", durationSec:60, minDurationSec:pacedMinSec(rate), breathsPerMin:rate, advance:"timer", estimatedSec:60 });
   }
