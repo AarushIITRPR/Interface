@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from meridian_agent.rppg import LiveRppg, pos_heart_rate
-from meridian_agent.sensors import FfmpegWriter, FrameRecorder, VIDEO_CODECS, Y16Writer, ffmpeg_available, gb_per_hour, lock_camera_settings, to_y16
+from meridian_agent.sensors import FfmpegWriter, FrameRecorder, VIDEO_CODECS, Y16Writer, background_luma, ffmpeg_available, flicker_safe_exposure, luma_steadiness, gb_per_hour, lock_camera_settings, to_y16
 
 
 class FakeCapture:
@@ -177,3 +177,36 @@ class FfmpegWriterTests(unittest.TestCase):
             recorder.submit(np.zeros((4, 4, 3), dtype=np.uint8), time.time_ns(), time.monotonic())
             recorder.close()
             self.assertIn("encoder went away", recorder.error)
+
+
+class FlickerSafeExposureTest(unittest.TestCase):
+    def test_snaps_to_whole_flicker_periods_at_50_hz(self):
+        self.assertEqual(flicker_safe_exposure(136, 50, 20), 100)
+        self.assertEqual(flicker_safe_exposure(160, 50, 20), 200)
+
+    def test_never_shorter_than_one_period(self):
+        self.assertEqual(flicker_safe_exposure(30, 50, 20), 100)
+
+    def test_never_longer_than_the_frame_period(self):
+        self.assertEqual(flicker_safe_exposure(1500, 50, 20), 500)
+        self.assertEqual(flicker_safe_exposure(1500, 50, 30), 300)
+
+    def test_60_hz_uses_8_33_ms_periods(self):
+        self.assertEqual(flicker_safe_exposure(136, 60, 30), 167)
+        self.assertEqual(flicker_safe_exposure(70, 60, 30), 83)
+
+
+class BodyExposureCheckTest(unittest.TestCase):
+    def test_background_patch_ignores_the_centre(self):
+        frame = np.full((480, 640, 3), 40, np.uint8)
+        frame[200:300, 250:400] = 250  # a bright face in the middle
+        self.assertEqual(background_luma(frame), 40.0)
+
+    def test_steady_background_verifies(self):
+        rng = np.random.default_rng(0)
+        self.assertTrue(luma_steadiness(list(80 + rng.normal(0, 0.3, 250)))["verified"])
+
+    def test_auto_exposure_step_fails(self):
+        result = luma_steadiness([80.0] * 120 + [92.0] * 130)
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["backgroundLumaRange"], 12.0)

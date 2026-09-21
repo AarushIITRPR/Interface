@@ -84,6 +84,18 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(windows[3]["stimulus_onset_ns"], ns(41.5))
         self.assertEqual(windows[2]["stimulus_starts"], 1)
 
+    def test_breathing_onset_is_the_start_press(self):
+        plan = PLAN + [{"index": 3, "id": "s03-sweep", "type": "sweep", "label": "Paced breathing: 6 per minute", "phase": "Breathing",
+                        "emotion": None, "durationSec": 60, "advance": "timer"}]
+        export = {**export_fixture(), "plan": plan, "events": [
+            event(1, "step_start", 0, 3, "s03-sweep"),
+            event(2, "pacer_start", 7, 3, "s03-sweep"),
+            event(3, "session_complete", 67, 3, "s03-sweep"),
+        ]}
+        window = step_windows(export, HostClock(0.0, 0.0, ns(0), 0.0))[0]
+        self.assertEqual(window["stimulus_onset_ns"], ns(7))
+        self.assertEqual(window["stimulus_starts"], 1)
+
     def test_coverage_counts_filled_seconds(self):
         stamps = [ns(0.1), ns(1.5), ns(3.2)]
         self.assertEqual(coverage(stamps, ns(0), ns(4)), {"rows": 3, "coveragePct": 75.0})

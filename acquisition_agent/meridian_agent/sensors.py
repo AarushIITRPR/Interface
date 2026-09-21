@@ -1057,6 +1057,10 @@ class CameraOptions:
     lock_settings: bool = True
     thermal_format: str = "rgb"
     thermal_units: str = "centikelvin"
+    # Mains frequency of the room lighting; 0 leaves the camera's anti-flicker setting and exposure alone.
+    power_line_hz: int = 50
+    # The operator set exposure, ISO and white balance by hand on a camera that exposes no controls (Sony over USB).
+    exposure_on_body: bool = False
 
 
 def gb_per_hour(width: int, height: int, fps: float, bytes_per_pixel: float, share: float) -> float:
@@ -1180,6 +1184,89 @@ def lock_camera_settings_v4l2(device: str) -> dict | None:
     if not applied:
         return None
     return {"locked": not failed, "backend": "v4l2-ctl", "applied": applied, "failed": failed}
+
+
+POWER_LINE_MENU = {50: 1, 60: 2}
+
+
+def set_power_line_v4l2(device: object, hz: int) -> bool | None:
+    """Set the camera's anti-flicker filter to the mains frequency. None when there is no V4L2 device or control."""
+    if hz not in POWER_LINE_MENU or not isinstance(device, str) or not device.startswith("/dev/"):
+        return None
+    import subprocess
+    try:
+        result = subprocess.run(["v4l2-ctl", "-d", device, "--set-ctrl", f"power_line_frequency={POWER_LINE_MENU[hz]}"],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.returncode == 0
+
+
+def flicker_safe_exposure(value_100us: float, hz: int, fps: float) -> int:
+    """Snap an exposure (V4L2 units of 100 us) to a whole number of lamp flicker periods.
+
+    Lamps flicker at twice the mains frequency, so an exposure of 10 ms (50 Hz) or 8.33 ms (60 Hz) integrates a full
+    cycle and every frame collects the same light. Anything in between ripples frame to frame, which rPPG reads as
+    signal. Kept to at least one period and at most the frame period, rounded down to whole periods there.
+    """
+    period = 10000 / (2 * hz)
+    periods = max(1, round(value_100us / period))
+    if fps > 0:
+        periods = max(1, min(periods, int((10000 / fps) // period)))
+    return int(round(periods * period))
+
+
+def apply_flicker_safe_exposure(device: object, hz: int, fps: float) -> dict:
+    """Re-set a locked manual exposure to a flicker-safe value through v4l2-ctl, and report what changed."""
+    result: dict = {"powerLineHz": hz, "applied": False}
+    if hz not in POWER_LINE_MENU or not isinstance(device, str) or not device.startswith("/dev/"):
+        return result
+    import subprocess
+
+    def read() -> int | None:
+        try:
+            out = subprocess.run(["v4l2-ctl", "-d", device, "--get-ctrl", "exposure_time_absolute"], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        try:
+            return int(out.stdout.split(":")[-1]) if out.returncode == 0 else None
+        except ValueError:
+            return None
+
+    before = read()
+    if before is None:
+        return result
+    target = flicker_safe_exposure(before, hz, fps)
+    try:
+        subprocess.run(["v4l2-ctl", "-d", device, "--set-ctrl", f"exposure_time_absolute={target}"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    after = read()
+    result.update({"exposureBefore": before, "exposureTarget": target, "exposureAfter": after, "applied": after == target})
+    return result
+
+
+BODY_LOCK_CHECK_SEC = 10.0
+BODY_LOCK_MAX_RANGE = 3.0
+
+
+def background_luma(frame) -> float:
+    """Mean grey level of the top-left 10% x 10% of the frame: background, away from a centred face."""
+    height, width = frame.shape[:2]
+    patch = frame[: max(1, height // 10), : max(1, width // 10)]
+    return float(patch.mean())
+
+
+def luma_steadiness(values: list[float], max_range: float = BODY_LOCK_MAX_RANGE) -> dict:
+    """Whether background brightness held still: auto exposure re-meters when the subject moves, and the background moves with it."""
+    import numpy as np
+    if len(values) < 2:
+        return {"verified": None, "detail": "too few frames to check"}
+    arr = np.asarray(values, dtype=np.float64)
+    spread = float(arr.max() - arr.min())
+    verified = spread <= max_range
+    return {"verified": verified, "backgroundLumaStd": round(float(arr.std()), 3), "backgroundLumaRange": round(spread, 3), "frames": int(arr.size),
+            "detail": "background brightness steady" if verified else "brightness is still changing: check M mode, ISO and WB"}
 
 
 def lock_camera_settings(capture, cv2, system: str, device: object = None) -> dict:
@@ -1334,6 +1421,8 @@ class CameraSensor(Sensor):
                 capture.set(cv2.CAP_PROP_FRAME_HEIGHT, options.height)
             if options.fps:
                 capture.set(cv2.CAP_PROP_FPS, options.fps)
+            # Before the warm-up, so auto exposure settles with the anti-flicker filter already on.
+            power_line_set = None if file_source or self.radiometric else set_power_line_v4l2(self.source, options.power_line_hz)
             width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
             height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
             requested_fps = capture.get(cv2.CAP_PROP_FPS)
@@ -1347,6 +1436,8 @@ class CameraSensor(Sensor):
             if file_source:
                 settings["lock"] = {"locked": False, "reason": "video file source"}
             file_frames = 0
+            body_lumas: list[float] = []
+            body_check_until: float | None = None
             rppg = LiveRppg() if self.sensor_id in ("face","face2") and not self.radiometric else None
             frame_times: deque[float] = deque(maxlen=90)
             last_preview = 0.0
@@ -1372,10 +1463,23 @@ class CameraSensor(Sensor):
                 if lock_pending and current - started >= self.WARMUP_SEC:
                     lock_pending = False
                     settings["lock"] = lock_camera_settings(capture, cv2, system, self.source)
+                    if not settings["lock"].get("locked") and options.exposure_on_body:
+                        # Nothing to lock from here; the camera body holds the settings. Trust it only as far as the
+                        # background brightness check below confirms it.
+                        settings["lock"] = {"locked": True, "backend": "camera body (operator-set)", "verified": None, "hostAttempt": settings["lock"]}
+                        body_check_until = current + BODY_LOCK_CHECK_SEC
+                    if settings["lock"].get("locked") and system == "Linux":
+                        settings["flicker"] = {**apply_flicker_safe_exposure(self.source, options.power_line_hz, fps), "powerLineSet": power_line_set}
                 if (settings["lock"] is not None or not lock_pending) and not settings.get("written"):
                     settings["source"] = "file" if file_source else "camera"
                     settings["written"] = True
                     (self.path.parent / "camera_settings.json").write_text(json.dumps({k: v for k, v in settings.items() if k != "written"}, indent=2), encoding="utf-8")
+                if body_check_until is not None:
+                    body_lumas.append(background_luma(frame))
+                    if current >= body_check_until:
+                        body_check_until = None
+                        settings["lock"].update(luma_steadiness(body_lumas))
+                        (self.path.parent / "camera_settings.json").write_text(json.dumps({k: v for k, v in settings.items() if k != "written"}, indent=2), encoding="utf-8")
                 if current-last_preview >= 0.2:
                     preview = frame
                     if self.radiometric:

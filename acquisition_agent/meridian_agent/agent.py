@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
@@ -218,8 +219,13 @@ class MeridianAgent:
         bauds = {"csi":self.args.csi_baud,"emg":self.args.emg_baud,"gsr":self.args.gsr_baud,"ecg":self.args.ecg_baud,"photodiode":self.args.photodiode_baud,"csi2":self.args.csi_baud,"resp":self.args.resp_baud,"environment":self.args.environment_baud}
         values,inventory = discover_serial_assignments(values,bauds)
         camera_options = CameraOptions(codec=self.args.video_codec,width=self.args.camera_width,height=self.args.camera_height,fps=self.args.camera_fps,
-                                       lock_settings=not self.args.no_camera_lock,thermal_format=self.args.thermal_format,thermal_units=self.args.thermal_units)
-        self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono,camera_options,2 if self.args.audio_channels == "stereo" else 1) for sensor_id in SENSOR_IDS]
+                                       lock_settings=not self.args.no_camera_lock,thermal_format=self.args.thermal_format,thermal_units=self.args.thermal_units,power_line_hz=self.args.power_line_hz)
+        # The face camera can run its own size and rate, e.g. a BCC950 at 640x480/20 fps for flicker-safe raw capture,
+        # without dragging the other cameras down with it.
+        face_options = replace(camera_options,width=self.args.face_width or camera_options.width,height=self.args.face_height or camera_options.height,fps=self.args.face_fps or camera_options.fps)
+        face2_options = replace(camera_options,exposure_on_body=self.args.face2_exposure_on_body)
+        options_for = {"face":face_options,"face2":face2_options}
+        self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono,options_for.get(sensor_id,camera_options),2 if self.args.audio_channels == "stereo" else 1) for sensor_id in SENSOR_IDS]
         if self.lsl is not None:
             for sensor in self.sensors:
                 sensor.sample_listener = self.lsl.push_value
@@ -478,6 +484,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--camera-width",type=int,default=1280,help="Requested capture width (0 keeps the camera default)")
     result.add_argument("--camera-height",type=int,default=720,help="Requested capture height (0 keeps the camera default)")
     result.add_argument("--camera-fps",type=float,default=0.0,help="Requested frame rate (0 keeps the camera default)")
+    result.add_argument("--face-width",type=int,default=0,help="Face camera capture width only (0 uses --camera-width)")
+    result.add_argument("--face-height",type=int,default=0,help="Face camera capture height only (0 uses --camera-height)")
+    result.add_argument("--face-fps",type=float,default=0.0,help="Face camera frame rate only (0 uses --camera-fps)")
+    result.add_argument("--face2-exposure-on-body",action="store_true",help="Face camera 2 has manual exposure, fixed ISO and fixed WB set on the camera body (it exposes no controls over USB); verified by a background brightness check")
+    result.add_argument("--power-line-hz",type=int,choices=(0,50,60),default=50,help="Mains frequency of the room lights: sets anti-flicker and snaps locked exposure to whole flicker periods (0 = leave alone)")
     result.add_argument("--no-camera-lock",action="store_true",help="Leave auto exposure and white balance on")
     result.add_argument("--thermal-format",choices=("rgb","y16"),default="rgb",help="y16 records radiometric 16-bit frames (e.g. FLIR Lepton on PureThermal)")
     result.add_argument("--thermal-units",choices=("centikelvin","raw"),default="centikelvin")

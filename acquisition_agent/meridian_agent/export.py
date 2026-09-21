@@ -124,7 +124,8 @@ def step_windows(export: dict, clock: HostClock) -> list[dict]:
         elif kind == "session_resumed" and pause_started is not None and host_ns is not None:
             current["pause_ns"] += max(0, host_ns - pause_started)
             pause_started = None
-        elif kind == "media_onset":
+        elif kind in ("media_onset", "pacer_start"):
+            # A breathing step's pacer starts when Start is pressed, not when its instructions appear.
             current["stimulus_starts"] += 1
             if current["stimulus_onset_ns"] is None:
                 current["stimulus_onset_ns"] = host_ns
