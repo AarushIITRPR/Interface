@@ -6,8 +6,8 @@
  * of slots, plus the clips, task definitions and media they draw on.
  *
  * A slot says *what happens and for how long*. It does not say which emotion or which task lands in it; those are
- * resolved per participant from the Williams square in `assignFor`, so editing a template can reorder and retime
- * the protocol without touching the counterbalancing.
+ * resolved per participant from the fixed emotion order and task counterbalancing in `assignFor`, so editing a
+ * template can reorder and retime the protocol without touching either.
  *
  * `defaultTemplate(options)` renders identically to `createPlan` for the same options; `tests/protocol.test.mjs`
  * asserts that across all 32 option combinations.

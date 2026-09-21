@@ -30,7 +30,7 @@ import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, defaultProtocolTemplate, estimateRemaining, shortLabel, wordListIndexFor } from "@/lib/protocol";
+import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, defaultProtocolTemplate, estimateRemaining, shortLabel, timerStarted, waitsForStart, wordListIndexFor } from "@/lib/protocol";
 import { WORD_LIST_EVENT } from "@/lib/tasks";
 import { applyReply, latestSequence, type PartialSnapshot } from "@/lib/event-sync";
 import { resolveBufferSlot, resolveClipSlot } from "@/lib/protocol-template";
@@ -418,6 +418,8 @@ function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateT
   const advanceStage = () => void act("advance", needsOverride ? { override: true, reason: overrideReason.trim() } : {}).then((next) => { if (next) { setSettled(false); setOverrideReason(""); } });
   // A repeat keeps the take that came before it: the export closes the current window as "repeated" and
   // opens the next one at attempt + 1, so both are kept apart. Cancelling the prompt repeats nothing.
+  // Breathing steps hold their pacer until Start is pressed on the subject screen; the operator can start it too.
+  const awaitingStart = running && waitsForStart(step) && !timerStarted(snapshot.events, step.id, snapshot.attempt);
   const repeatStage = () => { const reason = window.prompt("Why repeat this stage? The previous attempt is kept."); if (reason !== null) void act("repeat", { reason: reason.trim() }); };
 
   return (
@@ -439,7 +441,7 @@ function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateT
             {snapshot.notes.filter((item) => item.stepId === step.id).slice(-4).map((item) => <p key={item.id}><time>{new Date(item.createdAt).toLocaleTimeString()}</time> {item.body}</p>)}
           </fieldset>
           <footer><button onClick={() => void act(running ? "pause" : "resume", running ? { reason: "Paused by operator" } : {})}>{running ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}{running ? " PAUSE SESSION" : " RESUME SESSION"}</button><button disabled={!canAdvance} onClick={advanceStage}>{needsOverride ? "ADVANCE WITH OVERRIDE" : "ADVANCE"} <ChevronRight size={14} /></button></footer>
-          <div className="live-stage-lower"><button disabled={snapshot.stepIndex === 0 || snapshot.status === "setup"} onClick={() => void act("navigate", { direction: -1 })}>PREVIOUS STAGE</button><button disabled={!running} onClick={repeatStage}>REPEAT STAGE</button><span className={subjectOnline ? "connected" : "waiting"}>{subjectOnline ? "SUBJECT DISPLAY CONNECTED" : "SUBJECT DISPLAY WAITING"}</span></div>
+          <div className="live-stage-lower"><button disabled={snapshot.stepIndex === 0 || snapshot.status === "setup"} onClick={() => void act("navigate", { direction: -1 })}>PREVIOUS STAGE</button><button disabled={!running} onClick={repeatStage}>REPEAT STAGE</button>{awaitingStart ? <button onClick={() => void act("startTimer", { expectedStepId: step.id })}>START BREATHING</button> : null}<span className={subjectOnline ? "connected" : "waiting"}>{awaitingStart ? "WAITING FOR SUBJECT TO PRESS START" : subjectOnline ? "SUBJECT DISPLAY CONNECTED" : "SUBJECT DISPLAY WAITING"}</span></div>
         </section>
       </div>
     </section>

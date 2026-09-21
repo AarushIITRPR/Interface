@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { summarizeSession } from "./cohort";
-import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel, wordListFor, wordListIndexFor } from "./protocol";
+import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel, timerStarted, waitsForStart, wordListFor, wordListIndexFor } from "./protocol";
 import { QUESTIONNAIRES, scoreQuestionnaire, validAnswers } from "./questionnaires";
 import { STIMULI, stimulusById } from "./stimuli";
 import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, requiredSensorsReady, sanitizeFields, stalePreflightReport, startChecks, withConsentDefaults } from "./rig";
@@ -381,7 +381,9 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
       // comparison stays only for sessions whose steps predate mediaKey.
       variant: current.mediaKey === "boxBreathing" || current.title === "Box breathing" ? "box_breathing"
         : current.safetyKey === "breath_hold" || current.title === "Breath hold" ? "breath_hold"
-        : current.breathsPerMin ? "paced_breathing" : null,
+        : current.breathsPerMin ? "paced_breathing"
+        : current.safetyKey === "exertion" ? "exertion" : null,
+      timerStarted: !waitsForStart(current) || timerStarted(snapshot.events, current.id, snapshot.attempt),
       // The test words go out in test order and unlabelled: which ones were studied stays on the server.
       ...(current.type === "wordlist" ? {
         words: [...wordListFor(snapshot.assignment)],
@@ -513,7 +515,12 @@ export async function mutateSession(code: string, action: string, payload: Actio
         }
       }
     }
-    if (action === "autoAdvance" && running && step?.advance === "timer" && step.durationSec && Date.now()-Date.parse(current.stepStartedAt) >= step.durationSec*1000-AUTO_ADVANCE_TOLERANCE_MS) advance(current,"Timer completed","system");
+    if (action === "startTimer" && running && step && waitsForStart(step) && !timerStarted(current.events, step.id, current.attempt)) {
+      current.stepStartedAt = now();
+      appendEvent(current,{eventType:"pacer_start",label:"Breathing started",detail:shortLabel(step),source:payload.source === "subject" ? "subject" : "operator"});
+    }
+    const waitingForStart = Boolean(step && waitsForStart(step) && !timerStarted(current.events, step.id, current.attempt));
+    if (action === "autoAdvance" && running && !waitingForStart && step?.advance === "timer" && step.durationSec && Date.now()-Date.parse(current.stepStartedAt) >= step.durationSec*1000-AUTO_ADVANCE_TOLERANCE_MS) advance(current,"Timer completed","system");
     if (action === "pause" && current.status === "running") { current.status="paused"; current.pausedAt=now(); current.announcement={id:uid("ann"),text:"Please wait a moment.",kind:"pause",createdAt:now()}; appendEvent(current,{eventType:"session_paused",label:"Session paused",detail:String(payload.reason ?? ""),severity:"warn",source:payload.source === "subject" ? "subject" : "operator"}); }
     if (action === "resume" && current.status === "paused") { const delta = current.pausedAt ? Date.now()-Date.parse(current.pausedAt) : 0; current.stepStartedAt=new Date(Date.parse(current.stepStartedAt)+delta).toISOString(); current.status="running"; current.pausedAt=null; current.announcement=null; appendEvent(current,{eventType:"session_resumed",label:"Session resumed",source:"operator",metadata:{pauseMs:delta}}); }
     if (action === "repeat") { current.stepStartedAt=now(); current.attempt = nextAttempt(current, step?.id ?? ""); appendEvent(current,{eventType:"step_repeated",label:"Step repeated by operator",detail:String(payload.reason ?? "No reason entered"),severity:"warn",source:"operator",metadata:{attempt:current.attempt}}); }

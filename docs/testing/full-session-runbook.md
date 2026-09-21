@@ -2,7 +2,7 @@
 
 Protocol **version 13**. Participant **131**: **35 steps, about 40 minutes** of protocol. Plan on **75 minutes**
 including setup. Emotion order for this participant: **surprise > disgust > fear > happy > anger > sad**. Tasks:
-**N-back (Part 1) > Stroop (Part 3)**; this participant does **not** do the conversation step.
+**N-back (Part 1) > Stroop (Part 3)**; no participant does the conversation step any more.
 
 > Create the session **fresh on the morning of the trial**. A session keeps the protocol version it was created
 > with forever, so a session made before today would run the old protocol.

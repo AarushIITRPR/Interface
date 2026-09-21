@@ -55,7 +55,7 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(instructor, /applyReply\(/);
   assert.match(subject, /serverNow\(\)/);
   for (const mode of ["overview","protocol","review"]) assert.match(instructor,new RegExp(`"${mode}"`));
-  assert.match(protocol, /WILLIAMS6/);
+  assert.match(protocol, /EMOTION_ORDER/);
   assert.match(protocol, /Guided body scan/);
   assert.match(hosting, /"d1": "DB"/);
   assert.match(hosting, /"r2": "MEDIA"/);

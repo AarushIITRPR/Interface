@@ -240,6 +240,8 @@ function subjectPresentation(step:SubjectStep) {
   if(step.type==="conversation") return {label:"Speaking task",title:<>Speak<br/><i>naturally.</i></>,description:"Speak at a comfortable pace."};
   if(step.type==="washout"||step.fixation) return {label:"Baseline task",title:<>Keep your eyes<br/><i>at the centre.</i></>,description:"Stay with the centre of the screen."};
   if(step.type==="bodyscan") return {label:"Rest task",title:<>Settle<br/><i>into stillness.</i></>,description:"Stay still and follow the instruction."};
+  if(step.type==="sweep" && step.variant==="exertion") return {label:"Movement task",title:<>Move<br/><i>at your own pace.</i></>,description:"Stop at once if you feel dizzy or unwell."};
+  if((step.type==="sweep" && !step.variant) || step.type==="recovery") return {label:"Rest",title:<>Sit<br/><i>still.</i></>,description:"Breathe normally."};
   if(step.type==="sweep") return {label:"Breathing task",title:<>Breathe<br/><i>with the guide.</i></>,description:"Follow the guide at a comfortable pace."};
   return {label:"Current task",title:<>A moment<br/><i>of attention.</i></>,description:"Follow the instruction shown on the screen."};
 }
@@ -267,10 +269,12 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
 
 function CenteredInstruction({text}:{text:string}) { return <section className="subject-center subject-enter"><h1>{text}</h1></section>; }
 
-function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>Promise<unknown>) {
+function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>Promise<unknown>,started=true) {
   const [remaining,setRemaining] = useState(step.durationSec ?? 0);
   const lastAttempt = useRef(0);
   useEffect(()=>{
+    // A step waiting for Start shows its Start screen instead of a countdown, and must not ask the server to move on.
+    if(!started)return;
     const tick=()=>{
       if(snapshot.status !== "running")return;
       const elapsed=(serverNow()-Date.parse(snapshot.stepStartedAt))/1000;
@@ -280,7 +284,7 @@ function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>Prom
       if(value<=0 && onDone && Date.now()-lastAttempt.current>=1000){lastAttempt.current=Date.now();onDone().catch(()=>undefined);}
     };
     tick(); return startTicker(100,tick);
-  },[onDone,snapshot.status,snapshot.stepStartedAt,step.durationSec]);
+  },[onDone,snapshot.status,snapshot.stepStartedAt,step.durationSec,started]);
   return remaining;
 }
 
@@ -293,7 +297,7 @@ function TimedScreen({step,snapshot,act,mode,src,audioEnabled}:{step:SubjectStep
   </section>;
   return <section className="subject-center timed-screen">
     {mode==="fixation" ? <div className="fixation" aria-label="Focus on the cross"/> : <h1>{step.subjectPrompt}</h1>}
-    {mode==="conversation" ? <time>{clock(remaining)}</time> : mode!=="fixation" ? <time>{Math.ceil(remaining)}</time> : <small>{Math.ceil(remaining)}</small>}
+    {mode==="conversation" || (mode==="timer" && (step.durationSec ?? 0) >= 60) ? <time>{clock(remaining)}</time> : mode!=="fixation" ? <time>{Math.ceil(remaining)}</time> : <small>{Math.ceil(remaining)}</small>}
   </section>;
 }
 
@@ -515,9 +519,17 @@ function NBackTask({step,level,act,paused}:{step:SubjectStep;level:number;act:(a
  * Box breathing on the same bar the paced-breathing step uses: the marker rises for four seconds, waits at the top
  * for the hold, falls, then waits at the bottom. A hold is a level that stops changing, so the pause is the cue.
  */
+/** The screen a breathing step shows until Start is pressed: nothing moves and no time passes until then. */
+function BreathingStart({step,snapshot,act,detail}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;detail:string}) {
+  const [sending,setSending]=useState(false);
+  const start=()=>{setSending(true);act("startTimer",{expectedStepId:step.id}).finally(()=>setSending(false));};
+  return <section className="subject-center"><h1>{step.subjectPrompt}</h1><p className="wordlist-intro">{detail} Press Start when you are ready.</p><button className="paper-button" disabled={sending || snapshot.status !== "running"} onClick={start}>Start</button></section>;
+}
+
 function BreathingScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
-  const remaining=useRemaining(step,snapshot,done);
+  const remaining=useRemaining(step,snapshot,done,step.timerStarted);
+  if(!step.timerStarted) return <BreathingStart step={step} snapshot={snapshot} act={act} detail={`Box breathing, ${BOX_BREATHING_ROUNDS} rounds: in, hold, out, hold.`} />;
   const elapsed=(step.durationSec??0)-remaining;
   const phase=Math.floor((elapsed/BOX_BREATHING_PHASE_SEC)%4); const within=(elapsed%BOX_BREATHING_PHASE_SEC)/BOX_BREATHING_PHASE_SEC;
   const label=["Breathe in","Hold","Breathe out","Hold"][phase];
@@ -603,7 +615,8 @@ function QuestionnaireScreen({step,act,paused}:{step:SubjectStep;act:(a:string,p
 /** Breathing guide at a fixed rate with equal inhale and exhale, driven by the server-corrected step clock. */
 function PacedBreathingScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
-  const remaining=useRemaining(step,snapshot,done);
+  const remaining=useRemaining(step,snapshot,done,step.timerStarted);
+  if(!step.timerStarted) return <BreathingStart step={step} snapshot={snapshot} act={act} detail={`${step.breathsPerMin} breaths per minute for ${clock(step.durationSec ?? 0)}.`} />;
   const cycle=60/(step.breathsPerMin ?? 10); const elapsed=(step.durationSec ?? 0)-remaining; const phase=(elapsed%cycle)/cycle;
   const level=phase<0.5?phase*2:(1-phase)*2; const inhaling=phase<0.5;
   return <section className="subject-center paced-breathing"><h1>{inhaling?"Breathe in":"Breathe out"}</h1><div className="paced-bar" aria-hidden="true"><i style={{height:`${Math.round(8+level*92)}%`}} /></div><small>{step.breathsPerMin} breaths per minute · {Math.ceil(remaining)}</small></section>;

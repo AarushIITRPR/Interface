@@ -24,7 +24,7 @@ The protocol is defined in `lib/protocol.ts`. It preserves the supplied order an
 8. Return to normal
 9. Completion
 
-Stimuli use the six-row Williams-style sequence. Stroop, N-back, and conversation order is deterministic per participant and supports participant IDs beyond 1000.
+Every participant sees the clips in one fixed order, calmest first and heart-rate-raising last: surprise, disgust, happy, sad, fear, anger (ranked by mean heart-rate change in Siegel et al. 2018). Stroop and N-back swap between Part 1 and Part 3 every six participants; the order is deterministic per participant and supports participant IDs beyond 1000.
 
 ## Reliability model
 
@@ -73,7 +73,7 @@ The subject display downloads every stimulus before the protocol starts and play
 
 ## Protocol v8 design
 
-- **Counterbalancing:** emotion order follows the six-row Williams square by participant; task order (Stroop, N-back, conversation) cycles through its six permutations every sixth participant, so all 36 pairings balance across 36 participants.
+- **Clip order and counterbalancing:** since 21 Sep 2026 the emotion order is fixed for everyone (surprise, disgust, happy, sad, fear, anger), graded from the smallest to the largest mean heart-rate rise; sessions created earlier keep the Williams-square order they were assigned. Stroop and N-back alternate between Parts 1 and 3 every sixth participant; the conversation is no longer run.
 - **Ratings after each clip:** 9-point SAM valence, arousal, and dominance, then the main felt emotion (six emotions or neutral) with 9-point intensity, then whether the clip was seen before.
 - **Stroop:** 30 seeded trials, 15 congruent and 15 incongruent, congruency runs of at most 3, 400 ms fixation, 2 s deadline; per-trial data and congruent/incongruent RT with interference.
 - **N-back:** 8-trial practice with feedback, then 20 scored trials with exactly 30% targets and no accidental matches; per-trial outcomes and d'. The level locks when practice starts.

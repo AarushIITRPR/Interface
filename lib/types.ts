@@ -109,8 +109,8 @@ export type MediaKey = "washout" | "boxBreathing" | "bodyScan" | "fixation";
  * One position in the protocol template.
  *
  * A slot says what happens and for how long; it does not say which emotion or which task lands in it. Those come
- * from the participant's counterbalancing at render time, so editing the template cannot disturb the Williams
- * square in `assignFor`.
+ * from the participant's assignment at render time, so editing the template cannot disturb the emotion order or
+ * the task counterbalancing in `assignFor`.
  */
 export type ProtocolSlot = Omit<ProtocolStep, "id" | "index" | "emo" | "clip" | "slotKey"> & {
   /** Stable identity, unique within the template. Becomes part of the rendered step id. */
@@ -310,7 +310,9 @@ export type SessionSnapshot = {
 export type SubjectStep = Pick<ProtocolStep,
   "id" | "index" | "type" | "subjectPrompt" | "durationSec" | "safety" | "fixation" | "advance" | "questionnaireId" | "breathsPerMin"
 > & {
-  variant: "box_breathing" | "breath_hold" | "paced_breathing" | null;
+  variant: "box_breathing" | "breath_hold" | "paced_breathing" | "exertion" | null;
+  /** False while a breathing step waits for Start; its timer and pacer only run once it is true. */
+  timerStarted: boolean;
   /** The list to study, for the word list step. */
   words?: string[];
   /** The recognition test: studied words and look-alikes in test order, deliberately without saying which is which. */

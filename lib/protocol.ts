@@ -1,7 +1,7 @@
 import { READ_ALOUD_STEP, WORD_LIST_STEP, defaultTemplate, renderPlan } from "./protocol-template";
 import { STIMULI, chooseStimuli, stimulusById, type ClipKind } from "./stimuli";
 import { BOX_BREATHING_ROUNDS, BOX_BREATHING_SEC, WORD_LISTS, wordListIndex } from "./tasks";
-import { DEFAULT_CLIP_SECONDS, EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolOptions, type ProtocolStep, type ProtocolTemplate } from "./types";
+import { DEFAULT_CLIP_SECONDS, type Assignment, type BufferKind, type Emotion, type ProtocolOptions, type ProtocolStep, type ProtocolTemplate } from "./types";
 
 /** Blocks enabled for new sessions. Annotation replay adds about 15 minutes, so it is opt-in. */
 export const DEFAULT_PROTOCOL_OPTIONS: ProtocolOptions = { questionnaires: true, pacedBreathing: true, extendedExertion: true, neutralClip: true, annotationReplay: false, wordList: true, reading: true };
@@ -29,22 +29,31 @@ export function sanitizeProtocolOptions(raw: unknown, current: ProtocolOptions =
   return result;
 }
 
-const WILLIAMS6 = [[1,2,6,3,5,4],[2,3,1,4,6,5],[3,4,2,5,1,6],[4,5,3,6,2,1],[5,6,4,1,3,2],[6,1,5,2,4,3]];
+/**
+ * One emotion order for every participant, calmest first and heart-rate-raising last, ranked by the mean heart-rate
+ * change from baseline in Siegel et al. 2018 (Psychological Bulletin 144(4), 202 studies, Table 9): disgust d=0.07
+ * (no reliable change), happy 0.33, sad 0.36, fear 0.49, anger 0.52. Surprise was not meta-analysable and mainly
+ * produces a brief orienting deceleration, so it opens. A fixed order confounds emotion with position; that was
+ * accepted in exchange for a graded rise in heart rate across the three parts.
+ */
+const EMOTION_ORDER: readonly Emotion[] = ["surprise", "disgust", "happy", "sad", "fear", "anger"];
+// Conversation is always position 2, which the active protocol has no task step for, so no participant gets it.
+// Stroop and N-back alternate between Parts 1 and 3. Six rows keep bufferRow's meaning for the word list and cohort.
 const BUFFER_ORDERS: BufferKind[][] = [
-  ["stroop","nback","conversation"],["stroop","conversation","nback"],["nback","stroop","conversation"],
-  ["nback","conversation","stroop"],["conversation","stroop","nback"],["conversation","nback","stroop"],
+  ["stroop","conversation","nback"],["nback","conversation","stroop"],
+  ["stroop","conversation","nback"],["nback","conversation","stroop"],
+  ["stroop","conversation","nback"],["nback","conversation","stroop"],
 ];
 
 /**
- * Emotion order follows the six-row Williams square by participant; task order cycles through its six permutations
- * independently (every sixth participant), so each emotion sequence is paired with every task order and all 36
- * combinations are balanced across 36 participants.
+ * Emotion order is the same for everyone (EMOTION_ORDER). Task order changes every sixth participant. `row` no longer
+ * orders the clips; it only rotates the word list, with `bufferRow`, through a Latin square.
  */
 export function assignFor(raw: number | string): Assignment {
   const pid = Math.max(1, Number.parseInt(String(raw), 10) || 1);
   const row = (pid - 1) % 6;
   const bufferRow = Math.floor((pid - 1) / 6) % 6;
-  const order = WILLIAMS6[row].map((n) => EMOTIONS[n - 1]);
+  const order = [...EMOTION_ORDER];
   const buffers = BUFFER_ORDERS[bufferRow];
   return { pid, row: row + 1, bufferRow: bufferRow + 1, buf1: buffers[0], buf2: buffers[1], buf3: buffers[2], block1: [order[0],order[1]], block2: [order[2],order[3]], block3: [order[4],order[5]], fullOrder: order, options: { ...DEFAULT_PROTOCOL_OPTIONS }, stimuli: chooseStimuli(pid), wordList: wordListIndex(row + 1, bufferRow + 1) };
 }
@@ -150,6 +159,20 @@ export function shortLabel(step: ProtocolStep) {
 export function clipSource(a: Assignment, clip: ClipKind | undefined, fallback: Partial<Record<string, string>>) {
   if (!clip) return "";
   return stimulusById(a.stimuli?.[clip], STIMULI)?.src ?? fallback[clip] ?? "";
+}
+
+/**
+ * Breathing steps (paced and box) hold their pacer until someone presses Start, so a participant still reading the
+ * instructions does not lose the first cycles. Chosen by what the step is, the same rule the subject view uses.
+ */
+export function waitsForStart(step: Pick<ProtocolStep, "type" | "breathsPerMin" | "mediaKey" | "title"> | undefined | null) {
+  if (!step || step.type !== "sweep") return false;
+  return Boolean(step.breathsPerMin) || step.mediaKey === "boxBreathing" || step.title === "Box breathing";
+}
+
+/** Whether Start was pressed for this attempt of the step. A repeat or a return to the step is a new attempt. */
+export function timerStarted(events: readonly { eventType: string; stepId: string; attempt?: number }[], stepId: string, attempt: number) {
+  return events.some((event) => event.eventType === "pacer_start" && event.stepId === stepId && (event.attempt ?? 1) === attempt);
 }
 
 export function estimateRemaining(plan: readonly ProtocolStep[], index: number) {

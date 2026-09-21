@@ -64,7 +64,7 @@ export async function POST(request: Request) {
   }
 }
 
-const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","questionnaire","annotationChunk"]);
+const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","questionnaire","annotationChunk","startTimer"]);
 
 function isSubjectAction(action:string,payload:Record<string,unknown>) {
   if (!SUBJECT_ACTIONS.has(action)) return false;
@@ -79,6 +79,7 @@ function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): R
   if (action === "pause") return {reason:"Subject requested a stop",source:"subject"};
   if (action === "advance") return {expectedStepId,reason:"Subject completed the step",source:"subject"};
   if (action === "autoAdvance") return {expectedStepId};
+  if (action === "startTimer") return {expectedStepId,source:"subject"};
   if (action === "rating") return {
     expectedStepId,valence:scale(payload.valence,SAM_POINTS),arousal:scale(payload.arousal,SAM_POINTS),dominance:scale(payload.dominance,SAM_POINTS),
     discreteEmotion:oneOf(payload.discreteEmotion,DISCRETE_EMOTIONS),

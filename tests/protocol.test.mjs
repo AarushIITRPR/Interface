@@ -4,32 +4,46 @@ import { loadTs } from "./load-ts.mjs";
 
 const protocol = await loadTs("../lib/protocol.ts");
 
-test("emotion order and task order are counterbalanced independently", () => {
-  const combinations = new Set();
-  const pairings = new Map();
-  for (let pid = 1; pid <= 36; pid++) {
+test("every participant sees the clips calmest first, heart-rate-raising last", () => {
+  for (let pid = 1; pid <= 72; pid++) {
     const a = protocol.assignFor(pid);
-    const emotions = a.fullOrder.join(">");
-    const tasks = [a.buf1, a.buf2, a.buf3].join(">");
-    combinations.add(`${emotions}|${tasks}`);
-    pairings.set(emotions, (pairings.get(emotions) ?? new Set()).add(tasks));
+    assert.deepEqual(a.fullOrder, ["surprise", "disgust", "happy", "sad", "fear", "anger"]);
+    assert.deepEqual([a.block1, a.block2, a.block3], [["surprise", "disgust"], ["happy", "sad"], ["fear", "anger"]]);
   }
-  assert.equal(combinations.size, 36);
-  assert.equal(pairings.size, 6);
-  for (const tasks of pairings.values()) assert.equal(tasks.size, 6);
 });
 
-test("Williams rows balance first-order carryover between emotions", () => {
-  const follows = new Map();
-  for (let pid = 1; pid <= 6; pid++) {
-    const order = protocol.assignFor(pid).fullOrder;
-    for (let i = 0; i < order.length - 1; i++) {
-      const key = `${order[i]}>${order[i + 1]}`;
-      follows.set(key, (follows.get(key) ?? 0) + 1);
-    }
+test("only breathing steps wait for Start, and each attempt must be started again", () => {
+  assert.equal(protocol.waitsForStart({ type: "sweep", breathsPerMin: 6, title: "Paced breathing: 6 per minute" }), true);
+  assert.equal(protocol.waitsForStart({ type: "sweep", mediaKey: "boxBreathing", title: "Box" }), true);
+  assert.equal(protocol.waitsForStart({ type: "sweep", title: "Box breathing" }), true);
+  assert.equal(protocol.waitsForStart({ type: "sweep", title: "Step-up" }), false);
+  assert.equal(protocol.waitsForStart({ type: "bodyscan", title: "Guided body scan" }), false);
+  assert.equal(protocol.waitsForStart(undefined), false);
+  const events = [{ eventType: "pacer_start", stepId: "s28-sweep", attempt: 1 }];
+  assert.equal(protocol.timerStarted(events, "s28-sweep", 1), true);
+  assert.equal(protocol.timerStarted(events, "s28-sweep", 2), false);
+  assert.equal(protocol.timerStarted(events, "s29-sweep", 1), false);
+});
+
+test("the two task orders alternate every six participants", () => {
+  const firstTask = (pid) => protocol.assignFor(pid).buf1;
+  for (let pid = 1; pid <= 6; pid++) assert.equal(firstTask(pid), "stroop");
+  for (let pid = 7; pid <= 12; pid++) assert.equal(firstTask(pid), "nback");
+  assert.equal(firstTask(13), "stroop");
+});
+
+test("conversation always lands in Part 2, so the two-task protocol never runs it", () => {
+  for (let pid = 1; pid <= 72; pid++) {
+    const a = protocol.assignFor(pid);
+    assert.equal(a.buf2, "conversation");
+    assert.deepEqual([a.buf1, a.buf3].sort(), ["nback", "stroop"]);
+    const template = protocol.defaultProtocolTemplate(a.options, a);
+    template.slots = template.slots.filter((slot) => slot.key !== "task-2" && slot.key !== "nasa-tlx-2");
+    const types = protocol.buildPlan({ ...a, protocol: template }).map((step) => step.type);
+    assert.ok(!types.includes("conversation"), `participant ${pid} got the conversation step`);
+    assert.equal(types.filter((type) => type === "stroop").length, 1);
+    assert.equal(types.filter((type) => type === "nback").length, 1);
   }
-  assert.equal(follows.size, 30);
-  for (const count of follows.values()) assert.equal(count, 1);
 });
 
 test("participants beyond 36 wrap to the same assignments", () => {
@@ -43,7 +57,7 @@ test("sessions without options keep the exact v8 plan", () => {
   delete assignment.options;
   delete assignment.stimuli;
   const ids = protocol.buildPlan(assignment).map((step) => step.id).join(" ");
-  assert.equal(ids, "s00-setup s01-baseline s02-baseline s03-clip-happy s04-sam-happy s05-washout s06-clip-sad s07-sam-sad s08-stroop s09-gate s10-clip-disgust s11-sam-disgust s12-washout s13-clip-anger s14-sam-anger s15-nback s16-gate s17-clip-surprise s18-sam-surprise s19-washout s20-clip-fear s21-sam-fear s22-conversation s23-gate s24-sweep s25-sweep s26-sweep s27-sweep s28-sweep s29-sweep s30-sweep s31-bodyscan s32-recovery s33-end");
+  assert.equal(ids, "s00-setup s01-baseline s02-baseline s03-clip-surprise s04-sam-surprise s05-washout s06-clip-disgust s07-sam-disgust s08-stroop s09-gate s10-clip-happy s11-sam-happy s12-washout s13-clip-sad s14-sam-sad s15-conversation s16-gate s17-clip-fear s18-sam-fear s19-washout s20-clip-anger s21-sam-anger s22-nback s23-gate s24-sweep s25-sweep s26-sweep s27-sweep s28-sweep s29-sweep s30-sweep s31-bodyscan s32-recovery s33-end");
 });
 
 test("v9 options add questionnaires, paced breathing, longer exertion, and replay", () => {
