@@ -123,3 +123,25 @@ test("the BP cuff is a span artifact that opens and closes like any other", () =
   assert.ok(rig.openArtifactSpans([start]).has("bp_cuff"));
   assert.ok(!rig.openArtifactSpans([start, end]).has("bp_cuff"));
 });
+
+test("blood pressure readings are rounded, range-checked, and need systolic above diastolic", () => {
+  assert.deepEqual(rig.sanitizeBp({ systolic: 120.4, diastolic: "80", pulse: 70 }), { ok: true, systolic: 120, diastolic: 80, pulse: 70 });
+  assert.deepEqual(rig.sanitizeBp({ systolic: 118, diastolic: 76, pulse: "" }), { ok: true, systolic: 118, diastolic: 76, pulse: null });
+  assert.deepEqual(rig.sanitizeBp({ systolic: 118, diastolic: 76 }), { ok: true, systolic: 118, diastolic: 76, pulse: null });
+  assert.equal(rig.sanitizeBp({ systolic: 80, diastolic: 80 }).ok, false);
+  assert.equal(rig.sanitizeBp({ systolic: 300, diastolic: 80 }).ok, false);
+  assert.equal(rig.sanitizeBp({ systolic: 120, diastolic: 20 }).ok, false);
+  assert.equal(rig.sanitizeBp({ systolic: 120, diastolic: 80, pulse: 250 }).ok, false);
+  assert.equal(rig.sanitizeBp({ systolic: "abc", diastolic: 80 }).ok, false);
+  assert.equal(rig.sanitizeBp({ diastolic: 80 }).ok, false);
+  assert.equal(rig.BP_LIMITS.systolic.start, 120);
+  assert.equal(rig.BP_LIMITS.diastolic.start, 80);
+});
+
+test("a blood pressure step counts as recorded only for the current attempt", () => {
+  const readings = [{ stepId: "gate-1", attempt: 1 }, { stepId: "baseline" }];
+  assert.ok(rig.bpRecorded(readings, "gate-1", 1));
+  assert.ok(!rig.bpRecorded(readings, "gate-1", 2));
+  assert.ok(rig.bpRecorded(readings, "baseline", 1), "readings saved before attempts were stored count as the first attempt");
+  assert.ok(!rig.bpRecorded(readings, "standing", 1));
+});

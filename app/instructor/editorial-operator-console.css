@@ -383,3 +383,19 @@
 .live-builder-add select { max-width: 280px; padding: 4px 6px; border: 1px solid var(--live-ink); background: var(--live-paper-light); font: inherit; }
 .live-builder-add button { min-height: 32px; padding: 0 14px; border: 1px solid var(--live-ink); background: var(--live-ink); color: #fff8ef; font-size: .62rem; font-weight: 800; letter-spacing: .06em; }
 .live-builder-add button:disabled { opacity: .4; }
+
+/* Blood pressure steppers in the live panel. */
+.live-context-control.bp .bp-stepper, .live-context-control.bp .live-bp-saved { grid-column: 1 / -1; }
+.live-bp-saved { margin: 0; color: #536170; font-size: .72rem; }
+.live-context-control.bp .bp-stepper-label { color: #536170; font-size: .68rem; }
+.live-context-control.bp .bp-stepper-row button { grid-column: auto; align-self: stretch; min-height: 38px; padding: 0; border: 1px solid var(--live-ink); background: transparent; color: var(--live-ink); font-size: .78rem; font-weight: 700; }
+.live-context-control.bp .bp-stepper-row button:hover:not(:disabled) { background: var(--live-paper-light); }
+.live-context-control.bp .bp-stepper-row input { width: 100%; height: 38px; margin: 0; padding: 0 8px; border: 1px solid var(--live-ink); background: var(--live-paper-light); font-size: .95rem; font-weight: 700; }
+
+/* Participant blood pressure entry inside the display panel: fit the panel, scroll only if it cannot. */
+.live-subject-task .bp-entry { width: min(760px, 100%); min-height: 100%; height: 100%; padding: 26px 34px; overflow: auto; }
+.live-subject-task .bp-entry h1 { font-size: clamp(1.8rem, 3vw, 2.6rem); }
+.live-subject-task .bp-entry-fields { gap: 14px; margin-top: 22px; }
+.live-subject-task .bp-entry .bp-stepper-row button, .live-subject-task .bp-entry .bp-stepper-row input { height: 60px; }
+.live-subject-task .bp-entry .bp-stepper-row input { font-size: 2.1rem; }
+.live-subject-task .bp-entry-save { min-height: 60px; margin-top: 22px; }

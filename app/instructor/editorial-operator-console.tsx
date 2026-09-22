@@ -35,7 +35,8 @@ import { WORD_LIST_EVENT } from "@/lib/tasks";
 import { applyReply, latestSequence, type PartialSnapshot } from "@/lib/event-sync";
 import { resolveBufferSlot, resolveClipSlot } from "@/lib/protocol-template";
 import { EMOTIONS as CLIP_KINDS_EDITABLE } from "@/lib/types";
-import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, startChecks, withConsentDefaults, type MetadataField, type StartCheck } from "@/lib/rig";
+import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, BP_LIMITS, bpRecorded, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, startChecks, withConsentDefaults, type MetadataField, type StartCheck } from "@/lib/rig";
+import { BpStepper } from "@/app/bp-stepper";
 import { startTicker } from "@/lib/ticker";
 import { SCREENING_QUESTIONS, screeningComplete, skippedSafetySteps } from "@/lib/safety";
 import type { CohortOverview } from "@/lib/cohort";
@@ -1069,18 +1070,21 @@ function ProtocolBuilder({ assignment }: { assignment: Assignment }) {
  * cuff was squeezing the arm - a sympathetic stimulus in a study of sympathetic responses - can be excluded later.
  */
 function BloodPressurePanel({ snapshot, step, plan, act, now }: { snapshot: SessionSnapshot; step: ProtocolStep; plan: readonly ProtocolStep[]; act: Act; now: number }) {
-  const [sys, setSys] = useState("");
-  const [dia, setDia] = useState("");
-  const [pulse, setPulse] = useState("");
+  const [sys, setSys] = useState<number | null>(BP_LIMITS.systolic.start);
+  const [dia, setDia] = useState<number | null>(BP_LIMITS.diastolic.start);
+  const [pulse, setPulse] = useState<number | null>(null);
   const inflating = openArtifactSpans(snapshot.events).has(BP_CUFF_ARTIFACT);
   const cuffStart = inflating ? [...snapshot.events].reverse().find((event) => event.eventType === "artifact" && event.metadata?.type === BP_CUFF_ARTIFACT && event.metadata?.kind === "start") : undefined;
   const cuffSec = cuffStart ? Math.max(0, Math.round((now - Date.parse(cuffStart.createdAt)) / 1000)) : 0;
   const bpSteps = plan.filter((item) => item.bp);
   const position = bpSteps.findIndex((item) => item.id === step.id) + 1;
   const active = ["running", "paused"].includes(snapshot.status);
+  const recorded = bpRecorded(snapshot.bpReadings, step.id, snapshot.attempt);
+  const latest = [...snapshot.bpReadings].reverse().find((reading) => reading.stepId === step.id && (reading.attempt ?? 1) === snapshot.attempt);
+  const valid = sys !== null && dia !== null && sys > dia;
   const save = () => {
-    void act("bp", { label: step.bpLabel, systolic: Number(sys), diastolic: Number(dia), pulse: pulse ? Number(pulse) : null }).then((next) => {
-      if (next) { setSys(""); setDia(""); setPulse(""); }
+    void act("bp", { label: step.bpLabel, systolic: sys, diastolic: dia, pulse }).then((next) => {
+      if (next) { setSys(BP_LIMITS.systolic.start); setDia(BP_LIMITS.diastolic.start); setPulse(null); }
     });
   };
   return <fieldset className="live-context-control bp">
@@ -1090,10 +1094,12 @@ function BloodPressurePanel({ snapshot, step, plan, act, now }: { snapshot: Sess
       <button type="button" disabled={!active || inflating} onClick={() => void act("artifact", { type: BP_CUFF_ARTIFACT })}>{inflating ? "INFLATING" : "INFLATE"}</button>
       <span>{inflating ? `Cuff on ${cuffSec} s` : "Press as the cuff starts inflating"}</span>
     </div>
-    <label>Systolic<input inputMode="numeric" value={sys} onChange={(event) => setSys(event.target.value.replace(/\D/g, ""))} /></label>
-    <label>Diastolic<input inputMode="numeric" value={dia} onChange={(event) => setDia(event.target.value.replace(/\D/g, ""))} /></label>
-    <label>Pulse<input inputMode="numeric" value={pulse} onChange={(event) => setPulse(event.target.value.replace(/\D/g, ""))} /></label>
-    <button disabled={!sys || !dia} onClick={save}>SAVE READING</button>
+    {latest ? <p className="live-bp-saved">Saved by {latest.source === "subject" ? "participant" : "operator"}: <strong>{latest.systolic}/{latest.diastolic}</strong>{latest.pulse != null ? `, pulse ${latest.pulse}` : ""}</p>
+      : <p className="live-bp-saved">{step.durationSec ? "Participant enters the reading on their screen when the timer ends, or save it here." : "Participant enters the reading on their screen, or save it here."}</p>}
+    <BpStepper label="Systolic" value={sys} onChange={setSys} {...BP_LIMITS.systolic} />
+    <BpStepper label="Diastolic" value={dia} onChange={setDia} {...BP_LIMITS.diastolic} />
+    <BpStepper label="Pulse" unit="optional" value={pulse} onChange={setPulse} {...BP_LIMITS.pulse} />
+    <button disabled={!valid} onClick={save}>{recorded ? "SAVE ANOTHER READING" : "SAVE READING"}</button>
   </fieldset>;
 }
 

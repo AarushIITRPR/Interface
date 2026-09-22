@@ -64,7 +64,7 @@ export async function POST(request: Request) {
   }
 }
 
-const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","questionnaire","annotationChunk","startTimer"]);
+const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","questionnaire","annotationChunk","startTimer","bp"]);
 
 function isSubjectAction(action:string,payload:Record<string,unknown>) {
   if (!SUBJECT_ACTIONS.has(action)) return false;
@@ -80,6 +80,8 @@ function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): R
   if (action === "advance") return {expectedStepId,reason:"Subject completed the step",source:"subject"};
   if (action === "autoAdvance") return {expectedStepId};
   if (action === "startTimer") return {expectedStepId,source:"subject"};
+  // Only the three numbers: the label, cuff span and step come from the server's own state.
+  if (action === "bp") return {expectedStepId,source:"subject",systolic:payload.systolic,diastolic:payload.diastolic,pulse:payload.pulse};
   if (action === "rating") return {
     expectedStepId,valence:scale(payload.valence,SAM_POINTS),arousal:scale(payload.arousal,SAM_POINTS),dominance:scale(payload.dominance,SAM_POINTS),
     discreteEmotion:oneOf(payload.discreteEmotion,DISCRETE_EMOTIONS),

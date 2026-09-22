@@ -259,7 +259,7 @@ export type SessionSnapshot = {
   notes: Array<{ id: string; body: string; category: string; stepId: string; stepLabel: string; createdAt: string }>;
   ratings: Array<{ emotion: ClipKind; valence: number; arousal: number; dominance: number; scalePoints?: number; discreteEmotion?: string | null; intensity?: number | null; familiarity?: string | null; createdAt: string }>;
   sensors: SensorChannel[];
-  bpReadings: Array<{ stepId: string; label: string; systolic: number; diastolic: number; pulse: number | null; createdAt: string; cuffStartedAt?: string; cuffSec?: number }>;
+  bpReadings: Array<{ stepId: string; label: string; systolic: number; diastolic: number; pulse: number | null; createdAt: string; cuffStartedAt?: string; cuffSec?: number; attempt?: number; source?: "operator" | "subject" }>;
   media: MediaConfig;
   nbackLevel: 1 | 2 | 3;
   operatorLastSeenAt: string | null;
@@ -308,8 +308,10 @@ export type SessionSnapshot = {
 };
 
 export type SubjectStep = Pick<ProtocolStep,
-  "id" | "index" | "type" | "subjectPrompt" | "durationSec" | "safety" | "fixation" | "advance" | "questionnaireId" | "breathsPerMin"
+  "id" | "index" | "type" | "subjectPrompt" | "durationSec" | "safety" | "fixation" | "advance" | "questionnaireId" | "breathsPerMin" | "bp" | "bpLabel"
 > & {
+  /** A blood pressure step whose reading for this attempt is already saved, by the participant or the operator. */
+  bpRecorded?: boolean;
   variant: "box_breathing" | "breath_hold" | "paced_breathing" | "exertion" | null;
   /** False while a breathing step waits for Start; its timer and pacer only run once it is true. */
   timerStarted: boolean;

@@ -3,7 +3,7 @@ import { summarizeSession } from "./cohort";
 import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, clipSource, sanitizeProtocolOptions, shortLabel, timerStarted, waitsForStart, wordListFor, wordListIndexFor } from "./protocol";
 import { QUESTIONNAIRES, scoreQuestionnaire, validAnswers } from "./questionnaires";
 import { STIMULI, stimulusById } from "./stimuli";
-import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, requiredSensorsReady, sanitizeFields, stalePreflightReport, startChecks, withConsentDefaults } from "./rig";
+import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, CONSENT_FIELDS, bpRecorded, sanitizeBp, CSI_CALIBRATION_SEC, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, heartRateAgreement, missingParticipantFields, openArtifactSpans, requiredSensorsReady, sanitizeFields, stalePreflightReport, startChecks, withConsentDefaults } from "./rig";
 import { GATE, SCREENING_QUESTIONS, evaluateGate, screeningComplete, skippedSafetySteps, updatePhysiology } from "./safety";
 import { SAM_POINTS, recognitionItemsFor, recognitionSeed, wordListRecognitionResult } from "./tasks";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type Assignment, type ProtocolStep, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type ProtocolTemplate, type SessionSnapshot, type SubjectSnapshot } from "./types";
@@ -377,6 +377,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
       advance: current.advance,
       questionnaireId: current.questionnaireId,
       breathsPerMin: current.breathsPerMin,
+      ...(current.bp ? { bp: true, bpLabel: current.bpLabel, bpRecorded: bpRecorded(snapshot.bpReadings, current.id, snapshot.attempt) } : {}),
       // Chosen by what the step is, not what it is called: titles are editable in the protocol builder. The title
       // comparison stays only for sessions whose steps predate mediaKey.
       variant: current.mediaKey === "boxBreathing" || current.title === "Box breathing" ? "box_breathing"
@@ -520,7 +521,11 @@ export async function mutateSession(code: string, action: string, payload: Actio
       appendEvent(current,{eventType:"pacer_start",label:"Breathing started",detail:shortLabel(step),source:payload.source === "subject" ? "subject" : "operator"});
     }
     const waitingForStart = Boolean(step && waitsForStart(step) && !timerStarted(current.events, step.id, current.attempt));
-    if (action === "autoAdvance" && running && !waitingForStart && step?.advance === "timer" && step.durationSec && Date.now()-Date.parse(current.stepStartedAt) >= step.durationSec*1000-AUTO_ADVANCE_TOLERANCE_MS) advance(current,"Timer completed","system");
+    const timerDone = Boolean(step?.advance === "timer" && step.durationSec && Date.now()-Date.parse(current.stepStartedAt) >= step.durationSec*1000-AUTO_ADVANCE_TOLERANCE_MS);
+    // A blood pressure step holds at the end of its timer until its reading is saved. The operator's advance
+    // still moves on without one, so a missing cuff cannot trap the session.
+    const awaitingBp = Boolean(step?.bp && !bpRecorded(current.bpReadings, step.id, current.attempt));
+    if (action === "autoAdvance" && running && !waitingForStart && timerDone && !awaitingBp) advance(current,"Timer completed","system");
     if (action === "pause" && current.status === "running") { current.status="paused"; current.pausedAt=now(); current.announcement={id:uid("ann"),text:"Please wait a moment.",kind:"pause",createdAt:now()}; appendEvent(current,{eventType:"session_paused",label:"Session paused",detail:String(payload.reason ?? ""),severity:"warn",source:payload.source === "subject" ? "subject" : "operator"}); }
     if (action === "resume" && current.status === "paused") { const delta = current.pausedAt ? Date.now()-Date.parse(current.pausedAt) : 0; current.stepStartedAt=new Date(Date.parse(current.stepStartedAt)+delta).toISOString(); current.status="running"; current.pausedAt=null; current.announcement=null; appendEvent(current,{eventType:"session_resumed",label:"Session resumed",source:"operator",metadata:{pauseMs:delta}}); }
     if (action === "repeat") { current.stepStartedAt=now(); current.attempt = nextAttempt(current, step?.id ?? ""); appendEvent(current,{eventType:"step_repeated",label:"Step repeated by operator",detail:String(payload.reason ?? "No reason entered"),severity:"warn",source:"operator",metadata:{attempt:current.attempt}}); }
@@ -635,15 +640,21 @@ export async function mutateSession(code: string, action: string, payload: Actio
       current.hardwareGateOverride = Boolean(payload.enabled);
       appendEvent(current,{eventType:"hardware_gate_override",label:current.hardwareGateOverride?"Hardware readiness override enabled":"Hardware readiness override cleared",severity:current.hardwareGateOverride?"warn":"info",source:"operator"});
     }
-    if (action === "bp") {
-      if (!Number.isFinite(Number(payload.systolic)) || !Number.isFinite(Number(payload.diastolic))) throw new Error("Enter systolic and diastolic values.");
+    const fromSubjectBp = action === "bp" && payload.source === "subject";
+    // The participant saves only on a blood pressure step, and only once per attempt, so a retried save cannot double up.
+    if (action === "bp" && (!fromSubjectBp || (running && awaitingBp))) {
+      const reading = sanitizeBp(payload);
+      if (!reading.ok) throw new Error(reading.error);
       // The cuff compresses the arm and provokes the sympathetic response this study measures, so its window is kept
       // as an artifact span. Saving the reading ends it, in the same update, so no span is left open by a reading.
       const cuff = openArtifactSpans(current.events).has(BP_CUFF_ARTIFACT) ? latestEvent(current, "artifact", (event) => event.metadata?.type === BP_CUFF_ARTIFACT && event.metadata?.kind === "start") : undefined;
       const cuffSec = cuff ? Math.round((Date.now() - Date.parse(cuff.createdAt)) / 100) / 10 : undefined;
       if (cuff) appendEvent(current,{ eventType:"artifact", label:`Artifact: ${artifactLabel(BP_CUFF_ARTIFACT)} ended`, severity:"warn", source:"operator", metadata:{ type:BP_CUFF_ARTIFACT, kind:"end" } });
-      current.bpReadings.push({stepId:step?.id ?? "",label:String(payload.label ?? step?.bpLabel ?? "Reading"),systolic:Number(payload.systolic),diastolic:Number(payload.diastolic),pulse:Number.isFinite(Number(payload.pulse)) && payload.pulse !== "" && payload.pulse != null ? Number(payload.pulse) : null,createdAt:now(),...(cuff ? { cuffStartedAt:cuff.createdAt, cuffSec } : {})});
-      appendEvent(current,{eventType:"bp_recorded",label:"Blood pressure recorded",source:"operator",metadata:{systolic:payload.systolic,diastolic:payload.diastolic,pulse:payload.pulse,...(cuff ? { cuffSec } : {})}});
+      const source = fromSubjectBp ? "subject" : "operator";
+      current.bpReadings.push({stepId:step?.id ?? "",label:String(payload.label ?? step?.bpLabel ?? "Reading"),systolic:reading.systolic,diastolic:reading.diastolic,pulse:reading.pulse,createdAt:now(),attempt:current.attempt,source,...(cuff ? { cuffStartedAt:cuff.createdAt, cuffSec } : {})});
+      appendEvent(current,{eventType:"bp_recorded",label:"Blood pressure recorded",detail:`${reading.systolic}/${reading.diastolic}${reading.pulse != null ? `, pulse ${reading.pulse}` : ""}`,source,metadata:{systolic:reading.systolic,diastolic:reading.diastolic,pulse:reading.pulse,...(cuff ? { cuffSec } : {})}});
+      // A participant saving after a timed step's timer has run out is the last thing that step waits for.
+      if (fromSubjectBp && timerDone && !waitingForStart) advance(current,"Blood pressure saved","subject");
     }
     if (action === "nbackLevel" && Number.isFinite(Number(payload.level))) current.nbackLevel = Math.max(1,Math.min(3,Math.round(Number(payload.level)))) as 1|2|3;
     if (action === "media") { current.media = payload.media as MediaConfig; appendEvent(current,{eventType:"media_config",label:"Media configuration updated",source:"operator"}); }

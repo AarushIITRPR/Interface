@@ -69,6 +69,32 @@ export const ARTIFACT_TYPES: readonly ArtifactType[] = [
 export const BP_CUFF_ARTIFACT = "bp_cuff";
 export const POINT_ARTIFACT_WINDOW = { beforeSec: 3, afterSec: 1 } as const;
 
+/** Stepper start points and plausible limits for a cuff reading; the defaults are where a normal adult reading starts. */
+export const BP_LIMITS = {
+  systolic: { min: 60, max: 260, start: 120 },
+  diastolic: { min: 30, max: 160, start: 80 },
+  pulse: { min: 30, max: 220, start: 70 },
+} as const;
+
+/** A cuff reading rounded and range-checked, or an error to show. Pulse is optional. */
+export function sanitizeBp(payload: { systolic?: unknown; diastolic?: unknown; pulse?: unknown }):
+  { ok: true; systolic: number; diastolic: number; pulse: number | null } | { ok: false; error: string } {
+  const read = (value: unknown) => value === null || value === undefined || value === "" ? null : Number.isFinite(Number(value)) ? Math.round(Number(value)) : NaN;
+  const within = (value: number, key: keyof typeof BP_LIMITS) => value >= BP_LIMITS[key].min && value <= BP_LIMITS[key].max;
+  const systolic = read(payload.systolic), diastolic = read(payload.diastolic), pulse = read(payload.pulse);
+  if (systolic === null || diastolic === null || Number.isNaN(systolic) || Number.isNaN(diastolic)) return { ok: false, error: "Enter systolic and diastolic values." };
+  if (!within(systolic, "systolic")) return { ok: false, error: `Systolic must be ${BP_LIMITS.systolic.min}-${BP_LIMITS.systolic.max}.` };
+  if (!within(diastolic, "diastolic")) return { ok: false, error: `Diastolic must be ${BP_LIMITS.diastolic.min}-${BP_LIMITS.diastolic.max}.` };
+  if (systolic <= diastolic) return { ok: false, error: "Systolic must be higher than diastolic." };
+  if (pulse !== null && (Number.isNaN(pulse) || !within(pulse, "pulse"))) return { ok: false, error: `Pulse must be ${BP_LIMITS.pulse.min}-${BP_LIMITS.pulse.max}.` };
+  return { ok: true, systolic, diastolic, pulse };
+}
+
+/** Whether this attempt at a step already has its reading. Attempt, not start time: a pause shifts stepStartedAt. */
+export function bpRecorded(readings: ReadonlyArray<{ stepId: string; attempt?: number }>, stepId: string, attempt: number) {
+  return readings.some((reading) => reading.stepId === stepId && (reading.attempt ?? 1) === attempt);
+}
+
 /** Span artifacts (such as talking) currently switched on, from the event ledger. */
 export function openArtifactSpans(events: ReadonlyArray<{ eventType: string; metadata?: Record<string, unknown> }>) {
   const open = new Set<string>();

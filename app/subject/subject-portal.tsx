@@ -5,7 +5,9 @@ import { MotionConfig, motion } from "motion/react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { BpStepper } from "@/app/bp-stepper";
 import { QUESTIONNAIRES } from "@/lib/questionnaires";
+import { BP_LIMITS } from "@/lib/rig";
 import { startTicker } from "@/lib/ticker";
 import { BOX_BREATHING_PHASE_SEC, BOX_BREATHING_ROUNDS, BREATH_HOLD_MAX_SEC, READING_EVENT, READING_MAX_SEC, READING_PASSAGE, READING_WORDS, DISCRETE_EMOTIONS, FAMILIARITY, INTENSITY_POINTS, NBACK, SAM_POINTS, STROOP, TASK_COLOURS, WORD_LIST, WORD_LIST_EVENT, nbackOutcome, nbackSequence, newSeed, seededRandom, stroopTrials, summarizeNBack, summarizeStroop, type NBackTrial, type StroopResponse } from "@/lib/tasks";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
@@ -256,7 +258,7 @@ function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:Su
   if (step.type === "wordlist") return <WordListTask step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "reading") return <ReadingScreen step={step} act={act} paused={snapshot.status !== "running"} />;
   if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
-  if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
+  if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "sweep" && step.variant === "paced_breathing") return <PacedBreathingScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "questionnaire") return <QuestionnaireScreen step={step} act={act} paused={snapshot.status !== "running"} />;
@@ -291,6 +293,7 @@ function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>Prom
 function TimedScreen({step,snapshot,act,mode,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;mode:"timer"|"fixation"|"conversation"|"bodyscan";src:string;audioEnabled:boolean}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
   const remaining=useRemaining(step,snapshot,done);
+  if(step.bp && !step.bpRecorded && remaining<=0 && snapshot.status==="running") return <BpEntryScreen step={step} act={act} />;
   if(mode==="bodyscan") return <section className="body-scan">
     {src ? <ProtocolVideo className="body-scan-video" src={src} audioEnabled={audioEnabled} loop paused={snapshot.status !== "running"} /> : null}
     <div className="body-scan-content"><div className="breathing-orb"/><time>{clock(remaining)}</time></div>
@@ -301,9 +304,37 @@ function TimedScreen({step,snapshot,act,mode,src,audioEnabled}:{step:SubjectStep
   </section>;
 }
 
-function GateScreen({step,snapshot}:{step:SubjectStep;snapshot:SubjectSnapshot}) {
+function GateScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const remaining=useRemaining(step,snapshot);
+  if(step.bp && !step.bpRecorded && remaining<=0 && snapshot.status==="running") return <BpEntryScreen step={step} act={act} />;
   return <section className="subject-center timed-screen"><h1>{remaining>0 ? step.subjectPrompt : "Please wait."}</h1>{remaining>0 ? <time>{Math.ceil(remaining)}</time> : null}</section>;
+}
+
+/** The participant reads the cuff monitor and sets the numbers with the mouse; the step moves on once it is saved. */
+function BpEntryScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
+  const [systolic,setSystolic]=useState<number|null>(BP_LIMITS.systolic.start);
+  const [diastolic,setDiastolic]=useState<number|null>(BP_LIMITS.diastolic.start);
+  const [pulse,setPulse]=useState<number|null>(BP_LIMITS.pulse.start);
+  const [saved,setSaved]=useState(false);
+  const valid=systolic!==null && diastolic!==null && systolic>diastolic;
+  const save=()=>{
+    if(!valid||saved)return;
+    setSaved(true);
+    sendUntilAccepted(()=>act("bp",{expectedStepId:step.id,systolic,diastolic,pulse}));
+  };
+  if(saved) return <section className="subject-center subject-enter"><h1>Saved. Thank you.</h1></section>;
+  return <section className="bp-entry subject-enter">
+    <p className="rating-count">{step.bpLabel ?? "Blood pressure"}</p>
+    <h1>Enter your blood pressure</h1>
+    <p className="task-note">Copy the three numbers from the cuff monitor. Use the buttons to change each one.</p>
+    <div className="bp-entry-fields">
+      <BpStepper label="Systolic (top)" unit="mmHg" value={systolic} onChange={setSystolic} {...BP_LIMITS.systolic} />
+      <BpStepper label="Diastolic (bottom)" unit="mmHg" value={diastolic} onChange={setDiastolic} {...BP_LIMITS.diastolic} />
+      <BpStepper label="Pulse" unit="per min" value={pulse} onChange={setPulse} {...BP_LIMITS.pulse} />
+    </div>
+    {!valid ? <p className="bp-entry-warning">The top number must be higher than the bottom number.</p> : null}
+    <button className="paper-button bp-entry-save" disabled={!valid} onClick={save}>Save reading</button>
+  </section>;
 }
 
 function WashoutScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {

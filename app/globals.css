@@ -62,3 +62,23 @@ button:not(:disabled),a { cursor:pointer; }
 @media(max-width:1180px){.device-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.recording-health-strip span:nth-of-type(3),.recording-health-strip span:nth-of-type(4){display:none}.protocol-mode{grid-template-columns:220px minmax(430px,1fr) 340px}.monitor-task{grid-template-columns:1fr auto}.subject-compact{grid-column:1/-1}.signal-detail{grid-template-columns:1fr 260px}}
 @media(max-width:900px){.recording-health-strip{overflow-x:auto;white-space:nowrap}.device-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.monitor-top{grid-template-columns:1fr}.protocol-mode{height:auto;grid-template-columns:1fr}.protocol-mode .protocol-rail{display:none}.protocol-mode .current-step{overflow:visible}.mode-intro,.review-header{flex-direction:column}.agent-card{width:100%}.quality-report{grid-template-columns:1fr}.preflight-checks{grid-template-columns:1fr}}
 @media(max-width:620px){.mode-page{width:min(100% - 24px,1320px);padding-top:22px}.device-grid{grid-template-columns:1fr}.launch-agent{grid-template-columns:1fr}.setup-actions{flex-direction:column}.setup-actions button{width:100%}.signal-summary{grid-template-columns:8px 1fr auto}.signal-summary small,.signal-summary>b{display:none}.signal-detail{grid-template-columns:1fr}.monitor-task{grid-template-columns:1fr}.monitor-navigation button{flex:1}.quality-row>div{grid-template-columns:repeat(2,1fr)}.quality-timeline{overflow-x:auto}.quality-timeline>div{min-width:620px}.console-v2 .session-connect-strip code{display:none}.recording-health-strip>span:first-of-type{margin-right:0}.recording-health-strip span:nth-of-type(n+3){display:none}}
+
+/* Blood pressure stepper, shared by the participant screen and the operator console. */
+.bp-stepper{display:flex;flex-direction:column;gap:8px}
+.bp-stepper-label{font-weight:600}
+.bp-stepper-label small{margin-left:8px;font-weight:400;opacity:.65}
+.bp-stepper-row{display:grid;grid-template-columns:1fr 1fr 1.6fr 1fr 1fr;gap:8px;align-items:stretch}
+.bp-stepper-row button{touch-action:manipulation;user-select:none;-webkit-user-select:none;font-variant-numeric:tabular-nums}
+.bp-stepper-row input{min-width:0;text-align:center;font-variant-numeric:tabular-nums}
+/* Participant screen: large targets, because the mouse is the only input. */
+.bp-entry{min-height:100svh;display:flex;flex-direction:column;justify-content:center;width:min(760px,100%);margin:auto;padding:48px 32px}
+.bp-entry h1{margin:0;font-family:Georgia,serif;font-size:clamp(2rem,4vw,3.25rem);font-weight:400;letter-spacing:-.035em}
+.bp-entry .task-note{margin:14px 0 0;color:var(--paper-muted)}
+.bp-entry-fields{display:flex;flex-direction:column;gap:22px;margin-top:36px}
+.bp-entry .bp-stepper-label{color:var(--paper-muted);font-size:.8rem;letter-spacing:.08em;text-transform:uppercase}
+.bp-entry .bp-stepper-row button{height:72px;border:1px solid var(--paper-line);border-radius:9px;background:#f6f2e9;color:var(--paper-ink);font-size:1.3rem;font-weight:600}
+.bp-entry .bp-stepper-row button:hover{border-color:#2f5a52;background:#e4ece8}
+.bp-entry .bp-stepper-row button:active{background:#d3e0da}
+.bp-entry .bp-stepper-row input{height:72px;border:2px solid #2f5a52;border-radius:9px;background:#fffdf8;color:var(--paper-ink);font-family:Georgia,serif;font-size:2.6rem}
+.bp-entry-warning{margin:18px 0 0;color:#8e3029}
+.bp-entry-save{align-self:center;min-width:280px;min-height:68px;margin-top:34px;font-size:1.1rem}
