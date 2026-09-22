@@ -156,3 +156,35 @@ class RigExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RigBaselineTest(unittest.TestCase):
+    def write(self, root: Path, day: str, port: str, csv: bool = True, **extra) -> None:
+        folder = root / "empty_room_baselines"
+        folder.mkdir(parents=True, exist_ok=True)
+        info = {"kind": "empty_room_csi_baseline", "port": port, "startedAt": f"{day}T07:55", "durationS": 1800.0, "rows": 1000,
+                "stalledMinutes": 0, "nonGoodMinutes": [], "finalReport": {"quality": "good"}, **extra}
+        (folder / f"empty_room_{day}_075251.json").write_text(json.dumps(info))
+        if csv:
+            (folder / f"empty_room_{day}_075251.csv").write_text("host_epoch_ns\n1\n")
+
+    def test_same_day_same_port_is_accepted_and_adopted(self):
+        from meridian_agent.agent import adopt_rig_baseline, find_rig_baseline
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(root, "20260922", "/dev/ttyACM0")
+            found = find_rig_baseline(root, "/dev/ttyACM0", "20260922")
+            self.assertEqual(found["file"], "empty_room_20260922_075251.json")
+            session = root / "session_X"
+            adopt_rig_baseline(session, found)
+            self.assertTrue((session / "csi" / "empty_room_20260922_075251.csv").is_file())
+            self.assertTrue((session / "csi" / "empty_room_rig_baseline.json").is_file())
+
+    def test_other_day_port_stall_or_missing_csv_is_refused(self):
+        from meridian_agent.agent import find_rig_baseline
+        cases = [("20260921", "/dev/ttyACM0", True, {}), ("20260922", "/dev/ttyUSB0", True, {}),
+                 ("20260922", "/dev/ttyACM0", True, {"stalledMinutes": 2}), ("20260922", "/dev/ttyACM0", False, {})]
+        for day, port, csv_present, extra in cases:
+            with self.subTest(day=day, port=port, csv=csv_present, extra=extra), tempfile.TemporaryDirectory() as tmp:
+                self.write(Path(tmp), day, port, csv_present, **extra)
+                self.assertIsNone(find_rig_baseline(Path(tmp), "/dev/ttyACM0", "20260922"))

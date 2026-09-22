@@ -21,7 +21,7 @@ from . import __version__
 from .export import HostClock, auxiliary_files, build_bundle, event_marker
 from .preview import PreviewServer
 from .segments import ProxyOptions
-from .sensors import CHECKSUM_PENDING, CameraOptions, CameraSensor, FrontierXEcgSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor, restamp_frontierx_csv, sha256_file
+from .sensors import CHECKSUM_PENDING, MAX_CLIPPED_PCT, CameraOptions, CameraSensor, FrontierXEcgSensor, Sensor, SimulatedSensor, UnavailableSensor, discover_device_inventory, discover_serial_assignments, iso_now, make_sensor, restamp_frontierx_csv, sha256_file
 
 
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
@@ -42,6 +42,45 @@ def unique_session_dir(root: Path, name: str) -> Path:
         except FileExistsError:
             continue
     raise RuntimeError(f"Could not create a unique recording directory for {name}")
+
+
+def find_rig_baseline(root: Path, port: str | None, day: str) -> dict | None:
+    """A same-day empty-room CSI baseline recorded outside any session, on the receiver now assigned to CSI.
+
+    A long rig baseline taken in the morning is a better null than the 60 s in-session one, as long as it is from the
+    same day and the same radio; anything stalled or degraded is not accepted.
+    """
+    if not port:
+        return None
+    for meta in sorted((root / "empty_room_baselines").glob(f"empty_room_{day}_*.json"), reverse=True):
+        try:
+            info = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        csv = meta.with_suffix(".csv")
+        if (info.get("kind") == "empty_room_csi_baseline" and int(info.get("rows") or 0) > 0 and not info.get("stalledMinutes")
+                and not info.get("nonGoodMinutes") and (info.get("finalReport") or {}).get("quality") == "good" and csv.is_file()
+                and info.get("port") and os.path.realpath(str(info["port"])) == os.path.realpath(str(port))):
+            return {"file": meta.name, "csv": str(csv), "startedAt": info.get("startedAt"), "durationS": info.get("durationS"),
+                    "rows": info.get("rows"), "port": info.get("port")}
+    return None
+
+
+def adopt_rig_baseline(session_dir: Path, baseline: dict) -> None:
+    """Put the rig baseline into the session folder once, so the export checksums and ships it like an in-session one."""
+    target_dir = session_dir / "csi"
+    record = target_dir / "empty_room_rig_baseline.json"
+    if record.exists():
+        return
+    target_dir.mkdir(parents=True, exist_ok=True)
+    source = Path(baseline["csv"])
+    target = target_dir / source.name
+    if not target.exists():
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+    record.write_text(json.dumps({**baseline, "sessionCopy": target.name}, indent=2), encoding="utf-8")
 
 
 def _parse_server_time(value) -> float:
@@ -222,8 +261,10 @@ class MeridianAgent:
                                        lock_settings=not self.args.no_camera_lock,thermal_format=self.args.thermal_format,thermal_units=self.args.thermal_units,power_line_hz=self.args.power_line_hz)
         # The face camera can run its own size and rate, e.g. a BCC950 at 640x480/20 fps for flicker-safe raw capture,
         # without dragging the other cameras down with it.
-        face_options = replace(camera_options,width=self.args.face_width or camera_options.width,height=self.args.face_height or camera_options.height,fps=self.args.face_fps or camera_options.fps)
-        face2_options = replace(camera_options,exposure_on_body=self.args.face2_exposure_on_body)
+        face_options = replace(camera_options,width=self.args.face_width or camera_options.width,height=self.args.face_height or camera_options.height,fps=self.args.face_fps or camera_options.fps,
+                              input_format=self.args.face_input_format,gain=self.args.face_gain,exposure_on_body=self.args.face_exposure_on_body)
+        face2_options = replace(camera_options,width=self.args.face2_width or camera_options.width,height=self.args.face2_height or camera_options.height,fps=self.args.face2_fps or camera_options.fps,
+                               input_format=self.args.face2_input_format,gain=self.args.face2_gain,exposure_on_body=self.args.face2_exposure_on_body)
         options_for = {"face":face_options,"face2":face2_options}
         self.sensors = [make_sensor(sensor_id,values[sensor_id],bauds.get(sensor_id,115200),self.session_dir,self.origin_mono,options_for.get(sensor_id,camera_options),2 if self.args.audio_channels == "stereo" else 1) for sensor_id in SENSOR_IDS]
         if self.lsl is not None:
@@ -282,11 +323,23 @@ class MeridianAgent:
             unlocked = [item["id"] for item in current_reports
                         if item["id"] in required and item["id"] in RPPG_SENSOR_IDS
                         and item.get("metrics", {}).get("settingsLocked") is False]
+            # A blown-out face has no colour variation left to measure, however steady its exposure.
+            overexposed = [f"{item['id']} ({item['metrics']['clippedPct']:.0f}% clipped)" for item in current_reports
+                           if item["id"] in required and item["id"] in RPPG_SENSOR_IDS
+                           and (item.get("metrics", {}).get("clippedPct") or 0) > MAX_CLIPPED_PCT]
             # Without the empty-room baseline there is no null for any CSI claim, so the session cannot be scored.
             baseline_missing = bool(required & set(CSI_SENSOR_IDS)) and (self.calibration or {}).get("status") != "done"
+            rig_baseline = None
+            if baseline_missing:
+                csi_port = next((getattr(sensor, "port", None) for sensor in self.sensors if sensor.sensor_id == "csi"), None)
+                rig_baseline = find_rig_baseline(self.session_dir.parent, csi_port, time.strftime("%Y%m%d"))
+                if rig_baseline:
+                    adopt_rig_baseline(self.session_dir, rig_baseline)
+                    baseline_missing = False
             probe = self.session_dir / "preflight_test.json"
-            payload = {"completedAt":iso_now(),"required":sorted(required),"failed":failed,"exposureUnlocked":unlocked,
-                       "csiEmptyRoomBaseline":(self.calibration or {}).get("status","not recorded"),
+            payload = {"completedAt":iso_now(),"required":sorted(required),"failed":failed,"exposureUnlocked":unlocked,"overexposed":overexposed,
+                       "csiEmptyRoomBaseline":f"rig baseline {rig_baseline['file']}" if rig_baseline else (self.calibration or {}).get("status","not recorded"),
+                       "csiRigBaseline":rig_baseline,
                        "diskFreeGb":round(shutil.disk_usage(self.session_dir).free/(1024**3),2)}
             probe.write_text(json.dumps(payload,indent=2),encoding="utf-8")
             verified = json.loads(probe.read_text(encoding="utf-8")) == payload
@@ -294,9 +347,10 @@ class MeridianAgent:
             # Enough disk for a full session (about 45 minutes) with 50% margin.
             needed_gb = max(10.0, self.recording_gb_per_hour() * 0.75 * 1.5)
             payload["diskNeededGb"] = round(needed_gb,1)
-            passed = not failed and not unlocked and not baseline_missing and verified and payload["diskFreeGb"] >= needed_gb and sync_ok
+            passed = not failed and not unlocked and not overexposed and not baseline_missing and verified and payload["diskFreeGb"] >= needed_gb and sync_ok
             problem = (", ".join(failed) if failed
-                       else f"auto exposure still running on {', '.join(unlocked)}" if unlocked
+                       else f"auto exposure still running on {', '.join(unlocked)} (camera body: M mode, fixed ISO and WB, DRO off)" if unlocked
+                       else f"overexposed: {', '.join(overexposed)}; lower gain or light" if overexposed
                        else "empty-room CSI baseline not recorded" if baseline_missing
                        else "clock synchronization" if not sync_ok
                        else f"disk space ({payload['diskFreeGb']} GB free, {payload['diskNeededGb']} GB needed)" if payload["diskFreeGb"] < needed_gb
@@ -487,6 +541,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--face-width",type=int,default=0,help="Face camera capture width only (0 uses --camera-width)")
     result.add_argument("--face-height",type=int,default=0,help="Face camera capture height only (0 uses --camera-height)")
     result.add_argument("--face-fps",type=float,default=0.0,help="Face camera frame rate only (0 uses --camera-fps)")
+    result.add_argument("--face-input-format",choices=("","mjpg"),default="",help="Pixel format asked of the face camera; mjpg reaches 720p30 on USB 2 webcams such as the C270 (the file stays lossless)")
+    result.add_argument("--face-gain",type=int,default=-1,help="Face camera sensor gain after the exposure lock (-1 leaves the device value)")
+    result.add_argument("--face-exposure-on-body",action="store_true",help="Face camera has manual exposure, fixed ISO and fixed WB set on the camera body (e.g. a Sony over USB); verified by a background brightness check")
+    result.add_argument("--face2-width",type=int,default=0,help="Face camera 2 capture width only (0 uses --camera-width)")
+    result.add_argument("--face2-height",type=int,default=0,help="Face camera 2 capture height only (0 uses --camera-height)")
+    result.add_argument("--face2-fps",type=float,default=0.0,help="Face camera 2 frame rate only (0 uses --camera-fps)")
+    result.add_argument("--face2-input-format",choices=("","mjpg"),default="",help="Pixel format asked of face camera 2")
+    result.add_argument("--face2-gain",type=int,default=-1,help="Face camera 2 sensor gain after the exposure lock (-1 leaves the device value)")
     result.add_argument("--face2-exposure-on-body",action="store_true",help="Face camera 2 has manual exposure, fixed ISO and fixed WB set on the camera body (it exposes no controls over USB); verified by a background brightness check")
     result.add_argument("--power-line-hz",type=int,choices=(0,50,60),default=50,help="Mains frequency of the room lights: sets anti-flicker and snaps locked exposure to whole flicker periods (0 = leave alone)")
     result.add_argument("--no-camera-lock",action="store_true",help="Leave auto exposure and white balance on")

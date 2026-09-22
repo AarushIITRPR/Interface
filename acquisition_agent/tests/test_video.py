@@ -96,6 +96,33 @@ class VideoTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             to_y16(np.zeros((2, 2, 3), dtype=np.uint8), 4, 3)
 
+    def test_face_camera_can_ask_for_mjpg(self):
+        from meridian_agent.agent import parser
+        from meridian_agent.sensors import CameraOptions, fourcc_text
+        self.assertEqual(parser().parse_args(["--code", "X", "--token", "Y", "--face-input-format", "mjpg"]).face_input_format, "mjpg")
+        self.assertEqual(CameraOptions().input_format, "")
+        self.assertEqual(fourcc_text(cv2.VideoWriter_fourcc(*"MJPG")), "MJPG")
+        self.assertEqual(fourcc_text(0), "")
+
+    def test_role_swap_flags_and_gain_default(self):
+        from meridian_agent.agent import parser
+        from meridian_agent.sensors import CameraOptions
+        args = parser().parse_args(["--code", "X", "--token", "Y", "--face-exposure-on-body", "--face2-width", "1280", "--face2-height", "720",
+                                    "--face2-fps", "30", "--face2-input-format", "mjpg", "--face2-gain", "64"])
+        self.assertTrue(args.face_exposure_on_body)
+        self.assertEqual((args.face2_width, args.face2_height, args.face2_fps, args.face2_input_format, args.face2_gain), (1280, 720, 30.0, "mjpg", 64))
+        self.assertEqual(args.face_gain, -1)
+        self.assertEqual(CameraOptions().gain, -1)
+
+    def test_clipped_pct_counts_blown_pixels_in_the_face_region(self):
+        from meridian_agent.sensors import clipped_pct
+        frame = np.full((90, 90, 3), 120, dtype=np.uint8)
+        frame[30:60, 30:45] = (255, 255, 255)
+        self.assertAlmostEqual(clipped_pct(frame), 50.0)
+        self.assertEqual(clipped_pct(frame, (0, 0, 30, 30)), 0.0)
+        frame[:, :, 1] = 252
+        self.assertEqual(clipped_pct(frame), 100.0)
+
     def test_disk_estimate(self):
         self.assertAlmostEqual(gb_per_hour(1280, 720, 30, 3, 0.5), 149.3, delta=0.1)
         self.assertAlmostEqual(gb_per_hour(160, 120, 9, 2, 1.0), 1.24, delta=0.01)

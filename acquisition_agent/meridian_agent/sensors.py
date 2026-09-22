@@ -1061,6 +1061,48 @@ class CameraOptions:
     power_line_hz: int = 50
     # The operator set exposure, ISO and white balance by hand on a camera that exposes no controls (Sony over USB).
     exposure_on_body: bool = False
+    # Pixel format asked of the camera; "" keeps the driver default. A Logitech C270 reaches 1280x720 at 30 fps only
+    # as MJPG - uncompressed YUYV tops out at 7.5 fps at that size.
+    input_format: str = ""
+    # Sensor gain fixed after the exposure lock; -1 leaves whatever the device holds. A C270 left at gain 192 of 255
+    # clipped 74% of its pixels for a whole session (01326YVE), which no exposure lock can undo.
+    gain: int = -1
+
+
+def fourcc_text(value: float) -> str:
+    code = int(value)
+    return "".join(chr((code >> shift) & 0xFF) for shift in (0, 8, 16, 24)).strip("\x00 ") if code > 0 else ""
+
+
+# A face region with more than this share of clipped pixels has lost the colour variation rPPG measures.
+MAX_CLIPPED_PCT = 5.0
+
+
+def clipped_pct(frame, roi: tuple[int, int, int, int] | None = None) -> float:
+    """Percentage of pixels in the face region (or the central third when no face is known) with a channel at 250+."""
+    height, width = frame.shape[:2]
+    x0, y0, x1, y1 = roi if roi else (width // 3, height // 3, 2 * width // 3, 2 * height // 3)
+    patch = frame[y0:y1, x0:x1]
+    if patch.ndim != 3 or not patch.size:
+        return 0.0
+    return round(float((patch.max(axis=2) >= 250).mean() * 100), 2)
+
+
+def set_gain(capture, cv2, device: object, gain: int) -> dict:
+    """Fix the sensor gain through OpenCV, falling back to v4l2-ctl, and report what the device now holds."""
+    capture.set(cv2.CAP_PROP_GAIN, gain)
+    readback = capture.get(cv2.CAP_PROP_GAIN)
+    backend = "opencv"
+    if abs(readback - gain) > 0.5 and isinstance(device, str) and device.startswith("/dev/"):
+        import subprocess
+        backend = "v4l2-ctl"
+        try:
+            subprocess.run(["v4l2-ctl", "-d", device, "--set-ctrl", f"gain={gain}"], capture_output=True, text=True, timeout=5)
+            out = subprocess.run(["v4l2-ctl", "-d", device, "--get-ctrl", "gain"], capture_output=True, text=True, timeout=5).stdout
+            readback = float(out.split(":")[-1]) if ":" in out else readback
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return {"requested": gain, "readback": readback, "set": abs(readback - gain) <= 0.5, "backend": backend}
 
 
 def gb_per_hour(width: int, height: int, fps: float, bytes_per_pixel: float, share: float) -> float:
@@ -1416,6 +1458,9 @@ class CameraSensor(Sensor):
             if self.radiometric:
                 capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"Y16 "))
                 capture.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+            elif options.input_format == "mjpg" and not file_source:
+                # Before the size, or V4L2 negotiates the size against the default format first.
+                capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             if options.width and options.height:
                 capture.set(cv2.CAP_PROP_FRAME_WIDTH, options.width)
                 capture.set(cv2.CAP_PROP_FRAME_HEIGHT, options.height)
@@ -1430,7 +1475,8 @@ class CameraSensor(Sensor):
             self.estimated_gb_per_hour = gb_per_hour(width, height, fps, 2 if self.radiometric else 3, 1.0 if self.radiometric else share)
             self.set_state("connected",f"{width}x{height} at {fps:.1f} fps, {'Y16 raw' if self.radiometric else options.codec}")
             settings: dict = {"sensor": self.sensor_id, "codec": "y16-raw" if self.radiometric else options.codec, "writer": self.writer_backend, "width": width, "height": height,
-                              "fps": fps, "requested": {"width": options.width, "height": options.height, "fps": options.fps}, "lock": None}
+                              "fps": fps, "requested": {"width": options.width, "height": options.height, "fps": options.fps, "inputFormat": options.input_format},
+                              "inputFormat": fourcc_text(capture.get(cv2.CAP_PROP_FOURCC)), "lock": None}
             started = time.monotonic()
             lock_pending = options.lock_settings and not self.radiometric and not file_source
             if file_source:
@@ -1468,6 +1514,8 @@ class CameraSensor(Sensor):
                         # background brightness check below confirms it.
                         settings["lock"] = {"locked": True, "backend": "camera body (operator-set)", "verified": None, "hostAttempt": settings["lock"]}
                         body_check_until = current + BODY_LOCK_CHECK_SEC
+                    if options.gain >= 0 and not options.exposure_on_body:
+                        settings["gainSet"] = set_gain(capture, cv2, self.source, options.gain)
                     if settings["lock"].get("locked") and system == "Linux":
                         settings["flicker"] = {**apply_flicker_safe_exposure(self.source, options.power_line_hz, fps), "powerLineSet": power_line_set}
                 if (settings["lock"] is not None or not lock_pending) and not settings.get("written"):
@@ -1519,10 +1567,13 @@ class CameraSensor(Sensor):
                     validation.append("Encoder keeping up with the camera" if not encoder_dropped
                                       else f"Encoder dropping frames: {encoder_dropped} discarded, {round(written_fps or 0,1)} fps reaching the file")
                 if settings["lock"] is not None:
-                    metrics["settingsLocked"] = bool(locked)
+                    # A body-held exposure whose brightness check failed is not locked, whatever the camera claims.
+                    locked = bool(locked) and settings["lock"].get("verified") is not False
+                    metrics["settingsLocked"] = locked
                     validation.append("Exposure and white balance locked" if locked else "Exposure or white balance could not be locked")
                 if rppg is not None:
                     metrics.update(rppg.update(frame, current, cv2))
+                    metrics["clippedPct"] = clipped_pct(frame, rppg.roi)
                 if self.radiometric and options.thermal_units == "centikelvin":
                     metrics["minTempC"] = round(float(frame.min()) / 100 - 273.15, 2)
                     metrics["maxTempC"] = round(float(frame.max()) / 100 - 273.15, 2)

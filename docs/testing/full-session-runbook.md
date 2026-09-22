@@ -28,8 +28,18 @@ These are not faults to chase on the day. Expect them, and do not let them stop 
 2. **Free the serial ports.** Stop anything else that opens them, in particular the **Breathing-Rate Streamlit
    dashboard** (it was running on port 8502 during preparation). `ss -ltnp | grep 8502` shows it.
 3. **Cameras into the rear PC ports directly.** No USB hub — the Huasheng 2.0 hub reset three times in testing.
-   Sony a6700: **USB Streaming on**, 720p, and set exposure, ISO and white balance **manually**; it ignores the
-   software lock.
+   In Recording setup: **Face camera = Sony a6700** (primary rPPG camera, uncompressed 1080p25) and **Face camera 2 =
+   Logitech C270** (upper-body view for breathing and expression, 720p30 MJPG at gain 48).
+   - **Sony body settings** (it ignores the software lock; preflight now fails if its brightness drifts):
+     USB Streaming on, 1080p · **M mode** · shutter **1/50 or 1/100** (whole 50 Hz periods) · **fixed ISO**, the
+     lowest that gives a mid-grey face · **manual white balance** (fixed K) · **DRO / Auto HDR off** · Picture Profile
+     off · focus on the eyes, then **MF** · SteadyShot off. Frame head and shoulders; face at least 400 px wide.
+   - **C270:** 50–70 cm away, framing the upper body including the chest.
+   - **Light:** two diffuse, flicker-free LED panels 30–45° either side of the face, so the subject display is not
+     the main light on the face. Avoid a bright green screen behind the participant: green spill lands on the skin,
+     and green is the channel rPPG reads. Use matte grey or dim it.
+   - Preflight now also fails when more than 5% of a face camera's face region is clipped ("overexposed"). Lower the
+     light or the gain until it passes.
 4. **Power and interruptions.** Both screens set to never sleep, machine on mains, notifications off, phones
    silent, door closed, blinds closed, lights fixed.
 5. **Start the server** from `/media/ai/OneTB/aarush_new_interface`: `npm run dev -- --port 3000`. Wait until

@@ -614,8 +614,16 @@ def qa_report(export: dict, session_dir: Path, windows: list[dict], artifacts: l
     gates = [{"stepId": e.get("stepId"), "outcome": e.get("eventType"), "reason": e.get("detail")} for e in events if e.get("eventType") in ("gate_verified", "gate_override", "gate_unverified")]
     missing_metadata = [field["id"] for field in export.get("participantFields") or [] if field.get("required") and not (export.get("participantMetadata") or {}).get(field["id"])]
     calibration = export.get("csiCalibration") or {}
+    baseline = calibration.get("status", "not recorded")
+    rig = session_dir / "csi" / "empty_room_rig_baseline.json"
+    if not calibration and rig.is_file():
+        try:
+            info = json.loads(rig.read_text(encoding="utf-8"))
+            baseline = f"rig baseline {info.get('file')}, {info.get('startedAt')}"
+        except (OSError, ValueError):
+            pass
     return {"sessionCode": export.get("sessionCode"), "participantId": export.get("participantId"), "status": export.get("status"),
-        "missingParticipantFields": missing_metadata, "csiEmptyRoomBaseline": calibration.get("status", "not recorded"),
+        "missingParticipantFields": missing_metadata, "csiEmptyRoomBaseline": baseline,
         "requiredSensors": sorted(required), "minCoveragePct": MIN_STEP_COVERAGE_PCT, "stepsFlagged": flagged, "stepCount": len(steps),
         "skippedSteps": skipped, "gates": gates, "steps": steps}
 
