@@ -1,0 +1,519 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+%%%%%%%%% PAPER TYPE
+% \usepackage{cvpr}              % CAMERA-READY
+\usepackage[review]{cvpr}        % REVIEW  <-- current build
+% \usepackage[pagenumbers]{cvpr} % arXiv version with page numbers
+
+%% =====================================================================
+%% PREAMBLE  (was preamble.tex)
+%% Must be loaded before hyperref.
+%% =====================================================================
+
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{makecell}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{xspace}
+\usepackage{microtype}   % tighter typesetting, roughly one sixth of a page
+%% --- added for draft v1 -------------------------------------------------
+\usepackage{xcolor}      % \color in \ph, \req, \ver (harmless if cvpr.sty already loads it)
+\usepackage{graphicx}
+\usepackage{booktabs}    % \toprule, \midrule, \bottomrule in the tables
+\usepackage{pifont}      % \cmark / \xmark in Table 1
+\newcommand{\cmark}{\ding{51}}
+\newcommand{\xmark}{\ding{55}}
+%% ------------------------------------------------------------------------
+
+\newif\ifphfinal
+\phfinalfalse          % <-- set to \phfinaltrue for the submission build
+
+\ifphfinal
+  \newcommand{\ph}[1]{\textbf{\fbox{UNFILLED: #1}}}
+\else
+  \newcommand{\ph}[1]{{\color{red}\texttt{[#1]}}}
+\fi
+\newcommand{\req}[1]{{\color{red}\textbf{[REQUIRED EXPERIMENT: #1]}}}
+\newcommand{\ver}{{\color{red}$^{\dagger}$}}
+
+\newcommand{\TODO}[1]{\textbf{\color{red}[TODO: #1]}}
+\newcommand{\todo}[1]{{\color{red}#1}}
+
+%% ---------------------------------------------------------------------
+%% Notation
+%% ---------------------------------------------------------------------
+\newcommand{\csi}{\mathbf{H}}
+\newcommand{\zwifi}{\mathbf{z}^{\mathrm{wifi}}}
+\newcommand{\zvis}{\mathbf{z}^{\mathrm{vis}}}
+\newcommand{\svis}{\hat{\mathbf{s}}^{\mathrm{vis}}}
+\newcommand{\Lalign}{\mathcal{L}_{\mathrm{align}}}
+\newcommand{\Ltask}{\mathcal{L}_{\mathrm{task}}}
+\newcommand{\Lwave}{\mathcal{L}_{\mathrm{wave}}}
+\newcommand{\brpm}{\,\mathrm{brpm}}
+\newcommand{\bpm}{\,\mathrm{bpm}}
+
+%% Method name. Change in one place.
+\newcommand{\method}{RespWave\xspace}
+%% Dataset name. Change in one place.
+\newcommand{\dataset}{Meridian\xspace}
+
+%% Compact table rules
+\providecommand{\etal}{\textit{et al}.\xspace}
+\providecommand{\ie}{\textit{i.e}.\xspace}
+\providecommand{\eg}{\textit{e.g}.\xspace}
+
+%% Tighter float spacing
+\setlength{\textfloatsep}{9pt plus 2pt minus 2pt}
+\setlength{\floatsep}{9pt plus 2pt minus 2pt}
+\setlength{\intextsep}{9pt plus 2pt minus 2pt}
+
+%% Figure placeholder until the real figure exists: \figph{width}{height}{what goes here}
+\newcommand{\figph}[3]{\fbox{\parbox[c][#2][c]{#1}{\centering\small\color{red}#3}}}
+
+\definecolor{cvprblue}{rgb}{0.21,0.49,0.74}
+\usepackage[pagebackref,breaklinks,colorlinks,allcolors=cvprblue]{hyperref}
+
+%%%%%%%%% PAPER ID
+\def\paperID{*****}
+\def\confName{CVPR}
+\def\confYear{2027}
+
+%%%%%%%%% TITLE
+\title{\dataset: A Synchronized Contact and Contactless Physiological Dataset\\
+under Emotion, Cognitive Load, Exercise, and Paced Breathing}
+
+%%%%%%%%% AUTHORS
+\author{Anonymous \confName~submission\\
+Paper ID \paperID}
+
+\begin{document}
+\maketitle
+
+
+%% =====================================================================
+%% 0_abstract.tex
+%% =====================================================================
+\begin{abstract}
+Contactless physiological sensing from cameras, thermal imagers, and Wi-Fi is usually trained and evaluated on
+recordings of people sitting calmly, where heart rate stays in a narrow band and breathing is whatever the
+participant happens to do. The conditions that make these signals useful are the ones those datasets leave out:
+emotional arousal, cognitive load, exercise, and deliberate changes in breathing. We present \dataset, a dataset of
+\ph{N} participants (\ph{H} hours) recorded by two lossless face cameras, a thermal camera, and Wi-Fi channel state
+information (CSI), synchronized on a single host clock with contact references: chest ECG, finger
+photoplethysmography, electrodermal activity, surface EMG, and audio. Every participant follows the same scripted
+34-step, \ph{37}-minute protocol: six emotion film clips with per-clip self-reports, a cognitive stress task,
+reading aloud, two exercises that raise heart rate, a recorded recovery, visually paced breathing at 6 and
+20~breaths/min, and a guided relaxation. The protocol builds ground truth into the session: the pacer fixes the
+breathing rate, the exercise sweeps heart rate across \ph{X--Y}\bpm, and the self-reports label every clip. We define
+benchmarks for remote heart-rate estimation, contactless respiration from video, thermal and Wi-Fi, cross-modal
+Wi-Fi sensing supervised by vision, and affect recognition, and we report baselines that show
+\ph{one-sentence headline result, \eg rPPG error rises by X\bpm after exercise}. Data, code, and the recording
+software will be released.
+\end{abstract}
+
+
+%% =====================================================================
+%% 1_intro.tex
+%% =====================================================================
+\section{Introduction}\label{sec:intro}
+
+Measuring heart rate and breathing without touching the person is one of the more mature applications of vision
+outside the visible-appearance setting. Remote photoplethysmography (rPPG) recovers the pulse from subtle skin-colour
+changes in ordinary video~\cite{verkruysse2008,mcduff2023}. Thermal imaging sees breathing as temperature changes at
+the nostrils~\cite{ioannou2014}. Commodity Wi-Fi recovers breathing from the way a person's chest perturbs the radio
+channel~\cite{liu2015,wang2016resp}, and has been used to infer emotion~\cite{zhao2016}. Progress in all three is
+measured on benchmark datasets, and those datasets shape what the methods learn.
+
+Most of those datasets record people who are sitting still and at rest~\cite{bobbia2019,stricker2014pure}. Heart
+rate varies little within a session, breathing is spontaneous and unmeasured, and the conditions under which a
+contactless sensor would actually be needed are absent: someone who is stressed, frightened, exercising, or
+breathing unusually. Affective computing datasets have the opposite profile. They elicit emotion carefully and
+record contact physiology~\cite{koelstra2012,soleymani2012,schmidt2018}, but rarely with face video, thermal video
+and radio recorded together on one clock, and never with a breathing ground truth that is known by design. No
+single dataset lets a model trained to read the pulse from video be tested when the same person's heart rate has
+been driven up by exercise, or lets a Wi-Fi breathing estimator be scored against a breathing rate the participant
+was instructed to follow.
+
+\dataset is built to fill that gap. Its design principle is that the protocol should produce the ground truth,
+rather than rely on sensors alone to supply it. Paced breathing at 6 and 20~breaths/min gives respiration targets
+that bracket the normal range. Two short exercises followed by a still, two-minute recovery sweep heart rate from
+rest to \ph{peak}\bpm and back, in the recovery window the physiology literature uses~\cite{cole1999}. Six emotion
+film clips, each followed by a Self-Assessment Manikin rating~\cite{bradley1994}, supply dimensional and
+categorical affect labels. All of this is recorded simultaneously by contactless sensors (two face cameras, a
+thermal camera, Wi-Fi CSI) and contact references (ECG, PPG, EDA, EMG, audio).
+
+Our contributions are:
+\begin{itemize}
+  \item \textbf{A synchronized multimodal dataset} of \ph{N} participants and \ph{H} hours, pairing lossless face
+    video, thermal video and Wi-Fi CSI with ECG, PPG, EDA, EMG and audio on one host clock, with per-frame
+    timestamps and a per-step quality report for every session (Sec.~\ref{sec:dataset}).
+  \item \textbf{A protocol with ground truth by design}: paced breathing, an exercise-driven heart-rate sweep with
+    recovery, emotion induction with self-report, and cognitive load, in one scripted 34-step session whose exact
+    stimuli and trial sequences can be regenerated (Sec.~\ref{sec:protocol}).
+  \item \textbf{Benchmarks and baselines} for remote heart rate, contactless respiration from three modalities,
+    cross-modal Wi-Fi sensing supervised by vision, and affect recognition, with subject-independent splits
+    (Sec.~\ref{sec:bench}).
+  \item \textbf{Open recording software}, including the camera controls needed for rPPG-grade video (fixed
+    exposure matched to mains flicker, lossless encoding, frame-accurate logging) (Sec.~\ref{sec:sync}).
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \figph{0.95\linewidth}{4.2cm}{Fig.~1 (teaser): one participant, synchronized traces over the whole session.
+  Top: face / thermal / CSI thumbnails. Below: ECG heart rate, rPPG heart rate, CSI breathing band, EDA, with the
+  protocol phases shaded (clips, Stroop, exercise, recovery, paced breathing 6 and 20/min, body scan).}
+  \caption{\dataset records contactless sensors and contact references simultaneously while the protocol drives
+  heart rate, breathing and affect through known changes. \ph{Replace with a real session, \eg participant 132.}}
+  \label{fig:teaser}
+\end{figure}
+
+
+%% =====================================================================
+%% 2_related.tex
+%% =====================================================================
+\section{Related Work} \label{sec:related}
+
+\paragraph{Remote physiological sensing datasets.}
+UBFC-rPPG~\cite{bobbia2019} and PURE~\cite{stricker2014pure} established camera heart-rate benchmarks with a finger
+PPG reference, recorded at rest or with scripted head motion. MMSE-HR~\cite{zhang2016mmse} adds spontaneous emotion
+tasks, VIPL-HR~\cite{niu2019vipl} adds scale and varied capture devices, UBFC-Phys~\cite{sabour2021ubfcphys} adds a
+social stress test, and MMPD~\cite{tang2023mmpd} adds skin tone, lighting and motion diversity. SCAMPS~\cite{mcduff2022scamps}
+provides synthetic faces with exact waveforms. These datasets are video-only on the sensing side, and none controls
+breathing rate. Their heart rate range is mostly that of seated rest. \dataset keeps the camera-plus-contact design
+and adds a controlled heart-rate sweep, paced breathing, thermal video, and radio.
+
+\paragraph{Affective physiological datasets.}
+DEAP~\cite{koelstra2012} and MAHNOB-HCI~\cite{soleymani2012} paired music-video or film stimuli with EEG and
+peripheral physiology, and MAHNOB-HCI included face video. AMIGOS~\cite{miranda2018amigos} and WESAD~\cite{schmidt2018}
+extended this to groups and to wearable stress detection. These datasets are the model for our stimulus and
+self-report design (SAM ratings, discrete emotion labels), but they were built for affect recognition, not to test
+contactless vital-sign estimation, and they do not include thermal video or Wi-Fi.
+
+\paragraph{RF and Wi-Fi sensing.}
+Wi-Fi CSI has been used for breathing and heart rhythm~\cite{liu2015,wang2016resp}, emotion~\cite{zhao2016},
+gesture~\cite{zheng2019widar}, and human pose, often supervised by a camera~\cite{zhao2018rfpose,wang2019personwifi}.
+MM-Fi~\cite{yang2023mmfi} pairs Wi-Fi with vision and other sensors for human sensing. Public CSI datasets with
+contact physiological references recorded under emotion and exercise are, to our knowledge, not available.
+\ph{Check once more for any 2025--2026 Wi-Fi vital-sign dataset before submission.}
+
+\paragraph{Thermal physiological imaging.}
+Facial thermal imaging tracks sympathetic arousal and breathing~\cite{ioannou2014}, but public thermal datasets
+with synchronized contact physiology are small. \dataset adds a thermal stream under the same protocol.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lrcccccccccc@{}}
+    \toprule
+    Dataset & Subj. & RGB & Thermal & Wi-Fi & ECG & PPG & EDA & Emotion & Exercise & Paced breath. & Lossless \\
+    \midrule
+    UBFC-rPPG~\cite{bobbia2019}          & 42\ver  & \cmark & \xmark & \xmark & \xmark & \cmark & \xmark & \xmark & \xmark & \xmark & \ph{?} \\
+    PURE~\cite{stricker2014pure}         & 10\ver  & \cmark & \xmark & \xmark & \xmark & \cmark & \xmark & \xmark & \xmark & \xmark & \cmark \\
+    MMSE-HR~\cite{zhang2016mmse}         & 40\ver  & \cmark & \cmark & \xmark & \xmark & \ph{?} & \cmark & \cmark & \xmark & \xmark & \ph{?} \\
+    VIPL-HR~\cite{niu2019vipl}           & 107\ver & \cmark & \xmark & \xmark & \xmark & \cmark & \xmark & \xmark & \ph{?} & \xmark & \xmark \\
+    UBFC-Phys~\cite{sabour2021ubfcphys}  & 56\ver  & \cmark & \xmark & \xmark & \xmark & \cmark & \cmark & \ph{stress} & \xmark & \xmark & \ph{?} \\
+    MMPD~\cite{tang2023mmpd}             & 33\ver  & \cmark & \xmark & \xmark & \xmark & \cmark & \xmark & \xmark & \ph{?} & \xmark & \xmark \\
+    DEAP~\cite{koelstra2012}             & 32\ver  & \ph{22 subj.} & \xmark & \xmark & \xmark & \cmark & \cmark & \cmark & \xmark & \xmark & \xmark \\
+    MAHNOB-HCI~\cite{soleymani2012}      & 27\ver  & \cmark & \xmark & \xmark & \cmark & \xmark & \cmark & \cmark & \xmark & \xmark & \xmark \\
+    WESAD~\cite{schmidt2018}             & 15\ver  & \xmark & \xmark & \xmark & \cmark & \cmark & \cmark & \cmark & \xmark & \xmark & -- \\
+    MM-Fi~\cite{yang2023mmfi}            & 40\ver  & \cmark & \xmark & \cmark & \xmark & \xmark & \xmark & \xmark & \ph{?} & \xmark & \ph{?} \\
+    \midrule
+    \textbf{\dataset (ours)}             & \ph{N}  & \cmark\,$\times$2 & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark \\
+    \bottomrule
+  \end{tabular}
+  \caption{Comparison with related datasets. \ver: counts and modalities taken from the original papers, to be
+  verified before submission; \ph{?}: not yet checked. ``Paced breath.'' means breathing at an instructed rate that
+  serves as ground truth.}
+  \label{tab:compare}
+\end{table*}
+
+
+%% =====================================================================
+%% 3_dataset.tex
+%% =====================================================================
+\section{The \dataset Dataset}\label{sec:dataset}
+
+\subsection{Design goals}\label{sec:goals}
+Four goals drove the design. \textbf{(G1)} Physiology must move: the protocol should drive heart rate, breathing
+and arousal through large, known changes rather than hope they occur. \textbf{(G2)} Ground truth by design where
+sensors cannot supply it: a visual pacer fixes breathing rate, and self-reports label every emotional stimulus.
+\textbf{(G3)} Contactless and contact sensors must share one clock, with every video frame timestamped, so that a
+sample in any stream can be located in every other stream. \textbf{(G4)} Recordings must be good enough for rPPG:
+lossless video with exposure and white balance fixed, and never adjusted by the camera during a session.
+
+\subsection{Acquisition system}\label{sec:system}
+Table~\ref{tab:sensors} lists the sensors. All streams are captured by one acquisition program on a single Linux
+host, which also receives protocol events from the stimulus display. The participant sits
+\ph{50--80}\,cm from the cameras, facing a display that presents the protocol, with the Wi-Fi transmitter and
+receiver on either side \ph{geometry: TX/RX positions, distance, heights, channel, bandwidth}.
+
+\begin{table}[t]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}l l r l@{}}
+    \toprule
+    Stream & Device & Rate & Format \\
+    \midrule
+    Face cam.\ 1 & USB webcam\ph{model} & 30\,fps & \ph{1280$\times$720}, FFV1 lossless \\
+    Face cam.\ 2 & Sony a6700 (USB) & 25\,fps & 1920$\times$1080, FFV1 lossless \\
+    Thermal      & FLIR UVC camera & $\approx$10\,fps & 640$\times$480, 8-bit (non-radiometric) \\
+    Wi-Fi CSI    & ESP32 receiver & 100\,Hz & 57 subcarriers, I/Q \\
+    ECG          & Frontier X chest strap & 125\,Hz & single lead \\
+    PPG          & CMS50E finger oximeter & 60\,Hz & pleth, pulse rate, SpO$_2$ \\
+    EDA          & ESP32 front end & 20\,Hz & skin conductance ($\mu$S) \\
+    EMG          & ESP32 front end & 1\,kHz & raw sEMG \\
+    Audio        & two lavalier mics & 48\,kHz & participant / operator channels \\
+    \bottomrule
+  \end{tabular}
+  \caption{Sensors in \dataset. Rates are nominal; measured per-session rates are in each session's quality report.}
+  \label{tab:sensors}
+\end{table}
+
+\subsection{Synchronization and recording integrity}\label{sec:sync}
+\paragraph{One clock.} Every sample and every video frame is stamped on arrival with the host's monotonic clock
+and wall-clock time in nanoseconds. Protocol events from the display (step onsets, clip playback start, breathing
+pacer start, button presses) are sent to the host with server timestamps and converted to the same clock using a
+continuously estimated offset. Clip onsets are logged when the video actually starts playing, not when the step
+begins.
+
+\paragraph{Frame accounting.} For each camera, a per-frame log records the timestamp of every frame that reached the
+file, rather than every frame the camera delivered. In a pilot session the camera delivered 25\,fps while the
+encoder silently dropped 42.6\% of frames; counting at the capture side would have reported a clean recording.
+Encoding runs in a separate multi-threaded writer so that lossless FFV1 keeps up with the capture rate, and the
+quality report checks that the frames in each video equal the rows in its log.
+
+\paragraph{Exposure control for rPPG.} Camera auto-exposure responds to the same brightness changes the emotion
+clips produce on the participant's face, which contaminates the pulse signal. The recorder lets auto-exposure
+settle, then locks exposure, gain and white balance, and verifies the lock by read-back. It also sets the camera's
+anti-flicker filter to the mains frequency and snaps the locked exposure to a whole number of flicker periods
+(multiples of 10\,ms at 50\,Hz), so that lighting flicker integrates out of every frame. For the camera that
+exposes no controls over USB, exposure, ISO and white balance are fixed on the camera body and verified from the
+stability of the background brightness.
+
+\paragraph{Contact references.} The ECG strap streams through a phone; its samples are re-stamped from the device
+clock after the session, which removes the transport delay and arrival jitter of the link (\eg 4.9\,s delay and
+5.2\,s jitter removed in one session). The oximeter and ECG heart rates are shown side by side during recording so
+that disagreement is visible to the operator.
+
+\paragraph{Wi-Fi null.} Before participants are seated, an empty-room CSI baseline is recorded with the same radio
+configuration, so every CSI claim can be compared with a recording in which nobody breathes.
+
+\paragraph{Quality gates.} A preflight check must pass before recording starts: every required stream present and
+of good quality, camera settings locked, clock offset under 100\,ms, and enough disk for the session. During
+recording, losing a required stream pauses the protocol automatically and logs why. After recording, a quality report
+gives, for every step, the coverage of each required stream (minimum 95\%), pauses, and artifacts marked by the
+operator.
+
+\subsection{Protocol}\label{sec:protocol}
+Each session follows the same scripted protocol of 34 steps and about \ph{37} minutes (Fig.~\ref{fig:protocol}),
+presented full-screen by a stimulus display and advanced automatically except where noted.
+
+\begin{figure*}[t]
+  \centering
+  \figph{0.97\textwidth}{2.6cm}{Fig.~2: protocol timeline (re-use docs/protocol/meridian-protocol-slide).
+  Settle 3.8\,min | Part 1: surprise, disgust, Stroop/N-back, NASA-TLX, gate | Part 2: happy, sad, gate |
+  Part 3: fear, anger, word list, read aloud | stand-to-sit, step-up | 2\,min recovery | paced 6/min, 20/min,
+  box breathing | body scan, PANAS. Mark where each ground truth comes from.}
+  \caption{The \dataset protocol (version 26). Colour marks what each phase contributes as ground truth: emotion
+  labels (self-report), cognitive load (task performance, NASA-TLX), heart-rate sweep (exercise and recovery), and
+  breathing rate (pacer).}
+  \label{fig:protocol}
+\end{figure*}
+
+\paragraph{Settling and baseline.} After a sensor check and a PANAS mood questionnaire~\cite{watson1988}, the
+participant rests with eyes open for 120\,s. This resting baseline is the reference for every later response and for
+the return-to-baseline gates~\cite{jennings1992,taskforce1996}.
+
+\paragraph{Emotion induction.} Participants watch six film clips of \ph{90--100}\,s, one per basic
+emotion~\cite{gross1995,rottenberg2007}, in three parts ordered by the typical heart-rate response of each
+emotion~\cite{siegel2018,kreibig2010}: surprise and disgust, then happiness and sadness, then fear and anger. After
+each clip they rate valence, arousal and dominance on 9-point Self-Assessment Manikin scales~\cite{bradley1994},
+choose the emotion they mainly felt and its intensity, and report whether they had seen the clip before. A 20\,s
+neutral washout separates the two clips of a part, and Parts~1 and~2 end with a return-to-baseline gate that waits
+until heart rate is within 5\bpm and skin conductance within 10\% of baseline for 15\,s. Clips are drawn from
+\ph{validated film set, with citation}.
+
+\paragraph{Cognitive load.} At the end of Part~1 the participant performs a Stroop colour-word
+task~\cite{stroop1935,renaud1997} or an N-back task, alternating between groups of six participants, followed by a
+NASA-TLX workload rating~\cite{hart1988}. Trial sequences are generated from a logged seed.
+
+\paragraph{Memory and speech.} Part~3 ends with a word-list study and recognition test~\cite{snodgrass1988} and a
+fixed passage read aloud, which provides read speech from every participant.
+
+\paragraph{Heart-rate sweep and recovery.} A 60\,s stand-to-sit exercise~\cite{bohannon2019} and a 120\,s
+self-paced step-up~\cite{bennett2016} raise heart rate, followed by a still, seated two-minute recovery, the window
+in which heart-rate recovery is conventionally measured~\cite{cole1999}. Participants who report a heart, breathing
+or mobility condition in the safety screening skip both exercises, and the skip is logged.
+
+\paragraph{Paced breathing.} A visual pacer (a rising and falling marker, with no audio) sets breathing at
+6\,breaths/min for 60\,s and 20\,breaths/min for 42\,s, followed by 64\,s of box breathing. Each condition starts when
+the participant presses Start, and the export records that press as its onset. The two paced rates bracket the normal
+range, from resonance-frequency breathing~\cite{lehrer2014} to fast breathing. They are the respiration ground
+truth for the contactless benchmarks. Box breathing~\cite{balban2023} is a relaxation condition and is not used for
+scoring.
+
+\paragraph{Relaxation.} A 270\,s guided body scan~\cite{kabatzinn1990} and a short final rest precede a second
+PANAS, so the session ends in a deliberately low-arousal state.
+
+\subsection{Participants and ethics}\label{sec:participants}
+\ph{N} adults (\ph{age range, mean$\pm$sd; sex; Fitzpatrick skin type distribution; eyewear, facial hair}) took part
+after written informed consent, under a protocol approved by \ph{institutional ethics board, approval number, in
+the camera-ready version only}. Participants chose, at consent, which parts of their data may be shared (\eg face
+video, audio), and the release honours these choices per file. Participants were screened for conditions
+contraindicating exercise, and no names are stored with the data.
+
+\subsection{Labels and release format}\label{sec:release}
+Each session is released as raw streams, a per-frame timestamp log for every camera, a protocol event table, and
+an analysis bundle in BIDS layout~\cite{gorgolewski2016bids}. The bundle contains per-step windows, per-clip
+self-reports (SAM valence, arousal, dominance, discrete emotion, intensity, familiarity), questionnaires (PANAS
+start and end, NASA-TLX, TIPI personality~\cite{gosling2003}), task trial tables (Stroop or N-back, word list),
+derived signals (ECG R-peaks, per-step heart rate and heart-rate variability, skin conductance level), operator
+artifact markers (talking, movement, cough, operator in view), and the quality report. Every file is checksummed
+in a manifest. \ph{Licence, access procedure (data use agreement for identifiable video), hosting.}
+
+
+%% =====================================================================
+%% 4_statistics.tex
+%% =====================================================================
+\section{Dataset Statistics and Quality}\label{sec:stats}
+
+\paragraph{Scale.} \ph{N} sessions, \ph{H} hours of synchronized recording, \ph{F} million lossless face frames,
+\ph{size} TB of raw data (one session is about 180\,GB, dominated by the two lossless cameras).
+
+\paragraph{Physiological range.} Fig.~\ref{fig:stats}a shows the ECG heart-rate distribution per protocol phase.
+\req{HR per phase: rest, clips, Stroop/N-back, exercise peak, recovery, paced breathing, body scan. Headline:
+median and 95th percentile HR during exercise vs rest, and the range covered overall.} The recovery segment gives
+\ph{mean HR drop in the first 60\,s} per participant.
+
+\paragraph{Affect labels.} \req{SAM valence--arousal scatter per clip (Fig.~\ref{fig:stats}b); percentage of clips
+whose reported emotion matches the target; PANAS change from start to end.}
+
+\paragraph{Recording quality.} \req{Per-stream coverage across all steps; frame drops per camera (expected
+$\approx$0\%); number of automatic pauses per session and their causes; ECG--PPG heart-rate agreement.}
+
+\paragraph{Known limitations of individual streams.} We report these as measured rather than hide them. The
+surface EMG is dominated by 50\,Hz mains pickup (85--97\% of in-band power in a bench test), so we release it raw
+with that caveat. The thermal camera provides 8-bit video without radiometric temperature. There is no respiration
+belt: breathing ground truth comes from the pacer, and spontaneous breathing outside the paced steps has no contact
+reference. Finger-PPG coverage has gaps where the oximeter's USB link dropped, and these are flagged in the quality
+report. There is no photodiode on the display, so display latency is not measured per session.
+\ph{Update after the full collection.}
+
+\begin{figure}[t]
+  \centering
+  \figph{0.95\linewidth}{3.6cm}{Fig.~3: (a) ECG heart rate per protocol phase (violin); (b) SAM valence--arousal
+  per clip, coloured by target emotion.}
+  \caption{\dataset statistics. \ph{Fill after collection.}}
+  \label{fig:stats}
+\end{figure}
+
+
+%% =====================================================================
+%% 5_benchmarks.tex
+%% =====================================================================
+\section{Benchmarks}\label{sec:bench}
+
+All benchmarks use subject-independent splits: \ph{k}-fold cross-validation over participants, with fold
+assignments released. Signals are windowed per protocol step using the logged step onsets.
+
+\subsection{T1: Remote heart rate}
+\textbf{Task.} Estimate heart rate from face video in \ph{10}\,s windows. \textbf{Reference.} ECG R-peaks.
+\textbf{Metrics.} MAE, RMSE (bpm), MAPE, Pearson $r$, reported overall and per phase (rest, emotion, exercise,
+recovery, paced breathing). \textbf{Baselines.} Unsupervised GREEN~\cite{verkruysse2008},
+CHROM~\cite{dehaan2013chrom} and POS~\cite{wang2017pos}; supervised PhysNet~\cite{yu2019physnet},
+TS-CAN~\cite{liu2020tscan} and PhysFormer~\cite{yu2022physformer}, trained on \dataset and, for cross-dataset
+transfer, on UBFC-rPPG and PURE, using rPPG-Toolbox~\cite{liu2023toolbox}.
+\textbf{Question the split answers.} How much of a method's accuracy at rest survives the exercise sweep?
+
+\begin{table}[t]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}l ccc ccc@{}}
+    \toprule
+    & \multicolumn{3}{c}{Rest + clips} & \multicolumn{3}{c}{Exercise + recovery} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}
+    Method & MAE$\downarrow$ & RMSE$\downarrow$ & $r\uparrow$ & MAE$\downarrow$ & RMSE$\downarrow$ & $r\uparrow$ \\
+    \midrule
+    GREEN~\cite{verkruysse2008} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} \\
+    CHROM~\cite{dehaan2013chrom} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} \\
+    POS~\cite{wang2017pos}      & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} \\
+    PhysNet~\cite{yu2019physnet} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} \\
+    TS-CAN~\cite{liu2020tscan}  & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} \\
+    PhysFormer~\cite{yu2022physformer} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} & \ph{} \\
+    \bottomrule
+  \end{tabular}
+  \caption{T1 remote heart rate on face camera~1, subject-independent. \req{run rPPG-Toolbox baselines}.}
+  \label{tab:t1}
+\end{table}
+
+\subsection{T2: Contactless respiration}
+\textbf{Task.} Estimate breathing rate during the two paced steps. \textbf{Reference.} The pacer rate (6 and
+20\brpm); a participant's step is excluded if \ph{adherence criterion, \eg the dominant chest-motion frequency in
+video is more than 1\brpm from the pacer}. \textbf{Modalities and baselines.} Video (optical flow on the upper
+body~\cite{mcduff2023}), thermal (nostril-region temperature), Wi-Fi CSI (spectral peak of the principal component
+of subcarrier amplitudes after removing the empty-room baseline~\cite{wang2016resp,liu2015}), and fusion.
+\textbf{Metric.} MAE in breaths/min per rate. \req{T2 table: modality $\times$ \{6, 20\}\brpm, MAE and success
+rate within 1\brpm.}
+
+\subsection{T3: Cross-modal Wi-Fi sensing supervised by vision}
+Face video is a rich but privacy-sensitive signal. Wi-Fi is private but hard to label. Because \dataset records
+both on one clock, the camera can supervise the radio. We provide a simple baseline, \method. A CSI window $\csi$ is
+encoded into $\zwifi$, and a frozen visual respiration model gives an embedding $\zvis$ and a breathing waveform
+$\svis$ from the synchronized video. \method is trained with
+\begin{equation}
+  \mathcal{L} = \Ltask + \lambda_{a}\,\Lalign\!\left(\zwifi,\zvis\right) + \lambda_{w}\,\Lwave\!\left(\hat{\mathbf{s}}^{\mathrm{wifi}},\svis\right),
+  \label{eq:respwave}
+\end{equation}
+where $\Ltask$ is the rate loss on labelled paced steps, $\Lalign$ aligns the Wi-Fi and visual embeddings
+\ph{contrastive / cosine}, and $\Lwave$ matches the predicted Wi-Fi breathing waveform to the visual one
+\ph{negative Pearson}. At test time only Wi-Fi is used. \req{T3: CSI-only vs \method, trained with visual
+supervision on unpaced steps and evaluated on paced steps, MAE in brpm; ablations of $\lambda_a$, $\lambda_w$.}
+
+\subsection{T4: Affect recognition}
+\textbf{Task.} Classify each clip window as high/low valence and arousal (split at the scale midpoint) and as one of
+six target emotions. \textbf{Labels.} Participant's own SAM ratings and reported emotion. \textbf{Baselines.}
+Per-modality features (heart rate and heart-rate variability from ECG, skin conductance level and responses, facial
+expression features from face video, thermal nose and forehead temperature, CSI statistics) with gradient-boosted
+trees, and late fusion. \textbf{Metrics.} Accuracy and macro-F1, leave-participants-out. \req{T4 table: modality
+$\times$ \{valence, arousal, 6-class\}.}
+
+
+%% =====================================================================
+%% 6_limitations.tex
+%% =====================================================================
+\section{Limitations and Ethical Considerations}\label{sec:limits}
+
+\textbf{Fixed stimulus order.} All participants see the clips in the same order, graded by expected heart-rate
+response, so session-level drift and habituation are confounded with emotion. Gates and washouts limit carry-over
+but do not remove the confound. \textbf{Breathing after exercise.} The paced steps follow the exercise recovery, so
+they are valid as a breathing-rate reference but heart-rate variability measured there is not a resting value.
+\textbf{References.} There is no respiration belt or display photodiode (Sec.~\ref{sec:stats}).
+\textbf{Population.} \ph{N} participants recruited from \ph{population}; skin-type and age coverage are reported in
+Sec.~\ref{sec:participants} and limit the claims we can make about fairness of rPPG across skin tones.
+\textbf{Privacy.} Face video and voice are identifiable. They are released only under a data use agreement and only
+for participants who consented to sharing them. Wi-Fi, thermal and physiological streams are released more
+openly. Users must not attempt re-identification.
+
+
+%% =====================================================================
+%% 7_conclusion.tex
+%% =====================================================================
+\section{Conclusion}\label{sec:conclusion}
+\dataset pairs face video, thermal video and Wi-Fi CSI with contact physiology, recorded on one clock while a
+scripted protocol drives emotion, cognitive load, heart rate and breathing through known changes. Its benchmarks
+test contactless sensing where it is hardest and most useful, beyond the calm, seated recordings current
+benchmarks are built on. \ph{One sentence on what the baselines revealed.}
+
+
+{
+    \small
+    \bibliographystyle{ieeenat_fullname}
+    \bibliography{main}
+}
+
+\end{document}
