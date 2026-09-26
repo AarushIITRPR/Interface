@@ -25,11 +25,15 @@ test("only breathing steps wait for Start, and each attempt must be started agai
   assert.equal(protocol.timerStarted(events, "s29-sweep", 1), false);
 });
 
-test("the two task orders alternate every six participants", () => {
-  const firstTask = (pid) => protocol.assignFor(pid).buf1;
-  for (let pid = 1; pid <= 6; pid++) assert.equal(firstTask(pid), "stroop");
-  for (let pid = 7; pid <= 12; pid++) assert.equal(firstTask(pid), "nback");
-  assert.equal(firstTask(13), "stroop");
+test("every participant gets Stroop in the task slot the active template keeps", () => {
+  for (let pid = 1; pid <= 72; pid++) {
+    const a = protocol.assignFor(pid);
+    assert.equal(a.buf1, "nback");
+    assert.equal(a.buf3, "stroop");
+  }
+  // 2305 and 2401 were the participants who got N-back under the alternating order.
+  assert.equal(protocol.assignFor(2305).buf3, "stroop");
+  assert.equal(protocol.assignFor(2401).buf3, "stroop");
 });
 
 test("conversation always lands in Part 2, so the two-task protocol never runs it", () => {
@@ -57,7 +61,7 @@ test("sessions without options keep the exact v8 plan", () => {
   delete assignment.options;
   delete assignment.stimuli;
   const ids = protocol.buildPlan(assignment).map((step) => step.id).join(" ");
-  assert.equal(ids, "s00-setup s01-baseline s02-baseline s03-clip-surprise s04-sam-surprise s05-washout s06-clip-disgust s07-sam-disgust s08-stroop s09-gate s10-clip-happy s11-sam-happy s12-washout s13-clip-sad s14-sam-sad s15-conversation s16-gate s17-clip-fear s18-sam-fear s19-washout s20-clip-anger s21-sam-anger s22-nback s23-gate s24-sweep s25-sweep s26-sweep s27-sweep s28-sweep s29-sweep s30-sweep s31-bodyscan s32-recovery s33-end");
+  assert.equal(ids, "s00-setup s01-baseline s02-baseline s03-clip-surprise s04-sam-surprise s05-washout s06-clip-disgust s07-sam-disgust s08-nback s09-gate s10-clip-happy s11-sam-happy s12-washout s13-clip-sad s14-sam-sad s15-conversation s16-gate s17-clip-fear s18-sam-fear s19-washout s20-clip-anger s21-sam-anger s22-stroop s23-gate s24-sweep s25-sweep s26-sweep s27-sweep s28-sweep s29-sweep s30-sweep s31-bodyscan s32-recovery s33-end");
 });
 
 test("v9 options add questionnaires, paced breathing, longer exertion, and replay", () => {

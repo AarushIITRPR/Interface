@@ -189,6 +189,8 @@ export type SensorChannel = {
   series: number[];
   validation: string[];
   updatedAt: string;
+  /** When the current run of lost statuses began; null while the sensor is healthy. */
+  lostSince?: string | null;
 };
 
 export type AcquisitionAgent = {

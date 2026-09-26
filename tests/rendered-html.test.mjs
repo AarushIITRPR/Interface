@@ -45,7 +45,8 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(subject, /\["complete","aborted"\]/);
   assert.match(instructor, /Recording health/);
   assert.match(instructor, /Subject code/);
-  assert.match(instructor, /--token \{snapshot\.acquisitionToken\}/);
+  // The copied command must be the start script, which carries the camera settings; the bare module call does not.
+  assert.match(instructor, /\.\/start-linux\.sh \{snapshot\.code\} \{snapshot\.acquisitionToken\}/);
   assert.match(instructor, /Recording setup/);
   assert.match(instructor, /RUN PREFLIGHT/);
   assert.match(instructor, /START SESSION/);
@@ -63,7 +64,7 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
 });
 
 test("ships every registered protocol stimulus", async () => {
-  const media = ["happy", "sad", "anger", "fear", "surprise", "disgust", "bodyscan", "relaxing-nature"];
+  const media = ["happy", "sad", "anger", "fear", "surprise", "disgust", "bodyscan"];
   const types = await readFile(new URL("../lib/types.ts", import.meta.url), "utf8");
   const subject = await readFile(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8");
   for (const name of media) {
@@ -73,7 +74,6 @@ test("ships every registered protocol stimulus", async () => {
   }
   assert.match(subject, /className="stimulus-video"/);
   assert.match(subject, /className="body-scan-video"/);
-  assert.match(subject, /className="breathing-video"/);
 });
 
 test("uses nine-point SAM questions with discrete emotion and familiarity checks", async () => {

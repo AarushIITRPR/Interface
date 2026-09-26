@@ -114,6 +114,17 @@ test("the demo flag covers the same ground the hardware override does", () => {
   assert.match(guard[0], /snapshot\.hardwareGateOverride/);
 });
 
+test("a required stream must stay lost for the grace period before the session pauses", () => {
+  // Session 01326YVE paused 29 times when its oximeter dropped off USB and came back within seconds.
+  const source = readFileSync(new URL("../lib/session-engine.ts", import.meta.url), "utf8");
+  const grace = source.match(/export const SENSOR_LOSS_GRACE_MS = ([\d_]+);/);
+  assert.ok(grace, "SENSOR_LOSS_GRACE_MS is missing");
+  assert.ok(Number(grace[1].replaceAll("_", "")) >= 5_000, "the grace period is too short to ride out a USB replug");
+  assert.match(source, /LOST_SENSOR_STATUSES\.has\(sensor\.status\) && \(!sensor\.lostSince \|\| at - Date\.parse\(sensor\.lostSince\) > SENSOR_LOSS_GRACE_MS\)/,
+    "enforceLeases no longer waits out the grace period");
+  assert.match(source, /sensor\.lostSince = LOST_SENSOR_STATUSES\.has\(status\)/, "heartbeats no longer track when a loss began");
+});
+
 test("the BP cuff is a span artifact that opens and closes like any other", () => {
   assert.equal(rig.BP_CUFF_ARTIFACT, "bp_cuff");
   const type = rig.ARTIFACT_TYPES.find((item) => item.id === rig.BP_CUFF_ARTIFACT);
@@ -144,4 +155,50 @@ test("a blood pressure step counts as recorded only for the current attempt", ()
   assert.ok(!rig.bpRecorded(readings, "gate-1", 2));
   assert.ok(rig.bpRecorded(readings, "baseline", 1), "readings saved before attempts were stored count as the first attempt");
   assert.ok(!rig.bpRecorded(readings, "standing", 1));
+});
+
+test("a participant can finish a gate only after its timer and its BP reading", () => {
+  // Session 2303V84Y: the participant saved BP on both gates and then sat on "Please wait" until the operator advanced.
+  const source = readFileSync(new URL("../lib/session-engine.ts", import.meta.url), "utf8");
+  const done = source.match(/const gateDone = step\?\.type === "gate"[^;]*;/s);
+  assert.ok(done, "could not find the gate completion check");
+  assert.match(done[0], /durationSec/, "a participant could skip the gate timer");
+  assert.match(done[0], /bpRecorded\(current\.bpReadings, step\.id, current\.attempt\)/, "a participant could skip the gate BP reading");
+  assert.match(source, /source:fromSubject \? "subject" : "operator", metadata:\{ gate \}/, "a participant's Continue no longer logs the gate outcome");
+  const subject = readFileSync(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8");
+  assert.match(subject, /act\("advance",\{expectedStepId:step\.id,source:"subject"\}\)\);\}\}>Continue<\/button>/);
+});
+
+test("the participant's BP entry starts blank so an untouched default cannot be saved", () => {
+  // 120/80/70 was saved unchanged twice in 2303V84Y.
+  const subject = readFileSync(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8");
+  for (const field of ["systolic", "diastolic", "pulse"]) assert.match(subject, new RegExp(`\\[${field},set\\w+\\]=useState<number\\|null>\\(null\\)`));
+});
+
+test("participant defaults are valid options and leave skin type, age band and sex to the operator", () => {
+  for (const [id, value] of Object.entries(rig.PARTICIPANT_DEFAULTS)) {
+    const field = rig.PARTICIPANT_FIELDS.find((item) => item.id === id);
+    assert.ok(field, `${id} is not a participant field`);
+    assert.ok(field.options.includes(value), `${id}: "${value}" is not one of its options`);
+  }
+  for (const id of ["fitzpatrick", "ageBand", "sex"]) assert.ok(!(id in rig.PARTICIPANT_DEFAULTS), `${id} must not be pre-filled`);
+  assert.deepEqual(rig.missingParticipantFields(rig.PARTICIPANT_DEFAULTS).sort(), ["ageBand", "fitzpatrick", "sex"]);
+});
+
+test("setup forms have one-click answers and the body scan plays once", () => {
+  const console = readFileSync(new URL("../app/instructor/editorial-operator-console.tsx", import.meta.url), "utf8");
+  assert.match(console, />MARK ALL YES \(PER SIGNED FORM\)</);
+  assert.match(console, />ALL NO</);
+  assert.match(console, /const pending = !locked && !saved && missing\.length === 0;/, "pre-filled details would save before the operator sets skin type, age band and sex");
+  const subject = readFileSync(new URL("../app/subject/subject-portal.tsx", import.meta.url), "utf8");
+  const bodyScan = subject.match(/<ProtocolVideo className="body-scan-video"[^>]*>/);
+  assert.ok(bodyScan, "could not find the body scan video");
+  assert.doesNotMatch(bodyScan[0], /\sloop[\s=]/, "the body scan loops and repeats its opening words");
+});
+
+test("a demo run starts as the open session's participant, so it runs the same tasks", () => {
+  // A fixed participant 1 ran N-back in Part 1 while the open session (2304B6HY) had run Stroop.
+  const console = readFileSync(new URL("../app/instructor/editorial-operator-console.tsx", import.meta.url), "utf8");
+  assert.match(console, /const \[previewPid, setPreviewPid\] = useState\(String\(assignment\.pid\)\);/);
+  assert.match(console, /buildPlan\(\{ \.\.\.assignFor\(demoPid\), protocol: template \}\)/, "the task line no longer mirrors how a session is built");
 });

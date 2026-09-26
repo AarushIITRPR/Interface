@@ -1,7 +1,6 @@
 "use client";
 
 import { ArrowUpRight, Eye, Volume2, VolumeX } from "lucide-react";
-import { MotionConfig, motion } from "motion/react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -227,7 +226,7 @@ function SubjectConnect({draft,error,connecting,setDraft,submit}:{draft:string;e
 }
 
 function SubjectFrame({code,progress,label,title,description,audioEnabled,setAudioEnabled,changeSession,demo=false,children}:{code:string;progress:number;label:string;title:ReactNode;description:string;audioEnabled:boolean;setAudioEnabled:(value:boolean)=>void;changeSession:()=>void;demo?:boolean;children:ReactNode}) {
-  return <MotionConfig reducedMotion="user"><main className="live-subject"><header className="live-subject-topbar"><Link href="/" className="live-wordmark">MERIDIAN</Link><span>SUBJECT DISPLAY</span><span>{demo?"DEMO RUN / NOT RECORDED":"SESSION IN PROGRESS"}</span></header><div className="live-subject-progress" aria-hidden="true"><motion.i initial={false} animate={{width:`${Math.max(0,Math.min(progress,100))}%`}} /></div><section className="live-subject-stage"><motion.div className="live-subject-copy" key={`${code}-${label}`} initial={{opacity:0,y:7}} animate={{opacity:1,y:0}}><p className="live-subject-label">{label}</p><h1>{title}</h1><p className="live-subject-description">{description}</p><div className="live-subject-actions"><button className="live-subject-secondary" onClick={()=>setAudioEnabled(!audioEnabled)} aria-pressed={audioEnabled}>{audioEnabled?<Volume2 size={16}/>:<VolumeX size={16}/>} {audioEnabled?"AUDIO ON":"AUDIO OFF"}</button></div></motion.div><div className="live-subject-field"><span className="live-subject-field-label top">BE PRESENT / NO RUSH</span>{children}<span className="live-subject-field-label bottom">ONE TASK AT A TIME</span></div></section><footer className="live-subject-footer"><span><Eye size={15}/> YOUR SESSION IS GUIDED</span><span>THE MERIDIAN STUDY / {code}</span><button onClick={changeSession}>CHANGE SESSION <ArrowUpRight size={14}/></button></footer><p className="sr-only" aria-live="polite">Audio is {audioEnabled?"on":"off"}.</p></main></MotionConfig>;
+  return <main className="live-subject"><header className="live-subject-topbar"><Link href="/" className="live-wordmark">MERIDIAN</Link><span>SUBJECT DISPLAY</span><span>{demo?"DEMO RUN / NOT RECORDED":"SESSION IN PROGRESS"}</span></header><div className="live-subject-progress" aria-hidden="true"><i style={{width:`${Math.max(0,Math.min(progress,100))}%`}} /></div><section className="live-subject-stage"><div className="live-subject-copy" key={`${code}-${label}`}><p className="live-subject-label">{label}</p><h1>{title}</h1><p className="live-subject-description">{description}</p><div className="live-subject-actions"><button className="live-subject-secondary" onClick={()=>setAudioEnabled(!audioEnabled)} aria-pressed={audioEnabled}>{audioEnabled?<Volume2 size={16}/>:<VolumeX size={16}/>} {audioEnabled?"AUDIO ON":"AUDIO OFF"}</button></div></div><div className="live-subject-field"><span className="live-subject-field-label top">BE PRESENT / NO RUSH</span>{children}<span className="live-subject-field-label bottom">ONE TASK AT A TIME</span></div></section><footer className="live-subject-footer"><span><Eye size={15}/> YOUR SESSION IS GUIDED</span><span>THE MERIDIAN STUDY / {code}</span><button onClick={changeSession}>CHANGE SESSION <ArrowUpRight size={14}/></button></footer><p className="sr-only" aria-live="polite">Audio is {audioEnabled?"on":"off"}.</p></main>;
 }
 
 function QuietField({complete=false}:{complete?:boolean}) { return <div className={`live-subject-cross ${complete?"complete":""}`} aria-hidden="true"><i/><i/></div>; }
@@ -241,7 +240,7 @@ function subjectPresentation(step:SubjectStep) {
   if(step.type==="reading") return {label:"Reading task",title:<>Read<br/><i>aloud.</i></>,description:"Read at your normal speaking pace."};
   if(step.type==="conversation") return {label:"Speaking task",title:<>Speak<br/><i>naturally.</i></>,description:"Speak at a comfortable pace."};
   if(step.type==="washout"||step.fixation) return {label:"Baseline task",title:<>Keep your eyes<br/><i>at the centre.</i></>,description:"Stay with the centre of the screen."};
-  if(step.type==="bodyscan") return {label:"Rest task",title:<>Settle<br/><i>into stillness.</i></>,description:"Stay still and follow the instruction."};
+  if(step.type==="bodyscan") return {label:"Relaxation",title:<>Close your eyes.<br/><i>Relax.</i></>,description:"Close your eyes, relax and follow the guided voice."};
   if(step.type==="sweep" && step.variant==="exertion") return {label:"Movement task",title:<>Move<br/><i>at your own pace.</i></>,description:"Stop at once if you feel dizzy or unwell."};
   if((step.type==="sweep" && !step.variant) || step.type==="recovery") return {label:"Rest",title:<>Sit<br/><i>still.</i></>,description:"Breathe normally."};
   if(step.type==="sweep") return {label:"Breathing task",title:<>Breathe<br/><i>with the guide.</i></>,description:"Follow the guide at a comfortable pace."};
@@ -294,9 +293,10 @@ function TimedScreen({step,snapshot,act,mode,src,audioEnabled}:{step:SubjectStep
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
   const remaining=useRemaining(step,snapshot,done);
   if(step.bp && !step.bpRecorded && remaining<=0 && snapshot.status==="running") return <BpEntryScreen step={step} act={act} />;
+  // Plays once: looping restarted the recording's opening words in the last seconds of the step (2303V84Y).
   if(mode==="bodyscan") return <section className="body-scan">
-    {src ? <ProtocolVideo className="body-scan-video" src={src} audioEnabled={audioEnabled} loop paused={snapshot.status !== "running"} /> : null}
-    <div className="body-scan-content"><div className="breathing-orb"/><time>{clock(remaining)}</time></div>
+    {src ? <ProtocolVideo className="body-scan-video" src={src} audioEnabled={audioEnabled} paused={snapshot.status !== "running"} /> : null}
+    <div className="body-scan-content"><div className="body-scan-instruction"><h1>Close your eyes and relax.</h1><p>Listen to the guided voice and let your body settle. Keep your eyes closed until the instructor asks you to open them.</p></div><div className="breathing-orb"/><time>{clock(remaining)}</time></div>
   </section>;
   return <section className="subject-center timed-screen">
     {mode==="fixation" ? <div className="fixation" aria-label="Focus on the cross"/> : <h1>{step.subjectPrompt}</h1>}
@@ -306,15 +306,19 @@ function TimedScreen({step,snapshot,act,mode,src,audioEnabled}:{step:SubjectStep
 
 function GateScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const remaining=useRemaining(step,snapshot);
+  const [continued,setContinued]=useState(false);
   if(step.bp && !step.bpRecorded && remaining<=0 && snapshot.status==="running") return <BpEntryScreen step={step} act={act} />;
-  return <section className="subject-center timed-screen"><h1>{remaining>0 ? step.subjectPrompt : "Please wait."}</h1>{remaining>0 ? <time>{Math.ceil(remaining)}</time> : null}</section>;
+  // After the timer and the reading, the participant moves on themselves rather than waiting for the operator.
+  if(remaining<=0) return <section className="subject-center subject-enter"><h1>Thank you.</h1><p className="task-note">When you are ready, press Continue.</p><button className="paper-button" disabled={continued || snapshot.status !== "running"} onClick={()=>{setContinued(true);sendUntilAccepted(()=>act("advance",{expectedStepId:step.id,source:"subject"}));}}>Continue</button></section>;
+  return <section className="subject-center timed-screen"><h1>{step.subjectPrompt}</h1><time>{Math.ceil(remaining)}</time></section>;
 }
 
 /** The participant reads the cuff monitor and sets the numbers with the mouse; the step moves on once it is saved. */
 function BpEntryScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [systolic,setSystolic]=useState<number|null>(BP_LIMITS.systolic.start);
-  const [diastolic,setDiastolic]=useState<number|null>(BP_LIMITS.diastolic.start);
-  const [pulse,setPulse]=useState<number|null>(BP_LIMITS.pulse.start);
+  // Blank until set: pre-filled 120/80/70 was saved untouched twice in 2303V84Y. The first +/- press starts from those values.
+  const [systolic,setSystolic]=useState<number|null>(null);
+  const [diastolic,setDiastolic]=useState<number|null>(null);
+  const [pulse,setPulse]=useState<number|null>(null);
   const [saved,setSaved]=useState(false);
   const valid=systolic!==null && diastolic!==null && systolic>diastolic;
   const save=()=>{
@@ -332,7 +336,7 @@ function BpEntryScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<stri
       <BpStepper label="Diastolic (bottom)" unit="mmHg" value={diastolic} onChange={setDiastolic} {...BP_LIMITS.diastolic} />
       <BpStepper label="Pulse" unit="per min" value={pulse} onChange={setPulse} {...BP_LIMITS.pulse} />
     </div>
-    {!valid ? <p className="bp-entry-warning">The top number must be higher than the bottom number.</p> : null}
+    {systolic===null || diastolic===null ? <p className="bp-entry-warning">Set the top and bottom numbers from the cuff.</p> : !valid ? <p className="bp-entry-warning">The top number must be higher than the bottom number.</p> : null}
     <button className="paper-button bp-entry-save" disabled={!valid} onClick={save}>Save reading</button>
   </section>;
 }

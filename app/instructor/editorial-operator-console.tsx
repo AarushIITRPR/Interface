@@ -26,16 +26,15 @@ import {
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { DEFAULT_PROTOCOL_OPTIONS, buildPlan, defaultProtocolTemplate, estimateRemaining, shortLabel, timerStarted, waitsForStart, wordListIndexFor } from "@/lib/protocol";
+import { DEFAULT_PROTOCOL_OPTIONS, assignFor, buildPlan, defaultProtocolTemplate, estimateRemaining, shortLabel, timerStarted, waitsForStart, wordListIndexFor } from "@/lib/protocol";
 import { WORD_LIST_EVENT } from "@/lib/tasks";
 import { applyReply, latestSequence, type PartialSnapshot } from "@/lib/event-sync";
 import { resolveBufferSlot, resolveClipSlot } from "@/lib/protocol-template";
 import { EMOTIONS as CLIP_KINDS_EDITABLE } from "@/lib/types";
-import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, BP_LIMITS, bpRecorded, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, startChecks, withConsentDefaults, type MetadataField, type StartCheck } from "@/lib/rig";
+import { ARTIFACT_TYPES, BP_CUFF_ARTIFACT, BP_LIMITS, bpRecorded, CONSENT_FIELDS, CSI_CALIBRATION_SEC, consentReady, CSI_SETUP_FIELDS, PARTICIPANT_DEFAULTS, PARTICIPANT_FIELDS, missingParticipantFields, openArtifactSpans, startChecks, withConsentDefaults, type MetadataField, type StartCheck } from "@/lib/rig";
 import { BpStepper } from "@/app/bp-stepper";
 import { startTicker } from "@/lib/ticker";
 import { SCREENING_QUESTIONS, screeningComplete, skippedSafetySteps } from "@/lib/safety";
@@ -245,53 +244,48 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
 
   const changeTab = (next: WorkspaceTab) => { setTab(next); setNavOpen(false); };
   return (
-    <MotionConfig reducedMotion="user" transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}>
-      <main className="live-instructor">
-        <a className="live-skip-link" href="#workspace-content">Skip to workspace</a>
-        <header className="live-instructor-topbar">
-          <div className="live-instructor-brand"><Link href="/">MERIDIAN</Link><i /><b>RESEARCH WORKSPACE</b></div>
-          <div className="live-instructor-topmeta"><span>THE MERIDIAN STUDY</span><i /><span>SESSION {snapshot.code}</span></div>
-          <button className="live-instructor-menu" onClick={() => setNavOpen((value) => !value)} aria-label="Toggle workspace navigation" aria-expanded={navOpen}><Menu size={19} /></button>
-        </header>
+    <main className="live-instructor">
+      <a className="live-skip-link" href="#workspace-content">Skip to workspace</a>
+      <header className="live-instructor-topbar">
+        <div className="live-instructor-brand"><Link href="/">MERIDIAN</Link><i /><b>RESEARCH WORKSPACE</b></div>
+        <div className="live-instructor-topmeta"><span>THE MERIDIAN STUDY</span><i /><span>SESSION {snapshot.code}</span></div>
+        <button className="live-instructor-menu" onClick={() => setNavOpen((value) => !value)} aria-label="Toggle workspace navigation" aria-expanded={navOpen}><Menu size={19} /></button>
+      </header>
 
-        <div className={`live-instructor-layout ${navOpen ? "nav-open" : ""}`}>
-          <aside className="live-instructor-sidebar">
-            <div className="live-study-block"><WorkspaceLabel>Current study</WorkspaceLabel><h1>The Meridian<br />Study</h1><p>Multimodal research<br />Protocol {snapshot.protocolVersion}</p></div>
-            <nav aria-label="Instructor workspace">
-              <SidebarButton active={tab === "overview"} icon={Monitor} label="Study overview" onClick={() => changeTab("overview")} />
-              <SidebarButton active={tab === "protocol"} icon={ClipboardList} label="Protocol workspace" onClick={() => changeTab("protocol")} />
-              <SidebarButton active={tab === "builder"} icon={SlidersHorizontal} label="Protocol builder" onClick={() => changeTab("builder")} />
-              <SidebarButton active={tab === "review"} icon={ScanLine} label="Recording review" onClick={() => changeTab("review")} />
-              <SidebarButton active={tab === "cohort"} icon={Activity} label="Cohort" onClick={() => changeTab("cohort")} />
-            </nav>
-            <div className="live-sidebar-footer">
-              <span className={snapshot.demo ? "is-demo" : running ? "is-live" : "is-paused"}><Circle size={8} fill="currentColor" /> {snapshot.demo ? `DEMO / ${statusText(snapshot.status)}` : statusText(snapshot.status)}</span>
-              <button onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> WORKSPACE SETTINGS</button>
-            </div>
-          </aside>
+      <div className={`live-instructor-layout ${navOpen ? "nav-open" : ""}`}>
+        <aside className="live-instructor-sidebar">
+          <div className="live-study-block"><WorkspaceLabel>Current study</WorkspaceLabel><h1>The Meridian<br />Study</h1><p>Multimodal research<br />Protocol {snapshot.protocolVersion}</p></div>
+          <nav aria-label="Instructor workspace">
+            <SidebarButton active={tab === "overview"} icon={Monitor} label="Study overview" onClick={() => changeTab("overview")} />
+            <SidebarButton active={tab === "protocol"} icon={ClipboardList} label="Protocol workspace" onClick={() => changeTab("protocol")} />
+            <SidebarButton active={tab === "builder"} icon={SlidersHorizontal} label="Protocol builder" onClick={() => changeTab("builder")} />
+            <SidebarButton active={tab === "review"} icon={ScanLine} label="Recording review" onClick={() => changeTab("review")} />
+            <SidebarButton active={tab === "cohort"} icon={Activity} label="Cohort" onClick={() => changeTab("cohort")} />
+          </nav>
+          <div className="live-sidebar-footer">
+            <span className={snapshot.demo ? "is-demo" : running ? "is-live" : "is-paused"}><Circle size={8} fill="currentColor" /> {snapshot.demo ? `DEMO / ${statusText(snapshot.status)}` : statusText(snapshot.status)}</span>
+            <button onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> WORKSPACE SETTINGS</button>
+          </div>
+        </aside>
 
-          <section className="live-instructor-main" id="workspace-content" tabIndex={-1}>
-            <span className="sr-only" role="status">{notice}</span>
-            {snapshot.demo ? <div className="live-demo-banner">DEMO RUN. No sensors, no consent, no screening. Nothing here counts toward the cohort.</div> : null}
-            {error ? <div className="live-workspace-error" role="alert">{error}</div> : null}
-            <AnimatePresence mode="wait" initial={false}>
-              <motion.div key={tab} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -3 }}>
-                {tab === "overview" ? <Overview snapshot={snapshot} step={step} plan={plan} running={running} health={health} readyCount={readyCount} required={required} agentOnline={agentOnline} subjectOnline={subjectOnline} now={now} act={act} onSettings={() => setSettingsOpen(true)} /> : null}
-                {tab === "protocol" ? <Protocol snapshot={snapshot} step={step} plan={plan} running={running} subjectOnline={subjectOnline} act={act} navigateTo={navigateTo} now={now} /> : null}
-                {tab === "builder" ? <ProtocolBuilder assignment={snapshot.assignment} /> : null}
-                {tab === "review" ? <Review snapshot={snapshot} required={required} now={now} onLedger={() => setLedgerOpen(true)} /> : null}
-                {tab === "cohort" ? <CohortDashboard /> : null}
-              </motion.div>
-            </AnimatePresence>
-          </section>
-        </div>
+        <section className="live-instructor-main" id="workspace-content" tabIndex={-1}>
+          <span className="sr-only" role="status">{notice}</span>
+          {snapshot.demo ? <div className="live-demo-banner">DEMO RUN. No sensors, no consent, no screening. Nothing here counts toward the cohort.</div> : null}
+          {error ? <div className="live-workspace-error" role="alert">{error}</div> : null}
+          {/* The new tab renders at once and fades in; waiting for the old one to animate out made every switch lag. */}
+          <div className="live-tab-panel" key={tab}>
+            {tab === "overview" ? <Overview snapshot={snapshot} step={step} plan={plan} running={running} health={health} readyCount={readyCount} required={required} agentOnline={agentOnline} subjectOnline={subjectOnline} now={now} act={act} onSettings={() => setSettingsOpen(true)} /> : null}
+            {tab === "protocol" ? <Protocol snapshot={snapshot} step={step} plan={plan} running={running} subjectOnline={subjectOnline} act={act} navigateTo={navigateTo} now={now} /> : null}
+            {tab === "builder" ? <ProtocolBuilder assignment={snapshot.assignment} /> : null}
+            {tab === "review" ? <Review snapshot={snapshot} required={required} now={now} onLedger={() => setLedgerOpen(true)} /> : null}
+            {tab === "cohort" ? <CohortDashboard /> : null}
+          </div>
+        </section>
+      </div>
 
-        <AnimatePresence>
-          {ledgerOpen ? <LedgerDialog snapshot={snapshot} onClose={closeLedger} /> : null}
-          {settingsOpen ? <SettingsDialog snapshot={snapshot} now={now} act={act} onClose={closeSettings} /> : null}
-        </AnimatePresence>
-      </main>
-    </MotionConfig>
+      {ledgerOpen ? <LedgerDialog snapshot={snapshot} onClose={closeLedger} /> : null}
+      {settingsOpen ? <SettingsDialog snapshot={snapshot} now={now} act={act} onClose={closeSettings} /> : null}
+    </main>
   );
 }
 
@@ -474,14 +468,14 @@ function SettingsDialog({ snapshot, now, act, onClose }: { snapshot: SessionSnap
   const online = isAgentOnline(snapshot, now);
   const setupSensors = snapshot.sensors.filter((sensor) => SETUP_SENSORS.includes(sensor.id));
   const save = async () => { if (await act("deviceConfig", { devices })) clearDevices(); if (await act("requiredSensors", { ids: required })) clearRequired(); };
-  return <motion.div className="live-modal-overlay" role="presentation" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><section className="live-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><div><WorkspaceLabel>Workspace settings</WorkspaceLabel><h2 id="settings-title">Recording setup</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close workspace settings"><X size={19} /></button></header><div className="live-settings-body"><section><h3>Acquisition computer</h3><div className="live-setting-status"><i className={online ? "good" : "bad"} /><span><strong>{online ? "Connected" : "Not connected"}</strong><small>{online ? snapshot.acquisition.host : "Start the local acquisition agent"}</small></span></div><dl><div><dt>Subject code</dt><dd>{snapshot.code}</dd></div><div><dt>Preflight</dt><dd>{snapshot.preflightTest.status}</dd></div><div><dt>Subject media</dt><dd>{subjectMediaLabel(snapshot)}</dd></div><div><dt>Disk</dt><dd>{snapshot.acquisition.diskFreeGb == null ? "Not measured" : `${snapshot.acquisition.diskFreeGb.toFixed(1)} GB free`}</dd></div></dl><div className="live-settings-actions"><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("refreshDevices")}><RefreshCw size={14} /> REFRESH DEVICES</button><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("startPreflight")}>RUN PREFLIGHT</button>{snapshot.status === "setup" ? <button className="primary" disabled={!checks.every((check) => check.ok)} onClick={() => void act("startSession")}>START SESSION</button> : null}</div>{snapshot.status === "setup" ? <StartChecklist checks={checks} /> : null}<details><summary>Technical connection</summary><code>python -m meridian_agent --server {window.location.origin} --code {snapshot.code} --token {snapshot.acquisitionToken}</code></details></section><ProtocolOptionsSection snapshot={snapshot} act={act} /><ConsentSection snapshot={snapshot} act={act} /><ParticipantSection snapshot={snapshot} act={act} /><ScreeningSection snapshot={snapshot} act={act} /><CsiSection snapshot={snapshot} act={act} /><section><h3>Recording devices</h3><div className="live-device-settings">{setupSensors.map((sensor) => { const kind = sensor.group === "video" ? "video" : sensor.group === "audio" ? "audio" : "serial"; const options = snapshot.acquisition.inventory[kind]; const isRequired = required.includes(sensor.id); const selected = devices[sensor.id] || "none"; return <article key={sensor.id}><label className="live-required-toggle"><input aria-label={`Require ${sensor.label}`} type="checkbox" checked={isRequired} disabled={snapshot.configurationLocked} onChange={(event) => setRequired((items) => event.target.checked ? [...new Set([...items, sensor.id])] : items.filter((id) => id !== sensor.id))} /><span><strong>{sensor.label}</strong><small>{sensor.latestValue || sensor.detail}</small></span></label>{sensor.id === "ecg" ? <label className="live-api-device"><span>Frontier X live link</span><input aria-label="Frontier X live ECG link" value={selected === "none" || selected === "auto" ? "" : selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, ecg: event.target.value || "none" }))} placeholder="Paste live ECG share link or user ID" /></label> : <select aria-label={`${sensor.label} device`} value={selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, [sensor.id]: event.target.value }))}><option value="none">Not assigned</option><option value="auto">Auto-detect</option>{selected !== "none" && selected !== "auto" && !options.some((item) => item.id === selected) ? <option value={selected}>Current: {selected}</option> : null}{options.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>}</article>; })}</div><button className="live-save-settings" disabled={snapshot.configurationLocked} onClick={() => void save()}>SAVE RECORDING SETUP</button></section></div><footer><button className="danger" onClick={() => { if (window.confirm(snapshot.status === "setup" ? "Discard this session?" : "End and finalize this session?")) void act(snapshot.status === "setup" ? "abort" : "complete"); }}>{snapshot.status === "setup" ? "DISCARD SESSION" : "END SESSION"}</button><span>Settings stay outside the normal operator workflow.</span></footer></section></motion.div>;
+  return <div className="live-modal-overlay" role="presentation"><section className="live-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><div><WorkspaceLabel>Workspace settings</WorkspaceLabel><h2 id="settings-title">Recording setup</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close workspace settings"><X size={19} /></button></header><div className="live-settings-body"><section><h3>Acquisition computer</h3><div className="live-setting-status"><i className={online ? "good" : "bad"} /><span><strong>{online ? "Connected" : "Not connected"}</strong><small>{online ? snapshot.acquisition.host : "Start the local acquisition agent"}</small></span></div><dl><div><dt>Subject code</dt><dd>{snapshot.code}</dd></div><div><dt>Preflight</dt><dd>{snapshot.preflightTest.status}</dd></div><div><dt>Subject media</dt><dd>{subjectMediaLabel(snapshot)}</dd></div><div><dt>Disk</dt><dd>{snapshot.acquisition.diskFreeGb == null ? "Not measured" : `${snapshot.acquisition.diskFreeGb.toFixed(1)} GB free`}</dd></div></dl><div className="live-settings-actions"><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("refreshDevices")}><RefreshCw size={14} /> REFRESH DEVICES</button><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("startPreflight")}>RUN PREFLIGHT</button>{snapshot.status === "setup" ? <button className="primary" disabled={!checks.every((check) => check.ok)} onClick={() => void act("startSession")}>START SESSION</button> : null}</div>{snapshot.status === "setup" ? <StartChecklist checks={checks} /> : null}<details><summary>Technical connection</summary><p>Run once, from acquisition_agent. The agent refuses to start if another one is already recording this session.</p><code>MERIDIAN_URL={window.location.origin} ./start-linux.sh {snapshot.code} {snapshot.acquisitionToken}</code></details></section><ProtocolOptionsSection snapshot={snapshot} act={act} /><ConsentSection snapshot={snapshot} act={act} /><ParticipantSection snapshot={snapshot} act={act} /><ScreeningSection snapshot={snapshot} act={act} /><CsiSection snapshot={snapshot} act={act} /><section><h3>Recording devices</h3><div className="live-device-settings">{setupSensors.map((sensor) => { const kind = sensor.group === "video" ? "video" : sensor.group === "audio" ? "audio" : "serial"; const options = snapshot.acquisition.inventory[kind]; const isRequired = required.includes(sensor.id); const selected = devices[sensor.id] || "none"; return <article key={sensor.id}><label className="live-required-toggle"><input aria-label={`Require ${sensor.label}`} type="checkbox" checked={isRequired} disabled={snapshot.configurationLocked} onChange={(event) => setRequired((items) => event.target.checked ? [...new Set([...items, sensor.id])] : items.filter((id) => id !== sensor.id))} /><span><strong>{sensor.label}</strong><small>{sensor.latestValue || sensor.detail}</small></span></label>{sensor.id === "ecg" ? <label className="live-api-device"><span>Frontier X live link</span><input aria-label="Frontier X live ECG link" value={selected === "none" || selected === "auto" ? "" : selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, ecg: event.target.value || "none" }))} placeholder="Paste live ECG share link or user ID" /></label> : <select aria-label={`${sensor.label} device`} value={selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, [sensor.id]: event.target.value }))}><option value="none">Not assigned</option><option value="auto">Auto-detect</option>{selected !== "none" && selected !== "auto" && !options.some((item) => item.id === selected) ? <option value={selected}>Current: {selected}</option> : null}{options.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>}</article>; })}</div><button className="live-save-settings" disabled={snapshot.configurationLocked} onClick={() => void save()}>SAVE RECORDING SETUP</button></section></div><footer><button className="danger" onClick={() => { if (window.confirm(snapshot.status === "setup" ? "Discard this session?" : "End and finalize this session?")) void act(snapshot.status === "setup" ? "abort" : "complete"); }}>{snapshot.status === "setup" ? "DISCARD SESSION" : "END SESSION"}</button><span>Settings stay outside the normal operator workflow.</span></footer></section></div>;
 }
 
 function LedgerDialog({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => { closeRef.current?.focus(); const listener = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); }; window.addEventListener("keydown", listener); return () => window.removeEventListener("keydown", listener); }, [onClose]);
   const exportLedger = () => download(`${snapshot.code.toLowerCase()}-events.json`, JSON.stringify(snapshot.events, null, 2), "application/json");
-  return <motion.div className="live-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><section className="live-ledger" role="dialog" aria-modal="true" aria-labelledby="ledger-title"><header><div><WorkspaceLabel>Session ledger</WorkspaceLabel><h2 id="ledger-title">Operational record</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close session ledger"><X size={18} /></button></header><div className="live-ledger-meta"><span>{snapshot.code}</span><span>P{String(snapshot.participantId).padStart(3, "0")}</span><span>{snapshot.protocolVersion}</span></div><div className="live-ledger-events">{snapshot.events.length ? [...snapshot.events].reverse().map((event) => <article key={event.id}><time>{timeLabel(event.createdAt)}</time><span>{event.source.toUpperCase()}</span><p><strong>{event.label}</strong>{event.detail ? <small>{event.detail}</small> : null}</p></article>) : <p>No events have been recorded yet.</p>}</div><footer><span>Entries are stored with this session.</span><button onClick={exportLedger}><Download size={14} /> EXPORT JSON</button></footer></section></motion.div>;
+  return <div className="live-modal-overlay"><section className="live-ledger" role="dialog" aria-modal="true" aria-labelledby="ledger-title"><header><div><WorkspaceLabel>Session ledger</WorkspaceLabel><h2 id="ledger-title">Operational record</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close session ledger"><X size={18} /></button></header><div className="live-ledger-meta"><span>{snapshot.code}</span><span>P{String(snapshot.participantId).padStart(3, "0")}</span><span>{snapshot.protocolVersion}</span></div><div className="live-ledger-events">{snapshot.events.length ? [...snapshot.events].reverse().map((event) => <article key={event.id}><time>{timeLabel(event.createdAt)}</time><span>{event.source.toUpperCase()}</span><p><strong>{event.label}</strong>{event.detail ? <small>{event.detail}</small> : null}</p></article>) : <p>No events have been recorded yet.</p>}</div><footer><span>Entries are stored with this session.</span><button onClick={exportLedger}><Download size={14} /> EXPORT JSON</button></footer></section></div>;
 }
 
 function WorkspaceLabel({ children }: { children: ReactNode }) { return <p className="live-workspace-label">{children}</p>; }
@@ -701,7 +695,7 @@ function ScreeningSection({ snapshot, act }: { snapshot: SessionSnapshot; act: A
   const pending = complete && !locked && !saved;
   useAutoSave(pending, () => act("screening", { answers }), clearDraft, answers);
   const skipped = Object.keys(skippedSafetySteps(answers)).map((key) => key.replace("_", " "));
-  return <section className="live-screening"><h3>Participant screening</h3><p>Ask each question before recording. A yes skips the related physical steps for this participant.</p>{SCREENING_QUESTIONS.map((item) => <fieldset key={item.id} disabled={locked}><legend>{item.question} *</legend>{[true, false].map((value) => <label key={String(value)}><input type="radio" name={`screening-${item.id}`} checked={answers[item.id] === value} onChange={() => setAnswers((current) => ({ ...current, [item.id]: value }))} />{value ? "Yes" : "No"}</label>)}</fieldset>)}<p className={complete ? "good" : "attention"}>{!complete ? "Answer every question." : skipped.length ? `Will skip: ${skipped.join(", ")}.` : "No steps will be skipped."}<SaveState saved={saved} pending={pending} /></p><button disabled={locked || !complete} onClick={() => void act("screening", { answers })}>SAVE SCREENING</button></section>;
+  return <section className="live-screening"><h3>Participant screening</h3><p>Ask each question aloud before recording. A yes skips the related physical steps for this participant. All No only saves the clicks.</p><button disabled={locked} onClick={() => setAnswers(() => Object.fromEntries(SCREENING_QUESTIONS.map((item) => [item.id, false])))}>ALL NO</button>{SCREENING_QUESTIONS.map((item) => <fieldset key={item.id} disabled={locked}><legend>{item.question} *</legend>{[true, false].map((value) => <label key={String(value)}><input type="radio" name={`screening-${item.id}`} checked={answers[item.id] === value} onChange={() => setAnswers((current) => ({ ...current, [item.id]: value }))} />{value ? "Yes" : "No"}</label>)}</fieldset>)}<p className={complete ? "good" : "attention"}>{!complete ? "Answer every question." : skipped.length ? `Will skip: ${skipped.join(", ")}.` : "No steps will be skipped."}<SaveState saved={saved} pending={pending} /></p><button disabled={locked || !complete} onClick={() => void act("screening", { answers })}>SAVE SCREENING</button></section>;
 }
 
 function ArtifactPanel({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
@@ -717,14 +711,27 @@ function FieldInputs({ fields, values, setValues, disabled, prefix }: { fields: 
     : <span className="live-number-field"><input id={`${prefix}-${field.id}`} aria-label={field.label} inputMode="numeric" value={String(values[field.id] ?? "")} disabled={disabled} onChange={(event) => setValues((current) => ({ ...current, [field.id]: event.target.value.replace(/[^0-9]/g, "") }))} />{field.unit ? <small>{field.unit}</small> : null}</span>}</label>)}</div>;
 }
 
+// The rig does not move between participants, so the last camera distances are the best default for the next one.
+const DISTANCES_KEY = "meridian:lastDistances";
+function lastDistances(): Record<string, string | number> {
+  try { const saved = JSON.parse(window.localStorage.getItem(DISTANCES_KEY) ?? "{}"); return saved && typeof saved === "object" ? saved : {}; } catch { return {}; }
+}
+function rememberDistances(values: Record<string, string | number>) {
+  const distances = Object.fromEntries(["cameraDistanceCm", "thermalDistanceCm"].filter((id) => values[id]).map((id) => [id, values[id]]));
+  if (!Object.keys(distances).length) return;
+  try { window.localStorage.setItem(DISTANCES_KEY, JSON.stringify(distances)); } catch { /* storage blocked: next session starts without them */ }
+}
+
 function ParticipantSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
-  const [values, setValues, clearDraft] = useDraft<Record<string, string | number>>(`${snapshot.code}:participant`, snapshot.participantMetadata?.values ?? {});
+  const [values, setValues, clearDraft] = useDraft<Record<string, string | number>>(`${snapshot.code}:participant`, snapshot.participantMetadata?.values ?? { ...PARTICIPANT_DEFAULTS, ...lastDistances() });
   const locked = ["complete", "aborted"].includes(snapshot.status);
   const missing = missingParticipantFields(values);
   const saved = savedMatches(snapshot.participantMetadata?.values, values);
-  const pending = !locked && !saved && Object.keys(values).length > 0;
-  useAutoSave(pending, () => act("participantMetadata", { values }), clearDraft, values);
-  return <section className="live-rig-section"><h3>Participant details</h3><p>Categories only, no names or dates. Skin type and eyewear strongly affect camera and thermal signals.</p><FieldInputs fields={PARTICIPANT_FIELDS} values={values} setValues={setValues} disabled={locked} prefix="participant" /><p className={missing.length ? "attention" : "good"}>{missing.length ? `${missing.length} required fields (*) not set.` : "All required fields set."}<SaveState saved={saved} pending={pending} /></p><button disabled={locked} onClick={() => void act("participantMetadata", { values }).then((next) => next && clearDraft())}>SAVE PARTICIPANT DETAILS</button></section>;
+  // The pre-filled answers are not saved on their own: autosave waits for skin type, age band and sex, which have no default.
+  const pending = !locked && !saved && missing.length === 0;
+  const save = () => { rememberDistances(values); return act("participantMetadata", { values }); };
+  useAutoSave(pending, save, clearDraft, values);
+  return <section className="live-rig-section"><h3>Participant details</h3><p>Categories only, no names or dates. Skin type and eyewear strongly affect camera and thermal signals.</p><FieldInputs fields={PARTICIPANT_FIELDS} values={values} setValues={setValues} disabled={locked} prefix="participant" /><p className={missing.length ? "attention" : "good"}>{missing.length ? `${missing.length} required fields (*) not set.` : "All required fields set."}<SaveState saved={saved} pending={pending} /></p><button disabled={locked} onClick={() => void save().then((next) => next && clearDraft())}>SAVE PARTICIPANT DETAILS</button></section>;
 }
 
 function CsiSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act }) {
@@ -772,7 +779,7 @@ function ConsentSection({ snapshot, act }: { snapshot: SessionSnapshot; act: Act
   // Sharing answers left unset are saved as "No"; saving starts as soon as participation is chosen.
   const pending = Boolean(values.participation) && !saved;
   useAutoSave(pending, () => act("consent", { values }), clearDraft, values);
-  return <section className="live-rig-section"><h3>Consent and data sharing</h3><p>Record what the signed consent form allows. This can be updated later if the participant withdraws sharing permission.</p><FieldInputs fields={CONSENT_FIELDS} values={values} setValues={setValues} disabled={false} prefix="consent" /><p className={ready ? "good" : "attention"}>{!values.participation ? "Choose participation (*). Sharing answers default to No." : !ready ? "Recording is not allowed without participation consent." : "Consent recorded for this session."}<SaveState saved={saved} pending={pending} /></p><button onClick={() => void act("consent", { values }).then((next) => next && clearDraft())}>SAVE CONSENT</button></section>;
+  return <section className="live-rig-section"><h3>Consent and data sharing</h3><p>Record what the signed consent form allows. This can be updated later if the participant withdraws sharing permission.</p><button onClick={() => setValues(() => Object.fromEntries(CONSENT_FIELDS.map((field) => [field.id, "Yes"])))}>MARK ALL YES (PER SIGNED FORM)</button><FieldInputs fields={CONSENT_FIELDS} values={values} setValues={setValues} disabled={false} prefix="consent" /><p className={ready ? "good" : "attention"}>{!values.participation ? "Choose participation (*). Sharing answers default to No." : !ready ? "Recording is not allowed without participation consent." : "Consent recorded for this session."}<SaveState saved={saved} pending={pending} /></p><button onClick={() => void act("consent", { values }).then((next) => next && clearDraft())}>SAVE CONSENT</button></section>;
 }
 
 function CohortDashboard() {
@@ -850,7 +857,9 @@ function ProtocolBuilder({ assignment }: { assignment: Assignment }) {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [previewPid, setPreviewPid] = useState("1");
+  // Starts from the open session's participant, so a demo runs the same task and clip order as the session on screen.
+  // A fixed "1" gave participant 1's N-back while the list above showed the open session's Stroop.
+  const [previewPid, setPreviewPid] = useState(String(assignment.pid));
   const [addKey, setAddKey] = useState("");
   const [addAfter, setAddAfter] = useState("");
   const [preview_, setPreview_] = useState<{ code: string } | null>(null);
@@ -891,6 +900,10 @@ function ProtocolBuilder({ assignment }: { assignment: Assignment }) {
   const slotName = (slot: ProtocolSlot) => slot.title || `${slot.type}${slot.clipSlot ? ` (${slot.clipSlot})` : slot.bufferSlot ? ` (task ${slot.bufferSlot})` : ""}`;
 
   const preview = buildPlan({ ...assignment, protocol: template });
+  const demoPid = Number(previewPid);
+  const demoTasks = Number.isSafeInteger(demoPid) && demoPid >= 1
+    ? buildPlan({ ...assignFor(demoPid), protocol: template }).filter((step) => ["stroop", "nback", "conversation"].includes(step.type)).map((step) => step.title)
+    : [];
   const warnings = [
     ...template.slots.filter((slot) => slot.minDurationSec && (slot.durationSec ?? 0) < slot.minDurationSec)
       .map((slot) => `${slot.title || slot.key} is under its ${slot.minDurationSec}s floor.`),
@@ -1044,6 +1057,7 @@ function ProtocolBuilder({ assignment }: { assignment: Assignment }) {
         <label>Preview as participant<input type="number" min={1} value={previewPid} disabled={busy} onChange={(event) => setPreviewPid(event.target.value.replace(/\D/g, ""))} /></label>
         <button disabled={busy} onClick={() => void startPreview()}>{busy ? "STARTING" : "START DEMO RUN"}</button>
       </div>
+      {demoTasks.length ? <small>Participant {demoPid} gets: {demoTasks.join(", ")}.</small> : null}
       {preview_ ? <div className="live-builder-preview-open">
         {/* Both links carry the code, so nothing has to be typed. The console opens in its own tab rather than
             taking this one over, which may be sitting on a real session. */}

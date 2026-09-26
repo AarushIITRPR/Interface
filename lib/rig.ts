@@ -31,6 +31,12 @@ export const PARTICIPANT_FIELDS: readonly MetadataField[] = [
 
 export type ParticipantMetadata = Record<string, string | number>;
 
+/** The usual answers, pre-filled so the operator only changes what differs. Skin type, age band and sex have no safe default. */
+export const PARTICIPANT_DEFAULTS: Readonly<ParticipantMetadata> = {
+  handedness: "Right", bmiBand: "Not recorded", eyewear: "None", facialHair: "None", makeup: "No",
+  caffeine2h: "No", nicotine2h: "No", exercise2h: "No", heartRateMedication: "No",
+};
+
 export function missingParticipantFields(metadata: ParticipantMetadata | undefined) {
   return PARTICIPANT_FIELDS.filter((field) => field.kind === "choice" && field.required && !metadata?.[field.id]).map((field) => field.id);
 }

@@ -38,12 +38,10 @@ export function sanitizeProtocolOptions(raw: unknown, current: ProtocolOptions =
  */
 const EMOTION_ORDER: readonly Emotion[] = ["surprise", "disgust", "happy", "sad", "fear", "anger"];
 // Conversation is always position 2, which the active protocol has no task step for, so no participant gets it.
-// Stroop and N-back alternate between Parts 1 and 3. Six rows keep bufferRow's meaning for the word list and cohort.
-const BUFFER_ORDERS: BufferKind[][] = [
-  ["stroop","conversation","nback"],["nback","conversation","stroop"],
-  ["stroop","conversation","nback"],["nback","conversation","stroop"],
-  ["stroop","conversation","nback"],["nback","conversation","stroop"],
-];
+// Stroop is always position 3, the one task slot the active template keeps (placed in Part 1), so every participant
+// gets Stroop; N-back only appears in the built-in protocol's Part 1. Alternating the two gave 2305 and 2401 N-back.
+// Six rows keep bufferRow's meaning for the word list and cohort.
+const BUFFER_ORDERS: BufferKind[][] = Array.from({ length: 6 }, () => ["nback","conversation","stroop"]);
 
 /**
  * Emotion order is the same for everyone (EMOTION_ORDER). Task order changes every sixth participant. `row` no longer
@@ -136,7 +134,7 @@ function createPlan(a: Assignment): ProtocolStep[] {
   const exertionSec = options.extendedExertion ? 60 : 20;
   add({ type:"sweep", title:"Brief exertion", safetyKey:"exertion", subjectPrompt:"March in place or do sit-to-stands.", operatorScript:"March in place or do comfortable sit-to-stands.", operatorNote:`${exertionSec} second exertion period. Skip if contraindicated.`, phase:"Movement and breathing", durationSec:exertionSec, safety:true, advance:"timer", estimatedSec:exertionSec });
   add({ type:"sweep", title:"Post-exertion recovery", subjectPrompt:"Sit down. Stay still.", operatorScript:"Sit back down and stay still while your breathing settles.", operatorNote:"60 second recovery after exertion.", phase:"Movement and breathing", durationSec:60, advance:"timer", estimatedSec:60 });
-  add({ type:"bodyscan", title:"Guided body scan", subjectPrompt:"Get comfortable. Close your eyes.", operatorScript:"Sit comfortably, close your eyes, and follow the guided audio.", operatorNote:"Four minute guided body scan.", phase:"Relaxation", durationSec:240, advance:"timer", estimatedSec:240 });
+  add({ type:"bodyscan", title:"Guided body scan", subjectPrompt:"Close your eyes and relax. Follow the guided voice.", operatorScript:"Please close your eyes now and relax. Follow the guided voice and keep your eyes closed until I ask you to open them.", operatorNote:"Four minute guided body scan.", phase:"Relaxation", durationSec:240, advance:"timer", estimatedSec:240 });
   add({ type:"recovery", title:"Return to normal", subjectPrompt:"Open your eyes when you are ready.", operatorScript:"Open your eyes whenever you are ready.", operatorNote:"Final eyes-open return and BP.", phase:"Relaxation", durationSec:60, bp:true, bpLabel:"Relaxed final", advance:"timer", estimatedSec:60 });
   if (options.questionnaires) questionnaire("panas_post", "Current mood (PANAS, end)", "Relaxation", 75);
   if (options.annotationReplay) {

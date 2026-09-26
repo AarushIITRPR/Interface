@@ -106,6 +106,12 @@ function protocolSignature(snapshot: SessionSnapshot) {
 
 const SENSOR_START_GRACE_MS = 15_000;
 const LOST_SENSOR_STATUSES = new Set(["missing","error","unknown","connected"]);
+/**
+ * How long a required stream may stay lost before the protocol pauses. On 22 September an oximeter that dropped off
+ * USB and came straight back paused session 01326YVE 29 times, including once more for the "connected" report that
+ * marks its own recovery; a replug or a reconnect blip should not stop the protocol.
+ */
+export const SENSOR_LOSS_GRACE_MS = 10_000;
 
 /**
  * While the protocol runs, losing the operator or a required stream pauses the session on the server and logs why,
@@ -122,7 +128,9 @@ function enforceLeases(snapshot: SessionSnapshot) {
     const agentOnline = Boolean(snapshot.acquisition.lastSeenAt && at - Date.parse(snapshot.acquisition.lastSeenAt) <= ACQUISITION_LEASE_MS);
     lostSensors = agentOnline ? snapshot.requiredSensors.filter((id) => {
       const sensor = snapshot.sensors.find((item) => item.id === id);
-      return !sensor || at - Date.parse(sensor.updatedAt) > ACQUISITION_LEASE_MS || LOST_SENSOR_STATUSES.has(sensor.status);
+      if (!sensor || at - Date.parse(sensor.updatedAt) > ACQUISITION_LEASE_MS) return true;
+      // A status with no recorded start (set by hand, or from before this field) counts as lost straight away.
+      return LOST_SENSOR_STATUSES.has(sensor.status) && (!sensor.lostSince || at - Date.parse(sensor.lostSince) > SENSOR_LOSS_GRACE_MS);
     }) : ["acquisition agent"];
   }
   if (!operatorLost && lostSensors.length === 0) return;
@@ -472,16 +480,20 @@ export async function mutateSession(code: string, action: string, payload: Actio
           throw new Error(`${shortLabel(step)} needs ${step.minDurationSec}s to measure anything; ${Math.floor(elapsed)}s elapsed. Wait, or advance with an override.`);
         }
       }
-      // Subjects may only finish steps they control; gates, timers, and operator checks stay with the operator.
-      if (!fromSubject && step?.type === "gate") {
+      // Subjects may only finish steps they control; timers and operator checks stay with the operator. A gate is the
+      // exception once its timer has run and its reading is saved: in 2303V84Y the participant sat on "Please wait"
+      // after saving BP until the operator noticed. Their Continue is logged with the same gate outcome as an operator's.
+      const gateDone = step?.type === "gate" && Date.now()-Date.parse(current.stepStartedAt) >= (step.durationSec ?? 0)*1000-AUTO_ADVANCE_TOLERANCE_MS
+        && !(step.bp && !bpRecorded(current.bpReadings, step.id, current.attempt));
+      if (step?.type === "gate" && (!fromSubject || gateDone)) {
         const gate = evaluateGate(current.acquisition.physiology, Date.now(), Date.parse(current.stepStartedAt));
-        const override = payload.override === true;
+        const override = fromSubject || payload.override === true;
         if (gate.status === "not_ready" && !override) throw new Error("Physiology has not returned to baseline yet. Wait, or advance with an override.");
         const eventType = gate.status === "ready" ? "gate_verified" : gate.status === "unavailable" ? "gate_unverified" : "gate_override";
         const label = gate.status === "ready" ? "Return to baseline verified" : gate.status === "unavailable" ? "Return to baseline not measurable" : "Return-to-baseline gate overridden";
-        appendEvent(current,{ eventType, label, detail:String(payload.reason ?? ""), severity:eventType === "gate_override" ? "warn" : "info", source:"operator", metadata:{ gate } });
+        appendEvent(current,{ eventType, label, detail:fromSubject ? "Participant continued" : String(payload.reason ?? ""), severity:eventType === "gate_override" ? "warn" : "info", source:fromSubject ? "subject" : "operator", metadata:{ gate } });
       }
-      if (!fromSubject || step?.advance === "media" || step?.advance === "subject") advance(current,String(payload.reason ?? ""),fromSubject ? "subject" : "operator");
+      if (!fromSubject || step?.advance === "media" || step?.advance === "subject" || gateDone) advance(current,fromSubject && gateDone ? "Participant continued" : String(payload.reason ?? ""),fromSubject ? "subject" : "operator");
     }
     if (action === "heartbeat") {
       const previousSeen = current.operatorLastSeenAt ? Date.parse(current.operatorLastSeenAt) : NaN;
@@ -753,6 +765,7 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
     sensor.series = Array.isArray(report.series) ? report.series.slice(-160).map((value)=>finiteOrNull(value,-1_000_000_000,1_000_000_000)).filter((value):value is number=>value!==null) : [];
     sensor.validation = Array.isArray(report.validation) ? report.validation.slice(0,8).map((value)=>clean(value,100)) : [];
     sensor.updatedAt = seenAt;
+    sensor.lostSince = LOST_SENSOR_STATUSES.has(status) ? (LOST_SENSOR_STATUSES.has(previousStatus) && sensor.lostSince ? sensor.lostSince : seenAt) : null;
     if (previousStatus !== status) appendEvent(snapshot,{
       eventType:"sensor_status", label:`${sensor.label}: ${status}`, detail:sensor.detail,
       severity:["missing","error"].includes(status)?"error":status==="delayed"?"warn":"info", source:"sensor",
