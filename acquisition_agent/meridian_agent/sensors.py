@@ -8,6 +8,7 @@ import os
 import platform
 import queue
 import random
+import sys
 import threading
 import time
 import wave
@@ -444,7 +445,9 @@ class EmgSensor(SerialLineSensor):
     def telemetry(self, values: list[object]) -> tuple[float | None,dict,list[str]]:
         raw = int(values[2]); sequence = int(values[1])
         previous = self._metrics.get("lastSequence")
-        if isinstance(previous,int) and sequence > previous + 1:
+        # Like record_dropped, only while recording: setup has no recorded denominator, so 4 lost samples before START
+        # read as 100% dropout, marked EMG degraded and failed preflight (2305RUBD).
+        if isinstance(previous,int) and sequence > previous + 1 and self._recording.is_set():
             self._dropped_samples += sequence - previous - 1
         self._metrics["lastSequence"] = sequence
         centered = raw - 2048
@@ -1043,7 +1046,10 @@ def _frames_equal(left, right) -> bool:
 
 VIDEO_CODECS = {
     # fourcc, file extension, rough compressed size as a share of raw frames (for disk estimates)
-    "ffv1": ("FFV1", ".mkv", 0.5),
+    # 0.27 is what session 01326YVE actually wrote: 0.26 for the Sony at 1080p25 and 0.16 for the C270, whose frames
+    # arrive as MJPG and are quieter. The old 0.5 made preflight demand 503 GB for a session that used 199 GB.
+    # It varies with scene noise, so it is a planning figure, not a guarantee.
+    "ffv1": ("FFV1", ".mkv", 0.27),
     "mjpg": ("MJPG", ".avi", 0.08),
 }
 
@@ -1711,6 +1717,26 @@ def stable_links(directory: Path, suffix: str = "") -> dict[str,str]:
     return links
 
 
+def stable_serial_path(device: str, by_path: Path = Path("/dev/serial/by-path")) -> str:
+    """The physical-port link for a /dev/tty* node, so a sensor that drops off USB is found again after it re-enumerates.
+
+    On 22 September the oximeter left the bus and came back as ttyUSB3 while the agent retried ttyUSB1 for eight
+    minutes. /dev/serial/by-id cannot be used instead: two CP2102 adapters on this rig report the same serial number
+    (0001), so only one of them gets a by-id link. The by-path name follows the USB port, which is what stays fixed.
+    """
+    if not isinstance(device, str) or not device.startswith("/dev/tty"):
+        return device
+    real = os.path.realpath(device)
+    try:
+        links = sorted(by_path.iterdir(), key=lambda link: ("usbv2" in link.name, link.name))
+    except OSError:
+        return device
+    for link in links:
+        if os.path.realpath(link) == real:
+            return str(link)
+    return device
+
+
 def serial_inventory(ports, by_id: dict[str,str]) -> list[dict]:
     """USB serial adapters only: legacy on-board ttyS ports have no USB vendor id and would crowd out the real devices."""
     items = []
@@ -1785,7 +1811,8 @@ def discover_serial_assignments(requested: dict[str,str], bauds: dict[str,int]) 
         ports = []
     inventory = [{"device":port.device,"description":port.description,"vid":port.vid,"pid":port.pid,"serialNumber":port.serial_number} for port in ports]
     result = dict(requested)
-    claimed = {value for value in result.values() if value not in ("","auto","none","simulate")}
+    # Compare device nodes, not names: the console may hand over a by-id link for a port the scan lists as ttyUSBn.
+    claimed = {os.path.realpath(value) for value in result.values() if value not in ("","auto","none","simulate")}
     # USB bridge VID/PID values identify the serial adapter, not the sensor.
     # Assign every automatic serial modality only after its wire protocol has
     # been observed, and never let two modalities claim the same COM port.
@@ -1795,13 +1822,40 @@ def discover_serial_assignments(requested: dict[str,str], bauds: dict[str,int]) 
         result[sensor_id] = ""
         for item in inventory:
             port = item["device"]
-            if port in claimed:
+            if os.path.realpath(port) in claimed:
                 continue
-            if _probe_serial_protocol(serial,port,bauds.get(sensor_id,115200),sensor_id):
-                result[sensor_id] = port
-                claimed.add(port)
+            if probe_with_timeout(serial,port,bauds.get(sensor_id,115200),sensor_id):
+                result[sensor_id] = stable_serial_path(port)
+                claimed.add(os.path.realpath(port))
                 break
     return result,inventory
+
+
+# A probe that cannot answer within this must not hold up the session: on 23 September a silent board on ttyUSB0 hung
+# agent startup indefinitely, because opening a port and flushing it can both block forever when the device holds
+# hardware flow control, whatever read timeout is set.
+PROBE_TIMEOUT_S = 6.0
+
+
+def probe_with_timeout(serial_module, port: str, baud: int, sensor_id: str, timeout: float = PROBE_TIMEOUT_S) -> bool:
+    """_probe_serial_protocol, but a port that blocks is simply not this sensor."""
+    import threading
+    result: list[bool] = []
+
+    def run() -> None:
+        try:
+            result.append(_probe_serial_protocol(serial_module, port, baud, sensor_id))
+        except Exception:
+            result.append(False)
+
+    worker = threading.Thread(target=run, daemon=True, name=f"probe-{sensor_id}")
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        # The thread stays stuck on the device until the process exits; it is a daemon, so it cannot hold up a stop.
+        print(f"{port}: no answer for {sensor_id} within {timeout:.0f}s, skipping it", file=sys.stderr, flush=True)
+        return False
+    return bool(result and result[0])
 
 
 def _probe_serial_protocol(serial_module, port: str, baud: int, sensor_id: str) -> bool:
@@ -1903,12 +1957,13 @@ def make_sensor(sensor_id: str, value: str, baud: int, session_dir: Path, origin
         return SimulatedSensor(sensor_id,session_dir,origin_mono)
     if value in ("", "none"):
         return UnavailableSensor(sensor_id,"Not configured",session_dir,origin_mono)
+    value = stable_serial_path(value)
     if sensor_id in ("face","face2","thermal"):
         return CameraSensor(sensor_id,"0" if value == "auto" else value,session_dir,origin_mono,camera_options)
     if sensor_id == "audio":
         return AudioSensor(value,session_dir,origin_mono,write_channels=audio_channels)
     if sensor_id == "oximeter":
-        port = auto_oximeter_port() if value == "auto" else value
+        port = stable_serial_path(auto_oximeter_port()) if value == "auto" else value
         return OximeterSensor(port,session_dir,origin_mono) if port else UnavailableSensor(sensor_id,"CMS50E not detected",session_dir,origin_mono)
     if sensor_id == "csi":
         return CsiSensor(sensor_id,value,baud,session_dir,origin_mono)

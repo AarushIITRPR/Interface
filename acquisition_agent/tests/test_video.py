@@ -123,6 +123,17 @@ class VideoTests(unittest.TestCase):
         frame[:, :, 1] = 252
         self.assertEqual(clipped_pct(frame), 100.0)
 
+    def test_the_disk_floor_and_estimate_match_what_sessions_really_write(self):
+        from meridian_agent.agent import LOW_DISK_WARNING_GB, parser
+        from meridian_agent.sensors import VIDEO_CODECS, gb_per_hour
+        self.assertEqual(parser().parse_args(["--code", "X", "--token", "Y"]).min_free_gb, 0.0)
+        self.assertEqual(parser().parse_args(["--code", "X", "--token", "Y", "--min-free-gb", "150"]).min_free_gb, 150.0)
+        self.assertLess(LOW_DISK_WARNING_GB, 150.0, "the live warning must fire below the preflight floor, not above it")
+        # Session 01326YVE wrote 146 GB/h from the Sony and 48 GB/h from the C270; the estimate has to be near that.
+        share = VIDEO_CODECS["ffv1"][2]
+        rig = gb_per_hour(1920, 1080, 25, 3, share) + gb_per_hour(1280, 720, 30, 3, share) + gb_per_hour(640, 480, 10, 3, share)
+        self.assertLess(abs(rig - 194), 60, f"the FFV1 estimate is {rig:.0f} GB/h against a measured 194 GB/h")
+
     def test_disk_estimate(self):
         self.assertAlmostEqual(gb_per_hour(1280, 720, 30, 3, 0.5), 149.3, delta=0.1)
         self.assertAlmostEqual(gb_per_hour(160, 120, 9, 2, 1.0), 1.24, delta=0.01)

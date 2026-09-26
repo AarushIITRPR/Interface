@@ -27,8 +27,41 @@ from .sensors import CHECKSUM_PENDING, MAX_CLIPPED_PCT, CameraOptions, CameraSen
 DEFAULT_SERVER = "https://meridian-multimodal-lab.aditya11-gupta16709.chatgpt.site"
 SENSOR_IDS = ("face","audio","oximeter","csi","emg","gsr","ecg","thermal","photodiode","csi2","resp","environment","face2")
 CSI_SENSOR_IDS = ("csi","csi2")
+# Free space at which the operator is warned during a recording. It only warns: stopping a running protocol would
+# cost the participant's whole session, and the writers fail loudly on their own if the disk actually fills.
+LOW_DISK_WARNING_GB = 30.0
+
 # Cameras whose frames feed rPPG, where a drifting exposure is a confound rather than a cosmetic issue.
 RPPG_SENSOR_IDS = ("face","face2")
+
+
+class AgentAlreadyRunning(RuntimeError):
+    pass
+
+
+def acquire_session_lock(root: Path, code: str):
+    """Hold an exclusive lock for this session code for the life of the process.
+
+    Twice on 22 September a second agent was started for a session that already had one; the two fought over every
+    camera and serial port and both recordings were damaged. The lock is released by the kernel when the process
+    exits, however it exits, so a crashed agent never leaves a stale lock behind.
+    """
+    try:
+        import fcntl
+    except ImportError:  # Windows: no advisory locks here; the operator console warning has to do
+        return None
+    root.mkdir(parents=True, exist_ok=True)
+    handle = open(root / f".agent_{code}.lock", "a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.seek(0)
+        holder = handle.read().strip() or "unknown"
+        handle.close()
+        raise AgentAlreadyRunning(f"Another acquisition agent is already running for session {code} (PID {holder}). "
+                                  "Stop it first; two agents fight over the same cameras and serial ports.")
+    handle.seek(0); handle.truncate(); handle.write(str(os.getpid())); handle.flush()
+    return handle
 
 
 def unique_session_dir(root: Path, name: str) -> Path:
@@ -172,6 +205,7 @@ class MeridianAgent:
         self.sensors: list[Sensor] = []
         self.stop_requested = False
         self.last_marker: tuple | None = None
+        self.last_low_disk_warning = -1e9
         self.last_command: dict | None = None
         self.inventory: dict[str,list[dict]] = {"video":[],"audio":[],"serial":[]}
         self.device_config: dict[str,str] = {}
@@ -211,6 +245,7 @@ class MeridianAgent:
     def agent_payload(self) -> dict:
         usage = shutil.disk_usage(self.session_dir)
         free_gb = usage.free / (1024 ** 3)
+        self.warn_if_disk_low(free_gb)
         reports = [sensor.report() for sensor in self.sensors]
         recorded = [report for report in reports if report.status == "recording"]
         dropped = sum(report.droppedSamples for report in reports)
@@ -223,6 +258,7 @@ class MeridianAgent:
             "recordingRoot":str(self.session_dir),
             "inventory":self.inventory,
             "diskFreeGb":round(free_gb,2),
+            "lowDisk":free_gb < LOW_DISK_WARNING_GB,
             "estimatedHours":round(free_gb/self.recording_gb_per_hour(),1),
             "clockOffsetMs":self.clock_offset_ms,
             "openFileCount":len(recorded) if self.recording_started else 0,
@@ -232,6 +268,18 @@ class MeridianAgent:
             "preflightTest":self.preflight_result,
             "csiCalibration":{key:value for key,value in (self.calibration or {}).items() if key in ("status","rows","detail")} or None,
         }
+
+    def warn_if_disk_low(self, free_gb: float) -> None:
+        """Say so in the terminal, at most once a minute, while a recording is running out of disk."""
+        if free_gb >= LOW_DISK_WARNING_GB or not self.recording_started:
+            return
+        now = time.monotonic()
+        if now - getattr(self, "last_low_disk_warning", -1e9) < 60:
+            return
+        self.last_low_disk_warning = now
+        minutes = free_gb / max(1.0, self.recording_gb_per_hour()) * 60
+        print(f"WARNING: only {free_gb:.1f} GB free on the recording disk, about {minutes:.0f} min of recording left",
+              file=sys.stderr, flush=True)
 
     def recording_gb_per_hour(self) -> float:
         """Disk use of the current configuration: cameras from resolution and codec, plus about 1 GB/h for everything else."""
@@ -345,8 +393,19 @@ class MeridianAgent:
             verified = json.loads(probe.read_text(encoding="utf-8")) == payload
             sync_ok = abs(self.clock_offset_ms) < 100
             # Enough disk for a full session (about 45 minutes) with 50% margin.
-            needed_gb = max(10.0, self.recording_gb_per_hour() * 0.75 * 1.5)
+            # An operator floor replaces the estimate outright: the estimate is a planning figure, and the operator
+            # knows what today's protocol actually costs.
+            floor_gb = float(getattr(self.args,"min_free_gb",0) or 0)
+            needed_gb = floor_gb if floor_gb > 0 else max(10.0, self.recording_gb_per_hour() * 0.75 * 1.5)
             payload["diskNeededGb"] = round(needed_gb,1)
+            if floor_gb > 0:
+                payload["diskFloorGb"] = floor_gb
+                payload["diskEstimateGb"] = round(max(10.0, self.recording_gb_per_hour() * 0.75 * 1.5),1)
+            # The operator can downgrade the exposure gate to a warning when the session must start; it is still
+            # recorded here and in the QA report, because a drifting exposure is a confound in the rPPG data.
+            if getattr(self.args,"allow_unlocked_exposure",False) and unlocked:
+                payload["exposureUnlockedAccepted"] = unlocked
+                unlocked = []
             passed = not failed and not unlocked and not overexposed and not baseline_missing and verified and payload["diskFreeGb"] >= needed_gb and sync_ok
             problem = (", ".join(failed) if failed
                        else f"auto exposure still running on {', '.join(unlocked)} (camera body: M mode, fixed ISO and WB, DRO off)" if unlocked
@@ -568,6 +627,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--extract-tasks",action="store_true",help="Also write tasks/: one folder per step with a video proxy and that step's physio rows (slow)")
     result.add_argument("--task-proxy-height",type=int,default=480,help="Proxy video height; 0 keeps the recorded size")
     result.add_argument("--task-proxy-crf",type=int,default=20,help="Proxy video quality, lower is better and larger")
+    result.add_argument("--allow-unlocked-exposure",action="store_true",help="Preflight warns instead of failing when a face camera's exposure is not verifiably locked; the session records the exception")
+    result.add_argument("--min-free-gb",type=float,default=0.0,help="Free disk preflight requires, in GB; 0 uses the estimate from the camera configuration")
     result.add_argument("--no-bids",action="store_true",help="Skip the BIDS-style copy of the export")
     result.add_argument("--lsl",action="store_true",help="Publish events and live telemetry as Lab Streaming Layer streams (requires pylsl)")
     return result
@@ -587,7 +648,15 @@ def main() -> int:
         except Exception as exc:
             print(str(exc),file=sys.stderr)
             return 1
+    try:
+        # One place per machine, not the recording folder: an agent started from another directory must still see it.
+        # A fixed path, not gettempdir(): a shell with its own TMPDIR would otherwise look in a different place.
+        lock = acquire_session_lock(Path("/tmp/meridian-agent-locks"), args.code.strip().upper())
+    except AgentAlreadyRunning as exc:
+        print(str(exc),file=sys.stderr)
+        return 3
     agent = MeridianAgent(args)
+    agent.session_lock = lock
     def request_stop(signum, frame):
         del signum,frame
         agent.stop_requested = True

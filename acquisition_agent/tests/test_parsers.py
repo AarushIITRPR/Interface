@@ -115,6 +115,15 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(sensor.parse("123456,77,2048"),([123456,77,2048],"Raw 2048"))
         self.assertIsNone(sensor.parse("# emg1 v=1 fs=1000"))
 
+    def test_emg_sequence_gaps_count_only_while_recording(self):
+        """Setup has no recorded denominator: a gap there read as 100% dropout and failed preflight (2305RUBD)."""
+        sensor = EmgSensor("emg","COM6",921600,self.root,0)
+        sensor.telemetry([0,10,2048]); sensor.telemetry([0,15,2048])
+        self.assertEqual(sensor.report().dropoutPct,0.0)
+        sensor.start_recording()
+        sensor.telemetry([0,16,2048]); sensor.telemetry([0,20,2048])
+        self.assertEqual(sensor.report().droppedSamples,3)
+
     def test_csi_line(self):
         sensor = CsiSensor("csi","COM5",921600,self.root,0)
         parsed = sensor.parse("1000,42,-47,0,0,0,12,13,14,15")

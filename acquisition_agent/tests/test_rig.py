@@ -188,3 +188,103 @@ class RigBaselineTest(unittest.TestCase):
             with self.subTest(day=day, port=port, csv=csv_present, extra=extra), tempfile.TemporaryDirectory() as tmp:
                 self.write(Path(tmp), day, port, csv_present, **extra)
                 self.assertIsNone(find_rig_baseline(Path(tmp), "/dev/ttyACM0", "20260922"))
+
+
+class ReconnectAndLockTest(unittest.TestCase):
+    def test_serial_nodes_resolve_to_their_physical_port_link(self):
+        from meridian_agent.sensors import stable_serial_path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            node = root / "ttyUSB1"; node.write_text("")
+            by_path = root / "by-path"; by_path.mkdir()
+            (by_path / "pci-0-usbv2-0:8:1.0-port0").symlink_to(node)
+            (by_path / "pci-0-usb-0:8:1.0-port0").symlink_to(node)
+            # The by-path lookup only applies to /dev/tty* names, so exercise the matching directly.
+            import meridian_agent.sensors as sensors
+            original = sensors.os.path.realpath
+            try:
+                sensors.os.path.realpath = lambda p: original(str(node) if p == "/dev/ttyUSB1" else p)
+                self.assertEqual(stable_serial_path("/dev/ttyUSB1", by_path), str(by_path / "pci-0-usb-0:8:1.0-port0"))
+                self.assertEqual(stable_serial_path("/dev/ttyUSB9", by_path), "/dev/ttyUSB9")
+            finally:
+                sensors.os.path.realpath = original
+            self.assertEqual(stable_serial_path("auto", by_path), "auto")
+            self.assertEqual(stable_serial_path("/dev/v4l/by-id/cam", by_path), "/dev/v4l/by-id/cam")
+
+    def test_a_second_agent_for_the_same_session_is_refused(self):
+        from meridian_agent.agent import AgentAlreadyRunning, acquire_session_lock
+        with tempfile.TemporaryDirectory() as tmp:
+            first = acquire_session_lock(Path(tmp), "0132ABCD")
+            self.assertIsNotNone(first)
+            import subprocess, sys
+            # flock is per open file description, so a second process is the honest test.
+            code = ("import sys; from pathlib import Path; from meridian_agent.agent import acquire_session_lock, AgentAlreadyRunning\n"
+                    f"try:\n    acquire_session_lock(Path({tmp!r}), '0132ABCD')\nexcept AgentAlreadyRunning as e:\n    print(e); sys.exit(3)\n")
+            result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1])
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertIn("already running for session 0132ABCD", result.stdout)
+            other = subprocess.run([sys.executable, "-c", code.replace("0132ABCD", "0133WXYZ")], capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1])
+            self.assertEqual(other.returncode, 0, other.stderr)
+            first.close()
+            again = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1])
+            self.assertEqual(again.returncode, 0, "the lock must go away with the process that held it")
+            del AgentAlreadyRunning
+
+
+class BackupTest(unittest.TestCase):
+    def test_backup_copies_verifies_and_snapshots_the_database(self):
+        import hashlib, sqlite3, subprocess, sys
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "session_X_1"; (session / "face").mkdir(parents=True)
+            data = b"frames" * 1000
+            (session / "face" / "face.mkv").write_bytes(data)
+            (session / "manifest.json").write_text(json.dumps({"recordings": [{"relativePath": "face/face.mkv", "bytes": len(data),
+                                                                               "sha256": hashlib.sha256(data).hexdigest()}], "auxiliaryFiles": []}))
+            db = root / "db"; db.mkdir()
+            with sqlite3.connect(db / "state.sqlite") as con:
+                con.execute("create table sessions(code text)"); con.execute("insert into sessions values ('X')")
+            archive = root / "archive"; archive.mkdir()
+            tool = Path(__file__).resolve().parents[1] / "tools" / "backup_session.py"
+            result = subprocess.run([sys.executable, str(tool), str(session), str(archive), "--db-dir", str(db)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((archive / session.name / "face" / "face.mkv").read_bytes(), data)
+            snapshot = next(archive.glob("database_*")) / "state.sqlite"
+            with sqlite3.connect(snapshot) as con:
+                self.assertEqual(con.execute("select code from sessions").fetchall(), [("X",)])
+            (archive / session.name / "face" / "face.mkv").write_bytes(b"x" * len(data))
+            from importlib.util import module_from_spec, spec_from_file_location
+            spec = spec_from_file_location("backup_session", tool); module = module_from_spec(spec); spec.loader.exec_module(module)
+            self.assertEqual(module.verify(session, archive / session.name, quick=False), ["checksum differs: face/face.mkv"])
+
+    def test_verify_only_checks_a_copy_without_copying_anything(self):
+        import hashlib, subprocess, sys
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "session_Z"; (session / "face").mkdir(parents=True)
+            data = b"frames" * 500
+            (session / "face" / "face.mkv").write_bytes(data)
+            (session / "manifest.json").write_text(json.dumps({"recordings": [{"relativePath": "face/face.mkv", "bytes": len(data),
+                                                                               "sha256": hashlib.sha256(data).hexdigest()}]}))
+            copy = root / "drive"; (copy / "face").mkdir(parents=True)
+            (copy / "face" / "face.mkv").write_bytes(data)
+            tool = Path(__file__).resolve().parents[1] / "tools" / "backup_session.py"
+            run = lambda: subprocess.run([sys.executable, str(tool), str(session), str(root / "unused"), "--verify-only", str(copy)],
+                                         capture_output=True, text=True)
+            good = run()
+            self.assertEqual(good.returncode, 0, good.stderr)
+            self.assertIn("matches the manifest", good.stdout)
+            self.assertFalse((root / "unused").exists(), "--verify-only must not copy anything")
+            (copy / "face" / "face.mkv").write_bytes(b"y" * len(data))
+            bad = run()
+            self.assertEqual(bad.returncode, 1)
+            self.assertIn("checksum differs", bad.stderr)
+
+    def test_backup_refuses_an_unfinished_session_or_a_missing_drive(self):
+        import subprocess, sys
+        with tempfile.TemporaryDirectory() as tmp:
+            tool = Path(__file__).resolve().parents[1] / "tools" / "backup_session.py"
+            session = Path(tmp) / "session_Y"; session.mkdir()
+            result = subprocess.run([sys.executable, str(tool), str(session), str(Path(tmp) / "nope")], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("manifest.json", result.stderr)
