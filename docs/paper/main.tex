@@ -367,13 +367,35 @@ video, audio), and the release honours these choices per file. Participants were
 contraindicating exercise, and no names are stored with the data.
 
 \subsection{Labels and release format}\label{sec:release}
-Each session is released as raw streams, a per-frame timestamp log for every camera, a protocol event table, and
-an analysis bundle in BIDS layout~\cite{gorgolewski2016bids}. The bundle contains per-step windows, per-clip
-self-reports (SAM valence, arousal, dominance, discrete emotion, intensity, familiarity), questionnaires (PANAS
-start and end, NASA-TLX, TIPI personality~\cite{gosling2003}), task trial tables (Stroop or N-back, word list),
-derived signals (ECG R-peaks, per-step heart rate and heart-rate variability, skin conductance level), operator
-artifact markers (talking, movement, cough, operator in view), and the quality report. Every file is checksummed
-in a manifest. \ph{Licence, access procedure (data use agreement for identifiable video), hosting.}
+A session is recorded as one continuous stream per sensor and cut into tasks afterwards, never during the session.
+Cutting live would have to trust video time, and video time is not wall-clock time: a dropped frame simply leaves
+the container while the container keeps declaring a constant frame rate, which in one pilot turned 32 minutes of
+session into 18 minutes of video. Every cut is therefore mapped through the per-frame timestamp log, and lossless
+intra-frame coding makes a seek into a master exact and nearly free. The release has four parts:
+
+\begin{itemize}\itemsep1pt
+  \item \textbf{Masters.} The continuous lossless streams, one per sensor, with a per-frame timestamp log for each
+    camera and a manifest of SHA-256 checksums. This is the archival copy, and the only one an analysis should use
+    for rPPG on video.
+  \item \textbf{Per-task folders.} One folder per step attempt, named by step and attempt, holding that step's slice
+    of every modality: a compressed video proxy for viewing and behavioural coding, the frame timestamps inside the
+    window, the audio slice, each physiological stream cut to the window, a per-frame face colour trace for rPPG,
+    and the step's own metadata (window in absolute and session time, type, phase, emotion, attempt, pauses,
+    stimulus onset). This is the unit our benchmarks (Sec.~\ref{sec:bench}) are defined over. The proxies are lossy
+    and must not be used for pulse estimation; the colour trace and the masters are the exact signals.
+  \item \textbf{Tables.} Step windows, protocol events, per-clip self-reports (SAM valence, arousal, dominance,
+    discrete emotion, intensity, familiarity), questionnaires (PANAS start and end, NASA-TLX, TIPI
+    personality~\cite{gosling2003}), task trials (Stroop or N-back, word list), operator artifact markers (talking,
+    movement, cough, operator in view), derived signals (ECG R-peaks, per-step heart rate and heart-rate
+    variability, skin conductance level), and the per-step quality report.
+  \item \textbf{BIDS copy}~\cite{gorgolewski2016bids} of the physiological and behavioural streams, one subject per
+    participant and one session per recording.
+\end{itemize}
+
+Steps that were repeated after an interruption appear as separate attempts, each with its own folder and coverage;
+\ph{state the rule for which attempt is canonical}. Every file carries the participant's per-modality sharing
+decision, and packaging copies only what that participant allowed.
+\ph{Licence, access procedure (data use agreement for identifiable video), hosting.}
 
 
 %% =====================================================================
