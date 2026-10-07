@@ -1,69 +1,346 @@
-# Meridian Multimodal Research Platform
+# Meridian
 
-Meridian is a dual-portal research instrument for controlled multimodal human-subject data collection.
+**A dual-portal research application for guided, synchronized multimodal data collection.**
 
-## Product surfaces
+Participants follow one activity at a time. Instructors prepare recording, observe signals, control the protocol, send written instructions, and review evidence. A Python acquisition agent runs on the computer connected to the sensors and writes raw recordings there.
 
-- `/subject` presents one neutral activity at a time, with no study labels, sensor information, condition names, or operational detail.
-- `/instructor` provides participant assignment, preflight readiness, live protocol progress, recording health, interventions, notes, recovery, configuration, and exports.
-- `/api/sessions` is the authoritative session state and event mutation API.
-- `/api/acquisition` is the token-authenticated command and telemetry channel for the local recording agent.
-- `/api/media` stores uploaded video, audio, image, and animated stimuli in object storage.
+Meridian is a **research collection platform**, not an implemented diagnostic or engagement-prediction model. Sensor readiness, experimental condition, self-reported affect, and clinical diagnosis are different things.
 
-## Protocol integrity
+This README describes the active editorial interface and protocol **v7**, audited on **7 October 2026**. Read the [full documentation PDF](docs/meridian_portal_documentation.pdf) or its [editable LaTeX source](docs/meridian_portal_documentation.tex) for workflow-by-workflow cognitive rationale, data definitions, and proposed task-specific modeling pipelines. Older console components remain in the repository but are not rendered by the current instructor route.
 
-The protocol is defined in `lib/protocol.ts`. It preserves the supplied order and timings:
+## Architecture and stack
 
-1. Synchronization check
-2. Eyes-open baseline
-3. Eyes-closed baseline
-4. Three counterbalanced emotion blocks with ratings and interleaved tasks
-5. Return-to-baseline gates
-6. Seated rest, breathing, breath hold, head motion and speaking, standing, exertion, and recovery
-7. Guided body scan
-8. Return to normal
-9. Completion
+```text
+Subject browser <--> Meridian session API / D1 <--> Instructor browser
+                              ^
+                              | commands, health, manifests
+                              v
+                    Local Python acquisition agent
+                       |                    |
+                   USB / OS devices   Frontier X live ECG
+                       |
+                 Raw files on local disk
 
-Stimuli use the six-row Williams-style sequence. Stroop, N-back, and conversation order is deterministic per participant and supports participant IDs beyond 1000.
-
-## Reliability model
-
-- Cloudflare D1 stores session snapshots and an append-only event ledger.
-- Cloudflare R2 stores future media files separately from session records.
-- Every response, task completion, operator intervention, sensor state change, note, pause, resume, repeat, and timing transition produces a structured event.
-- Session mutations use optimistic revision checks to reduce conflicting writes.
-- Both portals reject stale polling responses so a slower heartbeat cannot roll the UI back to an older task revision.
-- A subject tab attached to an ended session automatically follows the newest active session for the same participant. Participant IDs can also be entered directly on the subject connection screen.
-- The instructor can recover a saved session by code without restarting the protocol.
-
-## Local development
-
-Use Node.js 22 or later.
-
-```sh
-npm install
-npm run dev
+Registered stimuli / R2 --> browser playback
+Local MJPEG preview --> browser on the acquisition computer
 ```
 
-Run the quality gates with:
+| Layer | Implementation |
+| --- | --- |
+| UI | React 19, TypeScript, App Router-style pages via **vinext**, Vite 8 |
+| Presentation | CSS, Tailwind tooling, Lucide icons, Motion with reduced-motion handling |
+| Backend | Server route handlers in the same application, Cloudflare Worker runtime |
+| Persistence | D1 session snapshots and event records; Drizzle tooling |
+| Stimuli | `public/protocol-media`; R2 `MEDIA` binding for uploads |
+| Acquisition | Python, OpenCV, PortAudio via `sounddevice`, PySerial, `websocket-client` |
+| Package manager | npm with committed lockfile; Python requirements for the agent |
 
-```sh
-npm run lint
-npm test
+**The web frontend and backend start together.** There is no separate Flask, Express, or Streamlit server for Meridian. The acquisition process is separate because it accesses local hardware and records independently of browser rendering.
+
+| Route | Purpose |
+| --- | --- |
+| `/` | Portal selection |
+| `/instructor` | Participant entry, Study overview, Protocol workspace, Recording review, Workspace settings |
+| `/subject` | Join by session code or numeric participant ID |
+| `/subject?session=SESSION_CODE` | Join a specific session |
+| `/api/sessions` | Authoritative session reads and mutations |
+| `/api/acquisition` | Token-authenticated agent commands, telemetry, finalization |
+| `/api/media` | Media storage workflow |
+
+## Start the website
+
+Prerequisites: **Node.js 22.13.0+**, npm, and Python **3.11+** for acquisition. Use a Python release with available wheels for the sensor dependencies. Physical devices also require OS drivers and permissions. Current preflight requires **10 GiB free disk space**.
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/AarushIITRPR/Interface.git
+cd Interface
+npm.cmd ci
+npm.cmd run dev -- --host 127.0.0.1 --port 3000
 ```
 
-The Sites runtime provides local D1 and R2 bindings from `.openai/hosting.json`.
+For an existing checkout, open the directory containing `package.json` and run the last command. `npm.cmd` avoids PowerShell's `npm.ps1` execution-policy issue without changing machine policy.
 
-## Sensor integration
+### Linux / macOS
 
-The `acquisition_agent` directory contains the local hardware service adapted from the supplied Dataset Sync, CSI HR C5, and EMG Checker projects. It records camera, microphone, CMS50E oximeter, ESP32 WiFi CSI, ESP32 EMG, ESP32 GSR, configured ECG serial, and thermal camera streams on the computer connected to the subject.
+```bash
+git clone https://github.com/AarushIITRPR/Interface.git
+cd Interface
+npm ci
+npm run dev -- --host 127.0.0.1 --port 3000
+```
 
-The agent receives hardware assignments, session changes, and task markers from Meridian. It writes raw high-rate data locally and submits only low-bandwidth metrics, downsampled rolling windows, and loopback camera previews. In Setup, the instructor selects devices and verifies hardware detection, protocol-valid data, signal quality, storage, synchronization, and a 10-second test. Configuration locks when recording begins. Monitor prioritizes the subject camera, expandable signals, actionable warnings, and an always-visible recording-health strip. Review reports rate, loss, gaps, availability, file size, and capture coverage for each finalized stream. The subject remains on the waiting screen until the instructor completes preflight and starts the protocol.
+Open the two portals separately:
 
-See `acquisition_agent/README.md` for installation, device configuration, Linux and Windows notes, and simulated verification.
+- <http://localhost:3000/instructor>
+- <http://localhost:3000/subject>
 
-## Media integration
+Keep the terminal running. **Use the port actually printed by the server.** If it uses 3001 or 3010, both browser URLs and the acquisition command must use that port. The current Technical connection UI prints 3000 even when another port is used; correct it manually.
 
-The registered protocol media is stored in `public/protocol-media`. New and restored sessions receive the six emotion clips, the guided body-scan video, and the relaxing nature video used behind the box-breathing pacer by default. The neutral washout remains an unlabelled grey fixation screen so it does not introduce another affective stimulus.
+Vite supplies local Cloudflare bindings from `.openai/hosting.json`: D1 `DB`, R2 `MEDIA`. Local runtime persistence is under `.wrangler`. The session engine creates session tables. Do not delete local state if you need existing sessions. `npm run db:generate` generates migration files, not a required action before every run.
 
-The subject portal resolves media through the session snapshot and logs emotion-clip onset, offset, completion, and playback failure events. Instructor-supplied media can still replace any default through the existing session media configuration.
+For a production build:
+
+```powershell
+npm.cmd run build
+npm.cmd run start
+```
+
+Development mode supplies a local operator identity. Production uses ChatGPT authentication and the allowlist in `app/operator-auth.ts`. A production build is not automatically a public instructor portal. Real deployment also needs actual D1/R2 bindings and suitable authentication. Never expose the development identity bypass to the internet.
+
+## Start the acquisition agent
+
+Run this on the **computer connected to the sensors**, in a second terminal. It may be the same laptop as the web server. The subject browser itself does not access the hardware.
+
+### Windows: one-time installation
+
+From the repository root:
+
+```powershell
+cd acquisition_agent
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Create a session in the instructor portal. Open **Workspace settings > Technical connection** for its code and acquisition token. Replace the placeholders below with those current values:
+
+```powershell
+.\.venv\Scripts\python.exe -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --output "C:\MeridianRecordings"
+```
+
+Command Prompt, from the same `acquisition_agent` folder:
+
+```bat
+.venv\Scripts\python.exe -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --output "C:\MeridianRecordings"
+```
+
+Explicitly using the venv interpreter avoids both activation-policy issues and accidentally running another Python. `No module named meridian_agent` usually means the working directory or interpreter is wrong.
+
+### Linux
+
+```bash
+cd acquisition_agent
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --output ./recordings
+```
+
+Depending on the distribution, install its Python venv, PortAudio and OpenCV runtime packages. Check access to `/dev/video*` and `/dev/ttyUSB*` or `/dev/ttyACM*`; do not routinely run acquisition as root to bypass permissions.
+
+For separate computers, replace localhost with the reachable, authenticated Meridian server origin. **Localhost always means the machine running the command.** Camera previews currently remain local to the acquisition machine.
+
+Saved portal assignments override command-line sensor defaults. Use Workspace settings, save, then preflight. `--simulate-all` deliberately overrides devices with simulation. `--help` lists all flags. Bundled launcher scripts use the default remote server unless environment configuration changes it; explicit commands above are clearer for local testing.
+
+## Run a session
+
+1. **Enter a numeric participant ID.** Contextual resume appears if an active session is found among the latest 50 sessions. A participant ID is not the generated session code.
+2. **Open Workspace settings.** Start the agent using Technical connection details. Wait for Connected.
+3. **Assign devices.** Select Auto-detect or a specific device. A checkbox means **required for readiness**, not enabled. To disable a sensor, uncheck it **and** choose **Not assigned**. Use distinct physical indices for face and thermal cameras.
+4. **Save recording setup.** Selections are local drafts until saved. Refresh devices if hardware changed, then rerun preflight.
+5. **Run preflight.** After a 10-second observation interval, the agent checks required-stream quality, a JSON write/read test, at least 10 GiB free, and estimated server-clock offset below 100 ms. This is operational readiness, not medical certification or a complete media-integrity test.
+6. **Connect the subject page.** Use Open subject view or enter the code/participant ID. It waits during setup or when operator/acquisition readiness is unavailable.
+7. **Start session.** Raw recording begins and configuration locks. Advance the synchronization stage after checking the rig.
+8. **Monitor and guide.** Overview shows signals and communication. Protocol workspace has instructions, navigation, gate checks, N-back level, and manual BP entry.
+9. **Pause or intervene.** Messages appear as participant announcements. Safety stages expose a stop action. **Pause stops protocol progression, not raw recording.** Markers identify pauses afterward.
+10. **End explicitly.** Choose **Workspace settings > End session** and confirm. Seeing Thank you does not prove acquisition has finalized.
+11. **Verify and archive.** Wait for agent finalization and manifest synchronization. Export review metadata and copy the complete local session directory to approved storage.
+
+Do not treat reopening a completed session as an uninterrupted continuation of its old raw capture. Use a new acquisition and preserve provenance.
+
+## Protocol and participant tests
+
+`lib/protocol.ts` is the sequence source of truth; `lib/types.ts` declares v7 and default media. There are **34 stages**. Six emotion clips form three pairs using a deterministic six-row Williams-style schedule. Buffer-task order also depends on participant ID. Counterbalancing manages order effects; it does not prove an intended emotion was elicited.
+
+| Stages | Activity | Timing / completion |
+| --- | --- | --- |
+| 1 | Sensor/synchronization check | Instructor advances |
+| 2 | Eyes-open baseline and BP anchor | 120 s |
+| 3 | Eyes-closed baseline | 90 s |
+| 4-10 | Clip, rating, neutral fixation, clip, rating, buffer, baseline gate | Clip end; rating completion; 20 s fixation; 40 s gate display |
+| 11-17 | Second paired block | Same structure |
+| 18-23 | Third paired block | Same structure without trailing gate |
+| 24 | Settle before sweep | 40 s display, instructor gate |
+| 25 | Seated rest | 20 s |
+| 26 | Box breathing | 45 s, four-second phases |
+| 27 | Voluntary breath hold | Participant starts/releases, comfort limited |
+| 28 | Head motion and speech | 30 s |
+| 29 | Standing and BP | 45 s |
+| 30 | Brief exertion | 20 s |
+| 31 | Recovery and BP | 60 s |
+| 32 | Guided body scan | 240 s |
+| 33 | Return to normal and final BP | 60 s |
+| 34 | Completion | Instructor finalizes |
+
+Each clip is followed by **Valence (pleasure), Arousal (activation), Dominance (control)**, individually presented with ten numbered buttons, not sliders. Anchors: Unpleasant/Pleasant, Calm/Excited, Controlled/In control. Keys 1-9 and 0 select 1-10. These are affect ratings, not diagnostic or engagement labels.
+
+Each buffer appears once:
+
+- **Stroop:** 30 responses. Persisted output is trial count, accuracy percentage, mean reaction time. Full trial history is not exported.
+- **N-back:** 20 spatial trials at selectable 1/2/3-back. Current output is level, trial count, matches, responses. Validated misses, false alarms, per-trial response times are not yet exported; repeated presses can inflate counts.
+- **Conversation:** 180 seconds on familiar topics. Audio is recorded; the portal does not generate transcripts.
+
+Bundled clips in `public/protocol-media`: happy, sad, anger, fear, surprise, disgust, bodyscan, relaxing-nature (all `.mp4`). Actual media duration governs emotion-clip completion, not the 12-second estimate in the plan. Never count a missing-media placeholder as valid stimulus delivery. Verify rights to use/distribute clips.
+
+Breath hold, standing, and exertion require an approved protocol, participant screening, supervision, and withdrawal procedures. Software stop controls do not replace these safeguards.
+
+## Supported sensors
+
+| Modality | Integration | Recorded signal and limit |
+| --- | --- | --- |
+| Face camera | OpenCV index/path | RGB AVI, not computed microexpressions or engagement |
+| Room audio | OS input via PortAudio | Mono 48 kHz 16-bit PCM WAV; receiver must be an OS recording input |
+| Oximeter | CMS50E V7 serial | SpO2, HR, signal strength, pleth; not arbitrary USB oximeters |
+| EMG | Compatible ESP32 firmware; 921600 baud default | Device time, sequence, ADC; interpretation depends on electrode site/gain |
+| EDA/GSR | JSON-line firmware; 115200 baud default | Conductance, ADC, firmware stress/z-score; those scores are not clinical labels |
+| ECG | Frontier X live-share WebSocket | Reconstructed 125 Hz waveform and HR; active link/user ID and running agent required |
+| ECG fallback | Generic serial newline adapter | Raw lines, not a universal ECG decoder |
+| Thermal | OpenCV-compatible camera | AVI image stream; no guaranteed Celsius/radiometric calibration |
+| WiFi CSI | Compatible external ESP32 serial stream | Raw CSI line, packet/time fields, RSSI; ordinary laptop WiFi is insufficient |
+| BP | Manual instructor entry from cuff | Systolic, diastolic, optional pulse, stage; no automatic cuff adapter |
+
+Serial discovery checks protocol samples rather than inferring sensor identity from USB bridge VID/PID or fixed COM numbers. Explicit assignments reserve ports before automatic discovery. Keep explicit assignments unique and verify live signals. This is protocol-specific, not universal discovery.
+
+Both video Auto-detect values currently mean index 0, **not semantic recognition of camera type**. Manually select distinct cameras. An analog headset-port receiver may appear under the existing sound-card input name; jack, cable, output level, and driver must support capture. A headphone output cannot act as an audio input.
+
+## Where recordings are stored
+
+Default: `recordings` relative to the agent working directory. Prefer an explicit `--output` path. The terminal prints **Monitoring locally in ...** with the resolved directory.
+
+```text
+session_CODE_TIMESTAMP/
+  acquisition.json          # machine, devices, clocks
+  preflight_test.json       # readiness evidence
+  session_markers.jsonl     # observed task/status transitions
+  manifest.json             # primary file paths, hashes, quality
+  face/face.avi
+  audio/audio.wav
+  oximeter/oximeter.csv
+  emg/emg.csv
+  gsr/gsr.csv
+  csi/csi.csv
+  ecg/ecg.csv
+  ecg/ecg_packets.jsonl     # Frontier X source sidecar
+  thermal/thermal.avi
+```
+
+Only applicable files appear. Simulation produces `*_simulated.csv`, **not real AVI/WAV**. Failed manifest synchronization creates `pending_upload.json`; automatic replay is not implemented. Preserve and reconcile it deliberately.
+
+Storage responsibilities:
+
+1. **D1:** session state, ratings, BP, notes/events, telemetry snapshots, recording metadata.
+2. **Acquisition disk:** original video/audio/CSV and sidecars.
+3. **R2/public assets:** stimulus media, not automatic backup of raw recordings.
+
+Recording review exports JSON manifest/session metadata and a separate JSON event ledger. It **does not download raw recordings**. Copy the complete acquisition directory. The exported snapshot strips the top-level acquisition token, but preview URLs and other metadata can still be sensitive; redact before sharing.
+
+CSV includes host epoch nanoseconds and relative monotonic time, plus available device clocks. Current AVI/WAV writers lack per-frame/per-block timestamp sidecars. Polling markers and estimated clock offsets provide approximate alignment, not guaranteed hardware synchronization.
+
+## Synchronization and recovery
+
+- D1 is authoritative. Session writes use optimistic revisions; portals reject older snapshots and responses for previous sessions.
+- Expected step IDs reject stale subject completions. This is not full exactly-once or attempt-level idempotency.
+- Subject polling is about 850 ms, instructor refresh 1.8 s, agent heartbeat 2 s. These are near-real-time control updates, not raw-stream synchronization.
+- Operator presence uses a 12-second lease; acquisition uses 10 seconds. Missing presence/readiness shows a waiting screen.
+- Participants can change sessions while waiting/after completion; ended sessions can follow a newer active session for the same participant.
+- After recording starts, temporary network loss does not stop local capture. Metadata delivery/protocol continuity are not guaranteed during the interruption.
+- A browser refresh can restart client-only rating/Stroop/N-back state. Avoid refreshing mid-task and record interruptions/repeats.
+
+## HCI improvements over time
+
+These are code-supported design decisions and cognitive rationales, **not measured usability gains**. See [Nielsen's heuristics](https://www.nngroup.com/articles/ten-usability-heuristics/) and [WCAG 2.2](https://www.w3.org/TR/WCAG22/).
+
+| Earlier issue | Current approach | Rationale |
+| --- | --- | --- |
+| Mixed participant/operator responsibilities | Separate portals | Less competing information and participant priming |
+| Dense technical dashboard | Overview, Protocol, Review | Task-based grouping and less visual search |
+| Separate resume workflow | Participant-first contextual resume | Recognition without premature workflow choice |
+| Duplicate navigation/ledger | One sidebar, ledger in Review | Fewer competing destinations |
+| Prominent command/token | Technical connection disclosure | Troubleshooting stays available but secondary |
+| Trapped waiting/Thank you state | Change session and active-session following | User control and recovery |
+| Slider precision during ratings | Ten buttons, one dimension at a time | Clear mapping and less fine-motor adjustment; scale equivalence requires validation |
+| Stale state reverting tasks | Revision and active-code guards | Predictable feedback and continuity |
+| Wrong serial identity | Protocol probes and reserved ports | Error prevention before recording |
+| Dropdown disrupted by refresh | Local drafts and explicit Save | Preserves operator action during telemetry updates |
+| Unclear preparation | Required streams, preflight, configuration lock | Externalizes checks and prevents mid-run changes |
+| Speech interrupted by operator | Written announcements/acknowledgement | Lower audio contamination |
+| Downloads confused with recordings | Review manifest plus local-file workflow | Clarifies where evidence actually resides |
+
+Labels, alerts, skip link, dialog names, Escape-to-close, and reduced-motion support are present. **WCAG compliance has not been established.** Focus trapping/restoration, rating radio semantics, contrast, small-screen use, and assistive technology need systematic tests. Decorative labels and duplicate task copy remain in some screens; minimalism is a direction, not an absolute claim.
+
+Milestones: `8b3450f` acquisition agent; `4405dde` acquisition workflow/sync; `2ec91d0` portal redesign/live monitoring; `a472855` Frontier X/autodetection; `74a6d45` stimulus media/SAM alignment.
+
+## Verification
+
+From repository root:
+
+```powershell
+npm.cmd run lint
+npm.cmd test
+```
+
+`npm test` builds and checks rendered HTML/source assertions. Some assertions inspect the older instructor component, so passing is **not** end-to-end certification of the active console.
+
+From `acquisition_agent`:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+### Simulated smoke test
+
+Use a dedicated test participant:
+
+```powershell
+.\.venv\Scripts\python.exe -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --simulate-all --output "C:\MeridianTestRecordings"
+```
+
+Run preflight, start, advance/pause/resume, send a message, end, then check ledger, CSV rows, primary-file hashes, and manifest. This verifies orchestration, not physical capture, actual audio/video encoding, or medical accuracy.
+
+Before a real study:
+
+- Identify each physical device; test unplug/reconnect without cross-assignment.
+- Record a short camera/audio test with a visible clap and audible phrase. End, open AVI/WAV on disk, check duration/playback.
+- Check serial counts, clocks, gaps, units and calibration against recording duration.
+- Test network interruption, refresh, repeated session selection, and missing required devices in a test session.
+- Confirm output path, storage, both portal origins, and full-directory archival including sidecars.
+- Do not treat a green badge as proof of complete data.
+
+## Troubleshooting
+
+| Symptom | Action |
+| --- | --- |
+| No module named meridian_agent | Correct working directory and venv interpreter |
+| Session not found | Same server/port, current session code and token |
+| Camera warnings then no monitoring message | Inventory probing precedes monitoring; inspect drivers/access. No per-device process timeout currently protects against a blocking driver |
+| Start disabled | Save, check required streams, run preflight; verify disk and clock condition |
+| Preflight stays running | Check current agent heartbeat/configuration, not repeated clicks |
+| Webcam cannot open | Close duplicate capture processes, allow desktop camera access, select device, avoid face/thermal sharing index 0 |
+| Audio input missing | Check OS input and sounddevice inventory first; output-only jacks cannot capture |
+| Wrong serial device | Current protocol probes, compatible firmware, unique assignments; no fixed COM assumptions |
+| Thermal shows webcam | Explicitly select thermal index; radiometric output needs a dedicated adapter |
+| Subject waits | Check operator/agent presence, required streams and session; use Change session if needed |
+| Thank you but files pending | End session and await finalization |
+| Export has no video/audio | Export is metadata; copy raw acquisition folder; simulation has no real media |
+| Remote camera preview absent | Preview is loopback-only, not a video relay |
+
+## Deployment, privacy, and limits
+
+Production access is restricted by an allowlist. Configure it deliberately for another lab. Keep session codes private and treat acquisition tokens/Frontier X share links as credentials. Raw recordings stay local, but telemetry and metadata reach the backend. Use consent, encryption, access control, retention/deletion policy, and approved transfers.
+
+There is no universal device discovery, guaranteed loss-free capture, automatic raw-file cloud backup, or trained diagnostic model. Preflight is operational evidence, not calibration or clinical validation. Stress/affect clips do not diagnose mental illness; single-lead ECG does not replace diagnostic 12-lead ECG; gaze/facial expression alone cannot establish engagement.
+
+### Source map
+
+```text
+app/instructor/editorial-operator-console.tsx  Active operator UI
+app/subject/subject-portal.tsx                Participant tasks
+lib/protocol.ts                              Sequence/counterbalancing
+lib/types.ts                                 Protocol/sensor/payload types
+lib/session-engine.ts                        State, persistence, leases
+app/api/{sessions,acquisition,media}/route.ts API handlers
+acquisition_agent/meridian_agent/agent.py     Control/preflight/finalization
+acquisition_agent/meridian_agent/sensors.py   Adapters/writers/discovery
+acquisition_agent/meridian_agent/preview.py   Local preview
+docs/meridian_portal_documentation.tex        Full documentation
+```

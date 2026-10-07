@@ -1,0 +1,476 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[margin=22mm,headheight=15pt]{geometry}
+\usepackage{lmodern,microtype,graphicx,xcolor,booktabs,longtable,array,tabularx}
+\usepackage{amsmath,enumitem,fancyhdr,titlesec,listings}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+\definecolor{ink}{HTML}{19334A}
+\definecolor{accent}{HTML}{946047}
+\definecolor{wash}{HTML}{F1F4F6}
+\titleformat{\section}{\Large\bfseries\color{ink}}{\thesection}{.7em}{}
+\titleformat{\subsection}{\large\bfseries\color{ink}}{\thesubsection}{.6em}{}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+\setlength{\emergencystretch}{2em}
+\renewcommand{\arraystretch}{1.18}
+\setlist{itemsep=3pt,topsep=4pt,leftmargin=*}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\pagestyle{fancy}\fancyhf{}
+\fancyhead[L]{\small\color{ink}MERIDIAN / SYSTEM DOCUMENTATION}
+\fancyhead[R]{\small Protocol v7}
+\fancyfoot[L]{\small Research infrastructure, not a diagnostic device}
+\fancyfoot[R]{\thepage}
+\lstset{basicstyle=\ttfamily\small,breaklines=true,columns=fullflexible,backgroundcolor=\color{wash},frame=none,xleftmargin=6pt,xrightmargin=6pt,aboveskip=8pt,belowskip=8pt}
+\newcommand{\code}[1]{{\small\nolinkurl{#1}}}
+\newcommand{\status}[1]{\textbf{#1}}
+\begin{document}
+\hypersetup{pageanchor=false}
+\begin{titlepage}
+\vspace*{16mm}
+{\large\color{accent}TECHNICAL AND HUMAN-CENTRED DESIGN DOCUMENTATION}\par
+\vspace{12mm}
+{\fontsize{40}{44}\selectfont\bfseries\color{ink}Meridian}\par
+\vspace{5mm}
+{\LARGE Guided multimodal acquisition,\par workflows, and task-specific modeling}\par
+\vspace{14mm}
+\rule{\textwidth}{0.6pt}
+\vspace{5mm}
+{\large A code-grounded account of what the portal does, why its interaction frames exist, and how its recordings can support future analysis.}\par
+\vspace{10mm}
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+Repository & \url{https://github.com/AarushIITRPR/Interface}\\
+Implementation baseline & Commit \code{74a6d45}; active editorial console; protocol v7\\
+Audit date & 7 October 2026\\
+Scope & Collection architecture, operator and participant workflows, cognitive rationale, data contracts, feature engineering, fusion design, verification and limitations\\
+Not included & Smart India Hackathon problem statement; claims of measured clinical accuracy or completed model training
+\end{tabularx}\par
+\vfill
+\colorbox{wash}{\parbox{\dimexpr\textwidth-2\fboxsep\relax}{\textbf{Evidence legend}\par
+\textbf{Implemented}: identifiable in the current source.\par
+\textbf{Design rationale}: reasoned application of cognitive/HCI principles, not a measured improvement.\par
+\textbf{Proposed}: future analysis or engineering work, not an existing portal capability.}}
+\end{titlepage}
+\hypersetup{pageanchor=true}
+\tableofcontents
+\clearpage
+
+\section{Purpose, users, and boundaries}
+Meridian coordinates controlled human-subject recording. The participant watches registered stimuli, completes cognitive tasks and self-reports, and follows movement or relaxation instructions. The instructor supervises the session, verifies recording readiness, monitors incoming data, intervenes, and reviews the operational record. The acquisition computer connects to physical devices, records their raw output, and reports health to the portal.
+
+The product addresses a workflow problem: collecting interpretable, attributable, approximately time-aligned data without making a participant manage an engineering console. It does not currently infer depression, heart disease, or engagement. The modeling sections below are implementation designs that require new labels, training, and validation.
+
+\subsection{Three roles and their cognitive demands}
+\begin{longtable}{@{}L{.19\textwidth}L{.35\textwidth}L{.39\textwidth}@{}}
+\toprule Role & Primary question & Interaction requirement\\\midrule\endhead
+Participant & What do I do now, and how can I stop? & One current activity, neutral cue, unambiguous response controls, waiting/recovery path. Do not expose intended emotion labels or technical faults as participant responsibilities.\\
+Instructor & Is the correct person doing the correct task while valid data arrives? & Current stage, actionable readiness, stream evidence, controlled navigation, communication, explicit end and review.\\
+Researcher / technician & Can these files be traced, interpreted, reproduced and analyzed? & Clock/device metadata, raw data, events, missingness and provenance. Detailed diagnostics should not compete with routine operation.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Definition of success}
+Successful acquisition is not merely reaching Thank you. It means the intended session ran, stimuli and responses have adequate evidence, required streams have usable local files, interruptions are marked, and the final artifacts are associated with the correct participant and run. A green status means an operational check passed; it is not a medical or analytical validity certificate.
+
+The current portal provides much of the collection infrastructure, but it cannot establish construct validity. Emotion category, valence/arousal/dominance, cognitive-task performance, stress, engagement and disease are distinct variables. The same elevated heart rate may reflect exertion, speech, anxiety, medication or measurement error. No single reading resolves those alternatives.
+
+\subsection{Evidence basis}
+This document uses the active routes, protocol, session engine, device adapters, writers and tests in the repository. It also uses primary dataset/model documentation and authoritative HCI/clinical guidance. Development history supports an account of implemented changes, but no fabricated before/after task times, SUS scores, clinical accuracy or production certification are reported. Hypothetical personas are not empirical participants.
+
+\section{System architecture and operational setup}
+\subsection{Components and responsibilities}
+\begin{longtable}{@{}L{.24\textwidth}L{.69\textwidth}@{}}
+\toprule Component & Responsibility and boundary\\\midrule\endhead
+React/TypeScript portals & App Router-style pages through vinext and Vite. Motion supports restrained transitions and reduced-motion preference. The subject and instructor share backend state, not local component state.\\
+Session API and D1 & Stores snapshots, revisions, assignment, ratings, BP and events. Mutations perform optimistic revision checks. This is the authoritative protocol state.\\
+Media route and R2 & Supports stimulus storage. Registered default clips are served from public assets. R2 is not an automatic destination for captured raw sensor files.\\
+Python acquisition agent & Polls commands, discovers supported devices, runs preflight, starts writers, sends telemetry, observes task markers and finalizes files. Python threads service device streams.\\
+Acquisition filesystem & Holds original AVI, WAV and CSV streams plus JSON/JSONL metadata. It must be archived independently of browser downloads.\\
+Loopback preview service & Serves face/thermal MJPEG on 127.0.0.1, default port 8765. A remote instructor browser cannot access another computer's localhost preview.\\
+\bottomrule
+\end{longtable}
+
+\textbf{Control path:} instructor action $\rightarrow$ session API $\rightarrow$ authoritative snapshot $\rightarrow$ subject/agent polling.\par
+\textbf{Evidence path:} devices $\rightarrow$ acquisition writers $\rightarrow$ local raw files; summary telemetry $\rightarrow$ backend $\rightarrow$ operator.\par
+\textbf{Analysis path (proposed):} archived raw data + clocks + annotations $\rightarrow$ quality control $\rightarrow$ features/encoders $\rightarrow$ task-specific fusion $\rightarrow$ calibrated output.
+
+The acquisition agent is primarily an API client, not a general-purpose server queried by the instructor. Its small HTTP server serves local previews only. Frontier X ECG uses a network feed on the agent; the other configured modalities use local device interfaces. The browser controls the study but does not replace the device acquisition layer.
+
+\subsection{Reproducible local launch}
+Install Node 22.13.0+ and Python 3.11+ with suitable dependency wheels. In the repository root, Windows PowerShell users run:
+\begin{lstlisting}
+npm.cmd ci
+npm.cmd run dev -- --host 127.0.0.1 --port 3000
+\end{lstlisting}
+The website and its backend start together. Open \code{/instructor} and \code{/subject} separately on the actual printed origin. Local D1/R2 bindings are supplied through Vite and \code{.openai/hosting.json}; local state lives under \code{.wrangler}. Different servers, ports and databases must not be assumed to contain the same sessions.
+
+\begin{minipage}{\linewidth}
+In a second terminal, from the repository root:
+\begin{lstlisting}
+cd acquisition_agent
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --output "C:\MeridianRecordings"
+\end{lstlisting}
+\end{minipage}\par
+Create the session first and obtain its credentials from Workspace settings, Technical connection. Always use the same web origin. Explicit venv invocation avoids activation-policy and wrong-interpreter problems. Linux uses \code{python3 -m venv .venv} and \code{.venv/bin/python}; serial, video and audio permissions must be configured normally, not bypassed through routine root execution.
+
+For multiple computers, the agent must reach an authenticated server address, not the instructor laptop's literal localhost URL. The subject browser can be on a different computer from the sensors. Production uses the existing ChatGPT authentication and operator allowlist; development bypasses that identity check. Deploying a public development server is not an acceptable authentication strategy.
+
+\subsection{State, timing and finalization}
+The main states are setup, running, paused, complete and aborted. During setup, sensors may be probed without recording. A 10-second preflight checks current required-stream quality, a local JSON write/read, at least 10 GiB free and an estimated server clock offset below 100 ms. It does not verify sustained quality throughout every instant of the test or decode completed media files.
+
+Start locks configuration and commands recording. Pausing changes protocol timing and adds events, while the acquisition command remains record. End/abort commands finalize, close primary writers, hash artifacts and submit metadata. Entering the final protocol stage alone can display Thank you while the session still needs explicit finalization.
+
+The subject polls about every 850 ms; instructor refresh is 1.8 s with a 5 s presence heartbeat; agent heartbeat defaults to 2 s. Operator and acquisition leases are 12 s and 10 s. Older revisions and responses for previous session codes are discarded. Expected-step checks reject stale task completions, but this is not full attempt-aware idempotency. The client can restart an unfinished task after a refresh.
+
+\clearpage
+\section{Operator workflow: frame-by-frame cognitive justification}
+Here a frame means a functional interaction state, not every animation frame. The entries cover the active interface rather than obsolete components. The cognitive interpretations apply principles of reduced extraneous processing, recognizable actions and focused choices \cite{sweller,hick}; they are design hypotheses requiring observed user testing.
+
+\subsection{Frame O1: portal choice}
+\textbf{Implemented.} The root page separates Subject display and Instructor console.\par
+\textbf{Rationale.} Role separation prevents participants from having to interpret device setup and prevents operators from searching through participant prompts for controls. The initial choice maps to real responsibilities.\par
+\textbf{Check.} Users should choose their destination without explanation; an operator route still requires authorization in production.
+
+\subsection{Frame O2: participant entry and contextual resume}
+\textbf{Implemented.} A numeric identifier is central; operator identity is secondary. After entry, a recent active session may be offered as Resume. Starting a new acquisition is secondary when resume is relevant.\par
+\textbf{Rationale.} The operator first supplies the information they know; the system then exposes the relevant exception. This reduces an unnecessary early choice and replaces memory of session codes with recognition.\par
+\textbf{Limit.} Only the most recent 50 sessions are searched. The existing hero/eyebrow typography remains part of the present design; the interface has not completely eliminated decorative copy. An older active session may require an improved search workflow.
+
+\subsection{Frame O3: preparation and recording settings}
+\textbf{Implemented.} Workspace settings contains acquisition connectivity, device assignments, required flags, Save, refresh, preflight and a Technical connection disclosure. Local drafts keep selectors stable while telemetry updates.\par
+\textbf{Rationale.} Progressive disclosure keeps engineering syntax out of ordinary monitoring. Explicit Save separates exploratory selection from committed hardware changes. Configuration lock prevents a control slip during recording.\par
+\textbf{Limit.} Required and assigned are separate concepts but their relationship is not fully explained inline. Unchecking does not disable acquisition. Thermal and face Auto-detect both resolve to index 0; manual selection is essential. The command shown in the UI hardcodes port 3000.
+
+\subsection{Frame O4: preflight and permission to begin}
+\textbf{Implemented.} Start requires a passed preflight and the backend also checks current required-stream readiness unless an explicit override exists.\par
+\textbf{Rationale.} A preparatory check externalizes a prospective-memory task: the operator need not remember every device and storage check. Preventing invalid starts is preferable to discovering empty data at the end.\par
+\textbf{Limit.} A disabled button without a nearby actionable reason increases the gulf between perceived and actual system state. Current preflight is an operational test with limited signal-quality criteria. A future summary should explain the precise failed condition without requiring log interpretation.
+
+\subsection{Frame O5: Study overview and live evidence}
+\textbf{Implemented.} Current stage, controls, participant display connection, required-stream readiness and live sensor input are grouped in the overview. Signal traces and available previews let the operator inspect incoming evidence. The ledger no longer occupies this workspace.\par
+\textbf{Rationale.} Grouping current activity with current acquisition evidence reduces mental integration across pages. A trace can reveal a flat or noisy stream that a connectivity label cannot. Review history is secondary to the immediate supervision task.\par
+\textbf{Limit.} The displayed health percentage is a fraction of required streams judged operational, not a probability that all data is correct. Zero required streams can yield 100 percent. Rolling preview values are not full-rate recordings and should not be interpreted as analytic-grade features.
+
+\subsection{Frame O6: Protocol workspace and contextual controls}
+\textbf{Implemented.} A stage list sits beside the current script, subject cue and applicable controls. Gates show settling checks, N-back shows difficulty, BP stages show entry fields. Previous stage and direct navigation are available.\par
+\textbf{Rationale.} Instructions are external memory. Controls appear in the context that gives them meaning, reducing mode confusion and visual search. A stable layout supports learned spatial expectations.\par
+\textbf{Limit.} Navigation changes are logged, but advancing from Overview can bypass the Protocol panel's gate checkboxes. Gate checkbox state is component-local and must not be represented as a validated physiological return-to-baseline algorithm. An index marked Recorded does not independently prove valid raw coverage.
+
+\subsection{Frame O7: messages, comfort check and pause}
+\textbf{Implemented.} The overview provides canned/free-text messages and operational markers, including a comfort-check action. Participant announcements require acknowledgement. Pause/resume controls alter study progression.\par
+\textbf{Rationale.} Written communication avoids speaking over an audio sample. A visible acknowledgement closes the communication loop. A pause allows correction without forcing abandonment of the session.\par
+\textbf{Limit.} A comfort marker is not a medical assessment. An announcement can itself influence attention or affect and must be retained as a confound. Raw recording continues while paused; operators must understand this distinction.
+
+\subsection{Frame O8: end, review and ledger}
+\textbf{Implemented.} End session is in settings with confirmation. Review presents artifact metadata and a ledger with JSON export.\par
+\textbf{Rationale.} Confirmation protects against accidental termination; separating review from live monitoring reduces competition for attention. A ledger supports reconstruction rather than operator recall.\par
+\textbf{Limit.} End is relatively hidden. Manifest Ready means metadata is present, not that all files have been decoded or every artifact passed quality checks. Raw files must be copied from the acquisition machine. The register emphasizes required streams even though optional artifacts may be present in the manifest.
+
+\section{Participant workflow and all protocol frames}
+\subsection{Connection, waiting, interruption and completion}
+\textbf{Connection.} A code/participant-ID entry associates the display with the run. Errors remain visible and recoverable. This prevents a participant from entering device configuration accidentally.\par
+\textbf{Waiting.} Setup or missing presence/readiness yields a quiet waiting state. Change session remains available, preventing an interface trap. Readiness is hidden from the participant because the instructor owns that task.\par
+\textbf{Interruption.} Announcements focus attention on one instruction. Safety-sensitive stages include I need to stop. Interruptions are events that analysts must exclude or model appropriately.\par
+\textbf{Completion.} Thank you provides closure; session-change controls permit a new run. This is perceptual closure, not proof that file finalization succeeded.\par
+\textbf{Persistent chrome.} The current subject design retains branding, progress, audio control and session information. It avoids named emotion conditions but does not literally show only one word or task object. Neutral labels reduce explicit priming, not all demand characteristics.
+
+\subsection{Exact sequence and cognitive rationale}
+The plan has 34 stages. Its six emotions are happy, sad, anger, fear, surprise and disgust. A six-row Williams-style order and a participant-dependent buffer permutation distribute ordering across participants. The table accounts for every stage. Repeated clip/rating frames use the same interaction pattern with different stimuli. These rationales explain the interface, not the scientific validity of the protocol itself.
+
+\small
+\begin{longtable}{@{}L{.09\textwidth}L{.31\textwidth}L{.53\textwidth}@{}}
+\toprule Stage & Frame and progression & Cognitive purpose and interpretation limit\\\midrule\endhead
+1 & Sensor/sync check; operator advance & A simple stillness instruction delegates technical checks to the instructor. Prevents competing procedural demands before the activity. No physical sync pulse is guaranteed.\\
+2 & Eyes-open baseline, 120 s; BP anchor & A fixation target provides an unambiguous visual goal and reduces choices. Supplies a resting comparison, not a universal physiological normal.\\
+3 & Eyes-closed baseline, 90 s & One short cue reduces instruction memory and visual stimulation. Cannot be interpreted as disengagement merely because eyes are closed.\\
+4, 7, 11, 14, 18, 21 & Emotion clips; Begin then media end & Neutral Watch naturally cue avoids instructing the desired emotion. Begin supports readiness and browser playback. Media-error/onset/offset events provide delivery evidence, not psychophysical onset precision.\\
+5, 8, 12, 15, 19, 22 & Three affect ratings per clip & One dimension at a time limits competing judgments. Ten buttons make response choices visible without fine slider positioning. More options are not inherently faster; rating semantics must be validated.\\
+6, 13, 20 & Neutral fixation, 20 s & A consistent low-demand transition reduces abrupt context switching. A neutral display does not prove full emotional washout.\\
+9, 16, 23 & One each of Stroop, N-back, conversation & Repeated task framing and an explicit start establish what action is expected. Assignment determines which task occurs at each index. Each has a different construct and output.\\
+10, 17 & Return-to-baseline gate; 40 s display & Quiet rest lets the instructor assess settling without burdening the participant with physiological thresholds. Gate completion is an operator judgment.\\
+24 & Settle before physiological sweep; 40 s & Creates an explicit transition from affect/cognitive tasks to movement. Avoids switching to physical activity without a preparatory cue.\\
+25 & Seated rest, 20 s & A low-demand anchor before paced activities. Short duration limits which stable HRV measures are defensible.\\
+26 & Box breathing, 45 s & A growing/shrinking pacer externalizes timing. Four-second In/Hold/Out/Hold phases avoid memorizing a sequence, but paced breathing changes physiology and is not resting data.\\
+27 & Voluntary breath hold; ready/release & Participant controls onset and release. This supports agency and comfort; the timer is descriptive, not a target to maximize. Safety supervision remains necessary.\\
+28 & Head motion and speech, 30 s & Explicit ordered instructions reduce uncertainty. Current generic sweep heading says Breathing task even here; task-specific headings would avoid competing cues. Motion artifacts are intentional context.\\
+29 & Standing, 45 s; BP & Slow movement cue reduces ambiguity and prompts care. A physical transition must be supervised; no automatic fall-risk assessment exists.\\
+30 & Brief exertion, 20 s & Concrete marching/sit-to-stand alternatives make the action recognizable. Accessibility and contraindications need protocol-approved adaptations.\\
+31 & Post-exertion recovery, 60 s; BP & One recovery instruction avoids introducing a second demand while physiology settles. Useful for response trajectories, not a standalone cardiac diagnosis.\\
+32 & Guided body scan, 240 s & Audio guidance externalizes the relaxation sequence and avoids reading instructions with eyes closed. Hearing/accessibility alternatives must preserve protocol comparability.\\
+33 & Return to normal, 60 s; BP & A clear reorientation cue allows a gradual return rather than an abrupt exit. Final BP remains manually entered.\\
+34 & Thank you / completion & Signals participant closure and reduces uncertainty about further tasks. Instructor must still end and verify capture.\\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\subsection{Response frames and their data limitations}
+\textbf{Affect ratings.} Valence (pleasure): Unpleasant to Pleasant; arousal (activation): Calm to Excited; dominance (control): Controlled to In control. Each uses 1--10 choices. Keys 1--9 and 0 map to those values. A selection advances to the next dimension after a brief delay; no explicit review/back step exists. The ten-point numeric adaptation must not be presented as automatically psychometrically equivalent to every original SAM implementation.
+
+\textbf{Stroop.} The instruction explicitly distinguishes ink colour from word meaning. Thirty responses produce aggregate accuracy and mean response time. Raw trial correctness and times are held in client memory but not included in the final metadata. Congruency-specific interference cannot be reconstructed reliably without saving the individual word, ink, condition and timestamp.
+
+\textbf{N-back.} A 3-by-3 spatial display and Match button reduce motor complexity. Twenty trials use a selected level from one to three. Current metadata contains matches and response count, not reliable one-response-per-trial outcomes. Additional debouncing and trial logging are prerequisites for computing hit rate, false alarms, $d'$ and reaction-time distributions.
+
+\textbf{Conversation and breath hold.} Conversation captures audio within an interval but does not produce a transcript or turn labels. Breath hold records self-controlled elapsed duration. Neither automatically supplies a mental-health label. Client refresh and interruptions must be recorded rather than silently treated as uninterrupted trials.
+
+\section{HCI evolution, accessibility and remaining design debt}
+The development history records introduction of acquisition (\code{8b3450f}), workflow/sync revision (\code{4405dde}), editorial portals/live monitoring (\code{2ec91d0}), Frontier X/autodetection (\code{a472855}), and media/SAM alignment (\code{74a6d45}). The following mapping is an evaluation of this implementation, not a claim that every heuristic is completely satisfied.
+
+\begin{longtable}{@{}L{.27\textwidth}L{.35\textwidth}L{.31\textwidth}@{}}
+\toprule Heuristic & Implemented support & Remaining evaluation issue\\\midrule\endhead
+Visibility of status & Live stage, device state, preflight, subject presence & Health percent and Ready can overstate evidence completeness.\\
+Match to real world & Participant, recording, task, sensor terminology & Preflight/required/assigned need clearer explanations.\\
+Control and freedom & Pause, session change, navigation, stop & End is hidden; incomplete task state is not resumable.\\
+Consistency & Shared typography and stable sidebar & Generic sweep headings do not always match tasks.\\
+Error prevention & Preflight, configuration lock, protocol probes & Explicit duplicate camera assignment and gate bypass remain concerns.\\
+Recognition over recall & Stage script, contextual controls, resume prompt & Credentials and local folder operations still burden memory.\\
+Efficiency & Rating shortcuts and canned messages & Expert accelerators need focus-aware handling.\\
+Minimalism & Role separation and ledger in Review & Some decorative labels and repeated cues remain.\\
+Error recovery & Visible errors and Change session & Raw device exceptions sometimes lack a clear corrective action.\\
+Help/documentation & Technical disclosure and operational README & A packaged agent installer and guided onboarding are not implemented.\\
+\bottomrule
+\end{longtable}
+
+Nielsen's principles motivate these checks \cite{nielsen}. Cognitive-load theory motivates removing unrelated interface processing, but was not a direct experimental evaluation of Meridian \cite{sweller}. Choice-time research supports presenting relevant alternatives at the right moment, not indiscriminately hiding important actions \cite{hick}. Fitts' work motivates generous discrete targets instead of precision dragging; actual benefit depends on target size, distance and input device \cite{fitts}.
+
+\subsection{Accessibility verification plan}
+The source has labels, named dialogs, alert/status regions, a skip link, Escape closing and reduced-motion preference. WCAG 2.2 provides the test basis \cite{wcag}. Measure text contrast (normally 4.5:1, or 3:1 for qualifying large text), non-text control contrast, visible focus, 200 percent zoom/reflow, keyboard-only completion and non-colour status interpretation. Test actual computed colours rather than assuming a restrained palette is accessible.
+
+Inspect modal focus containment and return focus; the current dialog code focuses Close but does not implement a full focus trap. Rating buttons use radio roles with constant false checked state, requiring semantic correction. Keyboard shortcuts must not capture unintended typing. Stroop inherently involves colour perception; eligibility/adaptation must be explicit and approved rather than claiming that text labels remove the construct's colour dependency. Captions or altered stimuli affect protocol comparability, but omitting them is not an automatic accessibility exemption. Offer ethically approved alternate participation where needed.
+
+\subsection{Measuring whether the redesign helped}
+Use representative novice and experienced operators, not invented outcomes. Ask them to create/resume a participant, connect two streams, resolve a wrong assignment, identify a stalled stream, pause, message, end and locate raw files. Measure completion, time, errors, assistance, recovery time and confidence; collect SUS afterward. Observe participants joining, completing all response types, stopping and reconnecting. Separate interface confusion from intended task difficulty. Compare a fixed earlier interface and current build with counterbalanced exposure and equivalent tasks; report sample size and uncertainty.
+
+\section{Sensors: measured quantities and appropriate use}
+\small
+\begin{longtable}{@{}L{.18\textwidth}L{.34\textwidth}L{.41\textwidth}@{}}
+\toprule Modality & What the current adapter measures & Useful areas and limits\\\midrule\endhead
+RGB face/person video & OpenCV frames; AVI using MJPEG. No automatic facial-action extraction in the portal. & Proposed facial actions, pose, motion and coarse gaze for engagement or affective behavior. RGB is not calibrated eye tracking, nor automatic microexpression ground truth.\\
+Audio & Mono 48 kHz, 16-bit PCM WAV from an OS input. & Proposed speech activity, turn-taking, prosody and interview features. Room noise and speaker attribution matter. Analog receivers must first be OS-recognized inputs.\\
+Oximeter/PPG & CMS50E V7 HR, oxygen saturation, signal strength and pleth samples. & Pulse timing and peripheral perfusion context; respiratory/oxygenation monitoring with device validation. SpO2 is not a direct engagement or depression measure. PPG pulse variability is not automatically interchangeable with ECG HRV.\\
+ECG & Frontier X live-share waveform reconstructed at 125 Hz; HR; packet metadata. Generic serial fallback stores lines. & Rhythm/beat-interval research, autonomic response, optional engagement context. Lead configuration, amplitude scaling and timing need validation. Not a diagnostic 12-lead replacement.\\
+EDA/GSR & JSON conductance in reported microSiemens, ADC, firmware stress and z-score. & Sympathetic arousal and event-response features. Measures arousal, not its emotional cause. Validate conductance calibration; firmware stress is not clinical truth.\\
+EMG & ESP32 ADC samples, device microseconds and sequence; default baud 921600. & Muscle activation, facial/forearm tension or exertion depending on placement. Must record muscle site, gain and calibration. Current displayed rms proxy is not windowed physiological RMS.\\
+Thermal video & OpenCV-compatible image stream stored as AVI. & Proposed tracked region changes and exploratory autonomic/respiratory context. Current capture does not guarantee radiometric values, Celsius, emissivity correction or a vendor SDK.\\
+WiFi CSI & Compatible ESP32 CSI CSV stream, device/packet fields, RSSI and raw line. & Exploratory non-contact motion/respiration research. Requires external hardware, firmware and environmental calibration; unsupported laptop WiFi alone cannot substitute. Optional, not assumed available.\\
+Blood pressure & Manual systolic, diastolic and optional pulse entry at specified stages. & Rest/posture/exertion/recovery context and future cardiovascular features. Requires an appropriate cuff and measurement procedure; no integrated automated cuff adapter.\\
+Task/self-report & SAM values, Stroop aggregate, N-back counts, breath-hold duration, protocol events. & Subjective affect and behavioral context. No validated psychiatric screening questionnaire or dense engagement annotations are currently collected.\\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\subsection{Additional modalities to add only for a defined question}
+\textbf{Respiration belt} is valuable for separating respiratory effects from HRV/arousal. \textbf{Accelerometer/IMU} provides movement and posture context for artifact rejection. \textbf{Contact skin temperature} provides a simpler calibrated thermal channel than colourized thermal video. None is currently a first-class agent adapter; add schemas, timestamps, calibration and tests before using them.
+
+For selected attention studies, a calibrated eye tracker or EEG may be informative, but increases setup burden and introduces its own artifacts and privacy obligations. They are not prerequisites for video-first engagement. For cardiovascular disease risk, additional clinical history and laboratory variables are often more relevant than another camera. Sensor count is not a proxy for scientific value.
+
+\section{Data dictionary, persistence and synchronization}
+\subsection{Raw file contracts}
+Paths below are relative to a new \code{session_CODE_TIMESTAMP} directory under the agent output root. Files exist only for applicable writers.
+\small
+\begin{longtable}{@{}L{.31\textwidth}L{.62\textwidth}@{}}
+\toprule File & Fields / interpretation\\\midrule\endhead
+\code{acquisition.json} & Session, machine, agent version, device assignments, inventory, baud configuration; host epoch and monotonic anchors.\\
+\code{session_markers.jsonl} & Host epoch ns, relative monotonic seconds, received/server times, revision, session status, command, step and attempt. A marker records when a polled transition was observed.\\
+\code{preflight_test.json} & Completion, required and failed IDs, disk-space measurement; operational evidence.\\
+\code{manifest.json} & Finalized primary artifacts: sensor ID, relative path, format, count, bytes, SHA-256, start/end, rate, gaps, dropouts, quality.\\
+\code{face/face.avi}, \code{thermal/thermal.avi} & MJPEG AVI image frames. No per-frame host timestamp sidecar in this writer. Thermal pixels are not necessarily temperatures.\\
+\code{audio/audio.wav} & Mono PCM, 48,000 samples/s, 16-bit. No per-block timestamp sidecar in this writer.\\
+\code{oximeter/oximeter.csv} & \code{host_epoch_ns, monotonic_s, spo2, heart_rate, signal_strength, pleth}. HR in device bpm; SpO2 in device percent; pleth amplitude device-specific.\\
+\code{emg/emg.csv} & \code{host_epoch_ns, monotonic_s, device_t_us, sequence, raw_adc}. Raw ADC is not volts without gain/reference conversion.\\
+\code{gsr/gsr.csv} & \code{host_epoch_ns, monotonic_s, conductance_us, raw_adc, stress, zscore}. Preserve firmware provenance.\\
+\code{csi/csi.csv} & \code{host_epoch_ns, monotonic_s, device_timestamp, packet_id, rssi, raw_line}. RSSI is reported in dBm; subcarrier interpretation depends on firmware format.\\
+\code{ecg/ecg.csv} & Frontier X: host epoch, monotonic seconds, packet number, session start ms, sample time ms, sample index, raw count, scaled value, HR. Do not assume scaled value is validated mV.\\
+\code{ecg/ecg_packets.jsonl} & Deduplicated source packet sidecar; archive it even if not separately indexed by the primary-artifact manifest.\\
+\code{*_simulated.csv} & Host epoch, monotonic time, count and synthetic value. Simulation does not create genuine camera/audio recordings.\\
+\code{pending_upload.json} & Pending finalization metadata after failed server submission. Not raw files and not an implemented automatic retry service.\\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\subsection{Portal records and exports}
+D1 holds the session snapshot plus event records. Responses include emotion-associated valence/arousal/dominance values and submission time, aggregate task metadata, manually entered BP and operational events. Events carry source, time, step and structured metadata. These are not a dense independent physiological sample database.
+
+The active Review exports a JSON manifest with a session snapshot and artifacts; the ledger exports JSON events. Older components contain other export labels, but that is not evidence those buttons exist in the active UI. Raw CSV and media remain local. The top-level acquisition token is omitted from the exported snapshot, but preview URLs and host metadata can remain sensitive.
+
+Artifact ``availability'' is currently based on recorded count divided by recorded plus detected dropped samples, not independently measured wall-clock coverage. Unobserved losses cannot appear in that denominator. Start/end fields and count-derived rates need reconciliation with actual file duration. Check all primary files and sidecars rather than assuming the manifest alone is a complete archive.
+
+\subsection{Alignment and proposed analysis-ready representation}
+Preserve host epoch, monotonic and device clocks separately. Estimate a device-to-session clock mapping from anchors, inspect drift and resets, then align intervals. Frontier X reconstructs sample timing from packet data; network arrival is not physiological event time. Polling transition markers can lag the task and cannot promise millisecond stimulus alignment.
+
+For analysis, create a separate, versioned dataset with a run/participant manifest and a segment table containing participant ID, run ID, protocol version, step/attempt, start/end, modality availability, signal quality, annotation source and exclusion reason. Store derived arrays in an appropriate chunked format such as Parquet/HDF5 with units and sampling rate. This is a proposed export pipeline, not a current portal feature. Retain originals and hashes; never overwrite raw data during filtering.
+
+Future acquisition work should add per-frame/per-audio-block timestamps, measured drift, validated start anchors and an external synchronization test where precision is essential. A visible/audible clap checks gross camera/audio alignment but does not establish synchronization of every physiological sensor.
+
+\section{Shared preprocessing and feature engineering design}
+All processing in this section is \textbf{proposed}. The acquisition agent records and summarizes; it does not implement the following research pipeline.
+
+\subsection{Quality-first processing}
+\begin{enumerate}
+\item Validate file decoding, sizes, hashes and monotonicity; detect missing samples, repeated packets, clock resets and impossible values. Separate simulated from real runs.
+\item Associate participant, sensor placement, protocol, stimulus, attempt and annotation intervals. Mark pauses, speech, motion and operator interventions explicitly.
+\item Clean each modality at its native rate. Choose anti-aliasing before resampling; do not interpolate long gaps as if observations existed.
+\item Segment using a task-relevant trailing window. Use shorter windows for engagement dynamics, longer valid beat sequences for HRV. Label the support interval and output latency.
+\item Fit scalers, imputers and feature selection on training participants only. Baseline normalization may use an available resting interval, never future test labels.
+\item Supply quality and missingness masks to the model. Reject inadequate segments rather than converting absent sensors to confident negative predictions.
+\end{enumerate}
+
+\subsection{Modality-specific features}
+\textbf{ECG.} Detect beats after appropriate artifact suppression, validate peaks and identify normal-to-normal intervals. Derive heart rate, RMSSD, SDNN and robust interval summaries only when duration and beat quality support them. Frequency-domain measures need sufficiently long, stationary data; 20-second rest should not be treated as a standard five-minute HRV assessment. Breathing strongly affects interpretation, and LF/HF should not be labeled a universal stress ratio. The HRV literature emphasizes recording and artifact conditions \cite{hrv}.
+
+\textbf{EDA.} Verify units and contact quality, remove movement artifacts, separate slow tonic level from phasic responses, and derive baseline-relative level, slope, response count/amplitude and recovery. Fit event-response windows to the protocol and expected physiological delay. Do not use the firmware's stress field as the target when training on the same conductance signal.
+
+\textbf{PPG/oximetry.} Detect usable pulse intervals and morphology only from quality-qualified pleth. Summarize HR, valid SpO2 intervals and perfusion-related context. Reject poor contact/movement intervals. HRV inferred from ECG and pulse-rate variability inferred from PPG require separate validation.
+
+\textbf{EMG.} Convert counts using known gain/reference, remove DC and line interference as justified, rectify and compute windowed RMS/envelope, median frequency and activation statistics. Save electrode location and normalization reference. The current telemetry's normalized absolute centered sample is not this windowed RMS feature.
+
+\textbf{Video.} Detect/track people, associate face crops, estimate quality, then extract facial embeddings, actions, head pose and motion. Aggregate causally over time. Coarse gaze direction is not ground-truth attention. Microexpression analysis requires a suitable frame rate, spatial resolution and validated annotations not guaranteed by default webcam capture.
+
+\textbf{Audio.} Attribute speech to the participant, reject clipping/noise, and extract voiced fraction, pauses, pitch summaries, energy and speech embeddings. Jitter/shimmer require reliable voiced segments. Optional transcripts require consent and language-aware validation; speech content is not currently transcribed by Meridian.
+
+\textbf{Thermal/CSI/BP.} Thermal temperature features require a radiometric adapter and calibrated tracked regions, not arbitrary AVI pixel values. CSI requires firmware-aware complex/amplitude parsing, environmental/motion controls and device-independent validation. BP features use repeated standardized readings and within-person changes; post-exertion values are not interchangeable with resting risk-model inputs.
+
+\subsection{Fusion strategy: start with falsifiable baselines}
+Early fusion concatenates aligned engineered features and is an interpretable baseline when timing and completeness are adequate. Late fusion combines calibrated per-modality outputs and handles absent branches cleanly. Intermediate fusion learns interactions between modality embeddings but needs more data and careful masking. MulT motivates cross-modal temporal interaction; bottleneck fusion motivates limited latent exchange \cite{mult,mbt}. Neither paper proves that these choices will outperform simple baselines for Meridian's tasks.
+
+A proposed masked intermediate model uses modality encoders $h_m(t)$, measured quality $q_m(t)$ and availability $v_m(t)$. A gate computes
+\[
+\alpha_m(t)=\frac{v_m(t)\exp(g(h_m(t),q_m(t),a_m(t)))}
+{\sum_j v_j(t)\exp(g(h_j(t),q_j(t),a_j(t)))},\qquad
+z(t)=\sum_m\alpha_m(t)h_m(t),
+\]
+where $a_m$ is evidence age. If all $v_m=0$, the output is insufficient evidence, not a normalized score. A cross-attention alternative can replace weighted pooling after this baseline. Quality labels themselves must be audited; current operational ``good'' is not a substitute for signal-quality ground truth.
+
+The first implementation uses a centralized multi-branch model. Device threads are not automatically intelligent agents. A later agentic coordinator may schedule expensive video experts or reprocessing based on expected information gain, but must demonstrate benefit against fixed scheduling at matched compute. Clinical decisions should not be delegated to unsupported language-model debate.
+
+\section{Task A: mental-health screening support}
+\subsection{Target and modality choice}
+We will separate two endpoints: \textbf{short-term stress/arousal estimation} and \textbf{screening support for a specified mental-health construct}. The first can use EDA, ECG and respiration/movement context. The second requires an approved assessment and independent clinical or validated screening labels, not emotion-clip names. A positive depression screen calls for further assessment and an appropriate care pathway; it is not a diagnosis \cite{uspstf}.
+
+For an initial stress research model, we will use ECG + EDA, adding a respiration belt and IMU when implemented. PPG is a fallback/context stream; EMG, temperature, face and audio are optional ablations. WESAD provides a physiological stress/affect benchmark, but its laboratory conditions do not establish psychiatric diagnosis \cite{wesad}. For interview-based depression screening research, we will use consented participant audio and face video plus standardized assessment labels; physiological features are exploratory additions. DAIC-WOZ provides an interview-based reference setting and depression labels, subject to its access/use terms \cite{daic}.
+
+\subsection{Models and labels}
+We will first train participant-disjoint logistic/gradient-boosted baselines on engineered physiological features. A second model uses separate 1-D CNN/TCN encoders for ECG/EDA/respiration, quality-aware intermediate fusion and a stress-classification head. This separation tests whether deep temporal processing adds value beyond a compact feature model.
+
+For depression-screening research, audio and visual temporal encoders will use late fusion initially, with a calibrated screening-score or symptom-severity head. Cross-modal attention is a later comparison if labeled sample size supports it. Interview context, language, treatment and demographic differences require external validation. A model cannot be trained to reproduce PHQ answers and then evaluated by leaking those same answers as input; target-derived features must be excluded or explicitly framed as a separate augmented clinical model.
+
+\subsection{Outputs and acceptance}
+Outputs will include the precisely named endpoint, time support, uncertainty, signal coverage and reasons for abstention. A research stress trend may support protocol review; it must not be rendered as ``mental illness detected.'' Screening support goes to qualified review, not automatic diagnosis or participant alarm. Report sensitivity/specificity at a prespecified threshold, PR-AUC under class imbalance, calibration, error by language/capture subgroup and external-site results. No such performance has yet been measured in Meridian.
+
+\section{Task B: cardiovascular analysis and heart-disease risk}
+\subsection{Do not merge incompatible endpoints}
+``Heart disease prediction'' must be specified before model selection. \textbf{Rhythm/ECG abnormality detection} is a signal classification problem. \textbf{Future cardiovascular-event risk} is a longitudinal prediction problem with time horizon, outcomes and censoring. They require different labels and cannot be validated using the same emotion-elicitation session alone.
+
+For rhythm research, we will prioritize validated ECG, with PPG and motion as optional corroborating/artifact streams. For future event risk, we will prioritize standardized BP and clinical factors such as age, relevant history, smoking, lipids, diabetes and renal information as required by the chosen model. Most are not collected by the current portal. PREVENT illustrates a clinically defined risk-model setting; it is not evidence that a short multimodal lab session replaces those inputs \cite{prevent}.
+
+\subsection{Signal engineering and fusion}
+The ECG branch will use beat-quality masks and a 1-D residual CNN/TCN over validated waveform windows. Features include rate/rhythm and intervals only where lead configuration, sampling and annotations support them. ECG/PPG timing relationships require validated synchronization; they cannot simply be computed from network arrival times. EDA and facial expression will not be mandatory cardiac-disease inputs because relevance and confounding must be demonstrated.
+
+A quality-aware late-fusion rhythm model will combine ECG and independently validated PPG evidence. A proposed clinical risk model will use a tabular baseline first, then compare ECG embeddings concatenated with clinical embeddings if longitudinal labeled data is available. A survival or horizon-specific risk head handles the intended outcome; probability calibration and external population validation are necessary. More modalities are retained only if they improve clinically relevant performance without excessive burden.
+
+\subsection{Dataset transfer and safety limits}
+PTB-XL is a reference for labeled 12-lead ECG analysis \cite{ptbxl}. Meridian's current Frontier X stream is a different acquisition configuration. Pretraining may be useful, but a 12-lead model cannot be directly claimed valid on a single-channel wearable or a 125 Hz feed. Amplitude units, lead geometry, bandwidth and manufacturer processing must be characterized first.
+
+Evaluate patient-disjoint ECG labels, sensitivity for declared findings, specificity, PR-AUC, calibration and false-alert burden. For risk prediction, report time-dependent discrimination, calibration at the declared horizon and net benefit with appropriate follow-up. The portal is not an emergency monitor, and a normal model score must never imply that symptoms can be ignored. Clinician governance and device/clinical validation are prerequisites for patient-facing use.
+
+\section{Task C: continuous engagement estimation}
+\subsection{Video-first, multimodal when justified}
+We will use video as the core input: person detection/tracking, face/body quality assessment, temporal facial embeddings, head pose and motion. Audio adds speaker-attributed prosody and turn-taking for conversation. ECG/EDA are optional contextual branches, not requirements for general video engagement. A participant looking away may be thinking; visible behavior cannot uniquely reveal internal attention.
+
+DAiSEE supplies engagement annotations for video learning research, while EngageNet supplies an additional dataset and temporal baselines \cite{daisee,engagenet}. Their labels and domains must be inspected separately. Meridian's SAM responses are not engagement labels. We will add independent, interval-level engagement annotations and inter-rater agreement, together with task-specific behavioral outcomes where appropriate.
+
+\subsection{Architecture and output contract}
+The proposed system first detects and tracks each visible person. A face CNN with a causal TCN is the low-cost visual baseline, consistent with prior engagement work \cite{tcn}. An optional video-transformer motion expert and pose/action temporal branch provide complementary evidence. Features are fused through quality/availability masks, with optional attributed audio or linked physiology. This is a proposed integration, not a currently running component of the portal.
+
+Each output record will contain track ID, current bounding box, score timestamp, support interval, engagement index, confidence/coverage and validity status. A 0--100 index derived from ordinal labels is not a literal percentage of attention. Score updates may run at 1 Hz while boxes update faster. Missing or stale evidence yields an explicit unavailable status rather than a low score.
+
+As a research extension, a coordinator can request expensive experts when quality or disagreement warrants them, subject to a compute budget and minimum per-track refresh rate. A verifier rejects wrong-identity or expired evidence. This track-aware scheduling is a hypothesis to test against always-on, periodic and uncertainty-only execution, not an established novel advantage. It also remains separate from the Python acquisition agent, whose job is recording rather than interpretation.
+
+\subsection{Features, metrics and scale}
+We will use trailing visual windows, validated crop quality and independent identity state. Audio attribution and wearable-to-person linkage must be explicit for multi-person recordings. Train with modality dropout and test video-only performance independently. Report macro-F1/ordinal MAE for categorical engagement and CCC/MAE for continuous labels, plus tracking ID switches, stale-score duration, coverage, calibration and p95 latency. Do not inflate sample size by treating overlapping windows from one participant as independent subjects.
+
+Scale testing will increase visible people, resolution and missingness while measuring inference cost and per-person service. One to eight people and one update per second are reasonable initial engineering targets, not measured capabilities. No universal engagement detector can be claimed from a single lab's clips.
+
+\section{Implementation roadmap, validation and governance}
+\subsection{Evidence-based implementation sequence}
+\begin{longtable}{@{}L{.17\textwidth}L{.43\textwidth}L{.33\textwidth}@{}}
+\toprule Phase & Deliverable & Acceptance evidence\\\midrule\endhead
+1. Collection integrity & Timestamp sidecars, complete trial logging, attempt-aware actions, explicit device conflict checks, startup timeouts & Physical sensor tests; recoverable failures; replayable timing and task evidence.\\
+2. Dataset preparation & Versioned consented archive, units/calibration, quality masks, independent task labels & File manifests, annotation agreement, participant-level split audit.\\
+3. Baselines & Separate stress, ECG/risk and video-engagement baselines & Reproducible training, leakage checks, confidence intervals, external holdout where feasible.\\
+4. Fusion & Missing-modality training, quality-aware late/intermediate fusion & Matched-data ablations proving incremental value of each modality.\\
+5. Deployment research & Calibrated outputs, rejection, drift monitoring and optional expert scheduler & Latency/coverage/error trade-off, human review workflow, documented scope.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Verification performed for this documentation}
+The acquisition test suite contains 21 parser, protocol-discovery, port-reservation, Frontier X and probe-versus-record tests. It passed during this documentation audit after the test temporary directory was placed inside the writable workspace. These are mocked/software tests, not a physical hardware acceptance run. The initial default temporary directory was denied by the execution sandbox; that is not evidence of a sensor malfunction.
+
+The production web build and all four rendered-HTML/source tests passed in this audit, as did lint. The build initially encountered sandbox dependency-read restrictions and passed on retry outside that restriction. Some assertions inspect a retained older instructor component, so they cannot certify the full active UI. Actual hardware operation, simultaneous-device endurance, failure recovery and clinical model performance require separate evidence. Documentation edits do not modify application behavior.
+
+\subsection{Collection acceptance checklist}
+\begin{enumerate}
+\item Confirm protocol/firmware versions, consent, eligibility, participant identity and sensor placement.
+\item Check each selected device against physical identity; verify face/thermal indices and unique serial assignments. Test the actual waveform, not just enumeration.
+\item Run preflight and a short real recording. End, decode AVI/WAV, inspect CSV counts/clock gaps and compare time support. Simulation cannot test camera/audio encoding.
+\item Check operator/subject synchronization, interruption, pause, message, session-change and finalization paths using a test participant.
+\item Archive the whole raw folder and portal metadata with hashes, restricted access and retention policy. Reconcile pending manifest submission without assuming automatic retry.
+\item Inspect outliers and missingness before training. Preserve exclusions and processing versions so analytical decisions can be audited.
+\end{enumerate}
+
+\subsection{Model validation rules}
+Split by participant, session and site before creating overlapping windows. Keep calibration and model-selection data distinct from the final test set. Use nested participant-level validation for small datasets, train-only normalization and no target-derived leakage. Bootstrap uncertainty at the participant level. Compare unimodal, engineered-feature, early-, late- and intermediate-fusion models under the same splits and compute budget. Report missing-modality performance, failure cases and abstention, not only aggregate accuracy.
+
+Clinical constructs need qualified labels and prospective external evidence. Physiological response to an emotion clip does not establish depression or cardiovascular disease. Engage independent domain experts for label definitions and permissible actions. A model that abstains appropriately can be safer than one that always emits a number, but coverage must be reported to prevent hiding difficult cases.
+
+\subsection{Privacy and production boundaries}
+Treat video, voice, physiology, share links, session codes and preview URLs as sensitive. Use pseudonymous research IDs, separate identifying records, encrypted approved storage, least privilege and explicit retention/deletion. The existing operator allowlist and per-session acquisition token are useful controls, not a complete production security review. Subject APIs, upload limits, deployment authentication, rate limiting, export redaction and local-preview access deserve a dedicated audit.
+
+The current system has no automatic raw-data cloud backup, full distributed clock synchronization, universal hardware discovery or guaranteed lossless acquisition. It does not yet have validated diagnostic or engagement models. The documentation deliberately preserves those distinctions so that deployment and research claims do not outrun the implementation.
+
+\appendix
+\section{Code traceability}
+\begin{longtable}{@{}L{.49\textwidth}L{.44\textwidth}@{}}
+\toprule Repository path & Documented responsibility\\\midrule\endhead
+\code{app/instructor/page.tsx} & Selects the editorial operator console.\\
+\code{app/instructor/editorial-operator-console.tsx} & Entry, overview, protocol, review, settings, signal views, exports.\\
+\code{app/subject/subject-portal.tsx} & Connection/waiting, task frames, rating choices, task metadata, safety and timers.\\
+\code{lib/protocol.ts} & 34-stage plan, timing and counterbalancing.\\
+\code{lib/types.ts} & Protocol v7, media defaults and data structures.\\
+\code{lib/session-engine.ts} & Persistence, revision checks, leases, subject projection, commands and gates.\\
+\code{app/api/sessions/route.ts} & Role-aware actions and subject payload handling.\\
+\code{app/api/acquisition/route.ts} & Token-authenticated agent interface.\\
+\code{acquisition_agent/meridian_agent/agent.py} & Discovery orchestration, command loop, preflight, local metadata, finalization.\\
+\code{acquisition_agent/meridian_agent/sensors.py} & Device parsers, Auto-detect, quality summaries and raw writers.\\
+\code{acquisition_agent/meridian_agent/preview.py} & Loopback MJPEG service.\\
+\code{acquisition_agent/tests/} & Parser and discovery regression tests.\\
+\code{tests/rendered-html.test.mjs} & Web rendering/source assertions; not full UI end-to-end coverage.\\
+\bottomrule
+\end{longtable}
+
+\section{Selected research and standards}
+References support the design choices and boundaries above. Dataset access terms, populations, lead configurations and label definitions must be checked before reuse. Model choices are proposed engineering decisions, not results reported by these sources for Meridian.
+\begingroup
+\small
+\setlength{\parskip}{2pt}
+\begin{thebibliography}{99}
+\bibitem{nielsen} J. Nielsen, ``10 Usability Heuristics for User Interface Design,'' Nielsen Norman Group, reviewed 2024. \url{https://www.nngroup.com/articles/ten-usability-heuristics/}.
+\bibitem{sweller} J. Sweller, ``Cognitive Load During Problem Solving: Effects on Learning,'' \emph{Cognitive Science}, vol. 12, pp. 257--285, 1988. \url{https://doi.org/10.1207/s15516709cog1202_4}.
+\bibitem{hick} W. E. Hick, ``On the Rate of Gain of Information,'' \emph{Quarterly Journal of Experimental Psychology}, vol. 4, pp. 11--26, 1952. \url{https://doi.org/10.1080/17470215208416600}.
+\bibitem{fitts} P. M. Fitts, ``The information capacity of the human motor system in controlling the amplitude of movement,'' \emph{Journal of Experimental Psychology}, vol. 47, pp. 381--391, 1954. \url{https://doi.org/10.1037/h0055392}.
+\bibitem{wcag} W3C, \emph{Web Content Accessibility Guidelines (WCAG) 2.2}. \url{https://www.w3.org/TR/WCAG22/}.
+\bibitem{hrv} S. Laborde, E. Mosley, and J. F. Thayer, ``Heart Rate Variability and Cardiac Vagal Tone in Psychophysiological Research: Recommendations for Experiment Planning, Data Analysis, and Data Reporting,'' \emph{Frontiers in Psychology}, 2017. \url{https://doi.org/10.3389/fpsyg.2017.00213}.
+\bibitem{mult} Y.-H. H. Tsai et al., ``Multimodal Transformer for Unaligned Multimodal Language Sequences,'' \emph{ACL}, 2019. \url{https://aclanthology.org/P19-1656/}.
+\bibitem{mbt} A. Nagrani et al., ``Attention Bottlenecks for Multimodal Fusion,'' \emph{NeurIPS}, 2021. \url{https://arxiv.org/abs/2107.00135}.
+\bibitem{uspstf} US Preventive Services Task Force, ``Depression and Suicide Risk in Adults: Screening,'' 2023. \url{https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/screening-depression-suicide-risk-adults}.
+\bibitem{wesad} P. Schmidt, A. Reiss, R. Duerichen, C. Marberger, and K. Van Laerhoven, ``Introducing WESAD, a Multimodal Dataset for Wearable Stress and Affect Detection,'' \emph{ICMI}, 2018. Official dataset: \url{https://ubi29.informatik.uni-siegen.de/usi/data_wesad.html}.
+\bibitem{daic} USC Institute for Creative Technologies, \emph{DAIC-WOZ Database}. Official dataset and access documentation: \url{https://dcapswoz.ict.usc.edu/}.
+\bibitem{prevent} S. S. Khan et al., ``Development and Validation of the American Heart Association Predicting Risk of Cardiovascular Disease EVENTs (PREVENT) Equations,'' \emph{Circulation}, 2024. \url{https://pmc.ncbi.nlm.nih.gov/articles/PMC10910659/}.
+\bibitem{ptbxl} P. Wagner et al., \emph{PTB-XL, a large publicly available electrocardiography dataset}, version 1.0.3, PhysioNet. \url{https://physionet.org/content/ptb-xl/1.0.3/}.
+\bibitem{daisee} A. Gupta, A. D'Cunha, K. Awasthi, and V. Balasubramanian, ``DAiSEE: Towards User Engagement Recognition in the Wild,'' 2016. \url{https://arxiv.org/abs/1609.01885}.
+\bibitem{engagenet} M. Singh et al., ``Do I Have Your Attention: A Large Scale Engagement Prediction Dataset and Baselines,'' 2023. \url{https://arxiv.org/abs/2302.00431}.
+\bibitem{tcn} A. Abedi and S. S. Khan, ``Improving State-of-the-Art in Detecting Student Engagement with Resnet and TCN Hybrid Network,'' 2021. \url{https://arxiv.org/abs/2104.10122}.
+\end{thebibliography}
+\endgroup
+\end{document}
