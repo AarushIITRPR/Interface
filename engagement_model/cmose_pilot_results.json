@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-14",
+  "source": "https://huggingface.co/datasets/cwuau/CMOSE",
+  "license": "CC-BY-SA-4.0",
+  "attribution": "Chi-Hsuan Wu et al., CMOSE, CVPR Workshops 2024, pp. 4636-4645",
+  "raw_records": 12197,
+  "excluded_empty_visual_features": 295,
+  "usable_records": 11902,
+  "splits": {"train": 8806, "validation": 709, "calibration": 734, "test": 1653},
+  "test_session": "video10",
+  "split_claim": "Session-disjoint; cross-session biological identity unverified",
+  "training_runs": 12,
+  "selected_model_evaluations": 9,
+  "selected_learning_rate_all_configurations": 0.001,
+  "seeds": [17, 31, 53],
+  "majority_baseline": {"accuracy": 0.621295, "macro_f1": 0.191604, "balanced_accuracy": 0.25, "ordinal_mae": 0.415003},
+  "calibrated_means": {
+    "visual_mean": {"accuracy": 0.405324, "macro_f1": 0.247585, "balanced_accuracy": 0.338260, "ordinal_mae": 0.690833},
+    "multi_mean": {"accuracy": 0.474491, "macro_f1": 0.253561, "balanced_accuracy": 0.335995, "ordinal_mae": 0.646813},
+    "multi_latent": {"accuracy": 0.418028, "macro_f1": 0.253883, "balanced_accuracy": 0.342922, "ordinal_mae": 0.662422}
+  },
+  "interpretation": "Weak cross-session performance. Learned models beat majority on macro-F1 and balanced accuracy but lose on accuracy and ordinal MAE. No production or empirical novelty claim.",
+  "complete_logs": "runs/cmose-pilot-20261014/summary.json",
+  "architecture_scope": "Precomputed whole-clip I3D/BERT/acoustic features, T=1, width=32; not full TRAC",
+  "production_validated": false,
+  "streaming_validated": false,
+  "deployed": false
+}

@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-14",
+  "scope": "Software verification with a separately identified public-data pilot; not production validation",
+  "latest_test_run": {"passed": 12, "failed": 0, "seconds": 41.66},
+  "tests": {"passed": 12, "failed": 0, "seconds": 10.71},
+  "synthetic_training": {
+    "seed": 17,
+    "epochs": 12,
+    "train_examples": 64,
+    "validation_examples": 24,
+    "calibration_examples": 16,
+    "test_examples": 24,
+    "input_shape": [20, 8],
+    "width": 32,
+    "parameters": 35396,
+    "device": "cpu",
+    "torch": "2.14.1+cpu",
+    "elapsed_seconds": 5.746969,
+    "initial_training_loss": 0.34717540070414543,
+    "final_training_loss": 0.21834880113601685,
+    "best_validation_epoch": 8,
+    "checkpoint_sha256": "b1859ddc58fd786bd687e6f97da5b6fbc81f7637aa65a19c7932cc21d5f6665c",
+    "manifest_sha256": "601cf1c1b2b16cb7e6a3a6794645bbc4764162def7682a0fc1f31defd6c7606d",
+    "logs": "runs/synthetic-smoke-20261014/run/training.json",
+    "calibration_test_log": "runs/synthetic-smoke-20261014/test.json"
+  },
+  "real_engagement_training": "CMOSE public clip-feature pilot completed: 12 training runs; 9 selected-model tests; see cmose_pilot_results.json and runs/cmose-pilot-20261014",
+  "architectural_ablations": "visual versus multimodal and mean versus latent feature fusion completed; proposed scheduling/drift/replay ablations not performed",
+  "full_pipeline_latency": "not measured",
+  "production_model": false,
+  "deployed": false
+}
