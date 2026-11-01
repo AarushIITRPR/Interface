@@ -7,7 +7,7 @@ The supplied Meridian redesign archive is the authoritative visual and informati
 - Warm paper canvas `#f1ece2` and light paper surfaces `#f9f5ee`
 - Deep blue ink `#1c2936`
 - Terracotta `#ad503c` for brand emphasis and attention
-- Green `#1d7f60` for verified readiness
+- Green `#17694f` for verified readiness; muted text `#535e68` for normal-text contrast on paper
 - Georgia for expressive editorial display type
 - Arial or Helvetica for operational text and controls
 - Square edges, ruled sections, quiet surfaces, and deliberate whitespace
@@ -29,6 +29,8 @@ The supplied Meridian redesign archive is the authoritative visual and informati
 - Show only the present task, its short instruction, its interaction, and restrained session framing.
 - Preserve announcements, safety stop, session switching, audio control, task timers, responses, and automatic transitions.
 - Never reveal target emotion or internal sensor state.
+- Use plain-language self-report questions; scientific field names belong in exports, not participant headings.
+- Keep explicit rating confirmation, Back, and keyboard selection. Task navigation must be server-synchronized and distinguish interruption from completion.
 
 ## Avoid
 

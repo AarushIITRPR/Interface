@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
+import { subjectNavigationTarget } from "./subject-navigation";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
@@ -158,6 +159,8 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
     operatorConnected,
     acquisitionReady,
     mediaSrc,
+    canGoBack: subjectNavigationTarget(snapshot.status, snapshot.stepIndex, plan.map(s => s.type), -1) !== null,
+    canGoNext: subjectNavigationTarget(snapshot.status, snapshot.stepIndex, plan.map(s => s.type), 1) !== null,
     step: current ? {
       id: current.id,
       index: current.index,
@@ -213,6 +216,21 @@ export async function mutateSession(code: string, action: string, payload: Actio
     const step = plan[current.stepIndex];
     const expectedStepId = String(payload.expectedStepId ?? "");
     if (expectedStepId && step?.id !== expectedStepId) return current;
+    if (payload.expectedStepStartedAt && payload.expectedStepStartedAt !== current.stepStartedAt) return current;
+    if (payload.expectedAttempt != null && Number(payload.expectedAttempt) !== current.attempt) return current;
+    if (["rating", "taskComplete"].includes(action) && current.status !== "running") return current;
+    if (action === "rating" && step?.type !== "sam") return current;
+    if (action === "subjectNavigate") {
+      if (!expectedStepId || !payload.expectedStepStartedAt) throw new Error("Refresh the subject display before changing tasks.");
+      const targetIndex = subjectNavigationTarget(current.status, current.stepIndex, plan.map(s => s.type), Number(payload.direction));
+      if (targetIndex === null) return current;
+      appendEvent(current, {eventType:"subject_navigation", label:Number(payload.direction) < 0 ? "Subject revisited previous step" : "Subject skipped remaining step", source:"subject", severity:"warn", metadata:{fromIndex:current.stepIndex,toIndex:targetIndex,disposition:"interrupted",retainedPreviousResponses:true}});
+      current.stepIndex = targetIndex;
+      current.attempt = Math.max(0, ...current.events.filter(e => e.stepIndex === targetIndex).map(e => e.attempt)) + 1;
+      current.stepStartedAt = now();
+      current.announcement = null;
+      appendEvent(current, {eventType:"step_start", label:"Step started after subject navigation", source:"subject"});
+    }
 
     if (action === "advance" && current.status === "running") advance(current,String(payload.reason ?? ""),(payload.source === "subject" ? "subject" : "operator"));
     if (action === "heartbeat") {
@@ -246,7 +264,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "message") { const text=String(payload.text ?? "").trim().slice(0,180); if(text){ current.announcement={id:uid("ann"),text,kind:payload.kind === "safety" ? "safety" : "info",createdAt:now()}; appendEvent(current,{eventType:"operator_message",label:"Operator message sent",detail:text,source:"operator"}); } }
     if (action === "ack") { if(current.announcement) appendEvent(current,{eventType:"message_ack",label:"Message acknowledged",source:"subject"}); current.announcement=null; }
     if (action === "log") appendEvent(current,{eventType:String(payload.eventType ?? "subject_event"),label:String(payload.label ?? "Subject event"),detail:String(payload.detail ?? ""),severity:(payload.severity as ExperimentEvent["severity"]) ?? "info",source:(payload.source as ExperimentEvent["source"]) ?? "subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}});
-    if (action === "rating") { current.ratings.push({emotion:step?.emo ?? "happy",valence:Number(payload.valence),arousal:Number(payload.arousal),dominance:Number(payload.dominance),createdAt:now()}); appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{emotion:step?.emo,valence:payload.valence,arousal:payload.arousal,dominance:payload.dominance}}); advance(current,"Response submitted","subject"); }
+    if (action === "rating") { current.ratings.push({emotion:step?.emo ?? "happy",valence:Number(payload.valence),arousal:Number(payload.arousal),dominance:Number(payload.dominance),createdAt:now()}); appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{emotion:step?.emo,valence:payload.valence,arousal:payload.arousal,dominance:payload.dominance,responseUiVersion:"plain-language-2026-10-14"}}); advance(current,"Response submitted","subject"); }
     if (action === "taskComplete") { appendEvent(current,{eventType:String(payload.eventType ?? "task_complete"),label:String(payload.label ?? "Task completed"),source:"subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}}); advance(current,"Task completed","subject"); }
     if (action === "note") { const body=String(payload.body ?? "").trim().slice(0,500); if(body){ current.notes.push({id:uid("note"),body,category:String(payload.category ?? "general"),stepId:step?.id ?? "",stepLabel:step ? shortLabel(step) : "",createdAt:now()}); appendEvent(current,{eventType:"operator_note",label:"Operator note",detail:body,source:"operator"}); } }
     if (action === "sensor") { const sensor=current.sensors.find((item)=>item.id===payload.id); if(sensor){ sensor.status=String(payload.status) as SensorStatus; sensor.detail=String(payload.detail ?? sensor.detail); sensor.updatedAt=now(); appendEvent(current,{eventType:"sensor_status",label:`${sensor.label}: ${sensor.status}`,severity:["missing","error"].includes(sensor.status)?"error":sensor.status==="delayed"?"warn":"info",source:"sensor",metadata:{sensorId:sensor.id,status:sensor.status}}); } }

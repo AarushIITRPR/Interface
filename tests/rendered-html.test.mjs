@@ -89,10 +89,10 @@ test("keeps the legacy SAM questions with discrete ten-point responses", async (
     readFile(new URL("../lib/protocol.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/sessions/route.ts", import.meta.url), "utf8"),
   ]);
-  for (const label of ["Valence (pleasure)", "Arousal (activation)", "Dominance (control)"]) {
+  for (const label of ["How pleasant did you feel", "How calm or energized did you feel", "How in control did you feel"]) {
     assert.match(subject, new RegExp(label.replace(/[()]/g, "\\$&")));
   }
-  for (const anchor of ["Unpleasant", "Pleasant", "Calm", "Excited", "Controlled", "In control"]) {
+  for (const anchor of ["Very unpleasant", "Very pleasant", "Very calm", "Very energized", "Not in control", "Fully in control"]) {
     assert.match(subject, new RegExp(anchor));
   }
   assert.match(subject, /Array\.from\(\{length:10\}/);

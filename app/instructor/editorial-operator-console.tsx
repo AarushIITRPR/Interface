@@ -14,7 +14,6 @@ import {
   Pause,
   Play,
   Radio,
-  RefreshCw,
   ScanLine,
   Send,
   Settings2,
@@ -132,7 +131,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
       setError("");
       setNotice(actionNotice(action));
       window.setTimeout(() => setNotice("Workspace synchronized"), 2200);
-      if (["complete", "abort"].includes(action)) setTab("review");
+      if (["complete", "abort"].includes(action)) { setTab("review"); setSettingsOpen(false); }
       return next;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to update the session.");
@@ -193,7 +192,7 @@ export function EditorialOperatorConsole({ operatorName }: { operatorName: strin
 
           <section className="live-instructor-main" id="workspace-content" tabIndex={-1}>
             <span className="sr-only" role="status">{notice}</span>
-            {error ? <div className="live-workspace-error" role="alert">{error}</div> : null}
+            {error ? <div className="live-workspace-error" role="alert">The workspace could not complete the request. Check the server connection, then retry your action. <details><summary>Error details</summary>{error}</details></div> : null}
             <AnimatePresence mode="wait" initial={false}>
               <motion.div key={tab} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -3 }}>
                 {tab === "overview" ? <Overview snapshot={snapshot} step={step} plan={plan} running={running} health={health} readyCount={readyCount} required={required} agentOnline={agentOnline} subjectOnline={subjectOnline} now={now} act={act} onSettings={() => setSettingsOpen(true)} /> : null}
@@ -277,7 +276,7 @@ function Overview({ snapshot, step, plan, running, health, readyCount, required,
 }) {
   const [message, setMessage] = useState("");
   const progress = Math.round(((snapshot.stepIndex + 0.35) / plan.length) * 100);
-  const setupReady = agentOnline && readyCount === required.length && snapshot.preflightTest.status === "pass";
+  const setupReady = agentOnline && subjectOnline && readyCount === required.length && snapshot.preflightTest.status === "pass";
   const requiredIds = new Set(required.map((sensor) => sensor.id));
   const optionalActive = snapshot.sensors.filter((sensor) => !requiredIds.has(sensor.id) && (sensor.hardwareDetected || sensor.dataDetected || Boolean(sensor.device && sensor.device !== "none") || Boolean(snapshot.acquisition.previewUrls[sensor.id])));
   const monitored = [...required, ...optionalActive];
@@ -293,17 +292,18 @@ function Overview({ snapshot, step, plan, running, health, readyCount, required,
       <div className="live-content-heading"><div><WorkspaceLabel>Session overview</WorkspaceLabel><h2>{snapshot.status === "setup" ? <>The study<br /><i>in preparation.</i></> : <>The study<br /><i>in progress.</i></>}</h2></div><div><span>SESSION {snapshot.code}</span><p>Operational clarity for the participant, protocol, and recording in front of you.</p></div></div>
 
       <section className="live-session-banner">
-        <div><span className={running ? "live-active" : "live-active paused"}><Circle size={8} fill="currentColor" /> {statusText(snapshot.status)}</span><strong>P{String(snapshot.participantId).padStart(3, "0")} <em>·</em> {shortLabel(step)}</strong><small>Stage {String(snapshot.stepIndex + 1).padStart(2, "0")} of {String(plan.length).padStart(2, "0")} · {snapshot.operator}</small></div>
+        <div><span className={running ? "live-active" : "live-active paused"}><Circle size={8} fill="currentColor" /> {statusText(snapshot.status)}</span><strong>P{String(snapshot.participantId).padStart(3, "0")} <em>·</em> {shortLabel(step)}</strong><small>{snapshot.operator}</small></div>
         <div className="live-banner-actions">
           {!['complete','aborted'].includes(snapshot.status) ? <button onClick={primaryAction}>{snapshot.status === "running" ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}{snapshot.status === "setup" ? setupReady ? " START SESSION" : " PREPARE RECORDING" : snapshot.status === "running" ? " PAUSE SESSION" : " RESUME SESSION"}</button> : null}
           <button disabled={snapshot.status !== "running" || snapshot.stepIndex >= plan.length - 1} onClick={() => void act("advance")}>ADVANCE <ChevronRight size={14} /></button>
+          {["running","paused"].includes(snapshot.status)?<button onClick={()=>{if(window.confirm("End recording and finalize files? Cancel to keep the session running."))void act("complete");}}>END SESSION</button>:null}
         </div>
       </section>
 
       <div className="live-overview-cards">
         <article><WorkspaceLabel>Protocol progress</WorkspaceLabel><div className="live-progress-number"><b>{String(snapshot.stepIndex + 1).padStart(2, "0")}</b><span>of {String(plan.length).padStart(2, "0")}<br />stages</span></div><div className="live-progress-line"><i style={{ width: `${progress}%` }} /></div><small>Current: {shortLabel(step)} · {durationLabel(step)}</small></article>
         <article className="live-subject-card"><div><WorkspaceLabel>Subject display</WorkspaceLabel><b>One quiet task<br />at a time.</b><p>{step.subjectPrompt || "The subject display is waiting for the next instruction."}</p></div><Link href={`/subject?session=${snapshot.code}`} target="_blank">OPEN SUBJECT VIEW <ArrowUpRight size={14} /></Link><small className={subjectOnline ? "connected" : "waiting"}>{subjectOnline ? "DISPLAY CONNECTED" : "DISPLAY WAITING"}</small></article>
-        <article className="live-health-card"><WorkspaceLabel>Recording health</WorkspaceLabel><div><b>{health}</b><span>%<small>{health === 100 ? "stable" : "ready"}</small></span></div><p className={health === 100 ? "good" : "attention"}>{health === 100 ? <Check size={14} /> : <Circle size={9} fill="currentColor" />} {readyCount} of {required.length} required streams ready.</p></article>
+        <article className="live-health-card"><WorkspaceLabel>Required streams ready</WorkspaceLabel><div><b>{readyCount} / {required.length}</b></div><p className={health === 100 ? "good" : "attention"}>{health === 100 ? <Check size={14} /> : <Circle size={9} fill="currentColor" />} {agentOnline ? "Incoming samples checked." : "Acquisition computer offline."}</p><small>Not a saved-file quality score. Verify files in Recording review.</small></article>
       </div>
 
       <section className="live-operations-grid">
@@ -348,34 +348,134 @@ function Protocol({ snapshot, step, plan, running, subjectOnline, act, navigateT
 
 function Review({ snapshot, required, now, onLedger }: { snapshot: SessionSnapshot; required: SensorChannel[]; now: number; onLedger: () => void }) {
   const artifacts = snapshot.recordings;
-  const duration = artifacts.length ? Math.max(...artifacts.map((item) => item.durationSec)) : snapshot.recordingStartedAt ? Math.max(0, (now - Date.parse(snapshot.recordingStartedAt)) / 1000) : 0;
+  const duration = artifacts.length ? Math.max(...artifacts.map((item) => item.durationSec)) : snapshot.recordingStartedAt ? Math.max(0, ((["complete","aborted"].includes(snapshot.status) ? Date.parse(snapshot.stepStartedAt) : now) - Date.parse(snapshot.recordingStartedAt)) / 1000) : 0;
   const totalBytes = artifacts.reduce((sum, item) => sum + item.bytes, 0);
   const manifestReady = artifacts.length > 0 && artifacts.every((item) => item.quality !== "pending");
   const exportManifest = () => download(`${snapshot.code.toLowerCase()}-manifest.json`, JSON.stringify({ exportedAt: new Date().toISOString(), session: safeSnapshot(snapshot), recordings: artifacts }, null, 2), "application/json");
   return (
     <section className="live-workspace-content">
       <div className="live-content-heading"><div><WorkspaceLabel>Recording review</WorkspaceLabel><h2>Evidence,<br /><i>held clearly.</i></h2></div><div><span>CAPTURE {snapshot.code}</span><p>Review recording completeness and the operational ledger without leaving the study context.</p></div></div>
-      <section className="live-review-summary"><article><WorkspaceLabel>Capture coverage</WorkspaceLabel><b>{clock(duration)}</b><small>{snapshot.status === "complete" ? "finalized duration" : "recorded so far"}</small></article><article><WorkspaceLabel>Storage</WorkspaceLabel><b>{formatBytes(totalBytes)} </b><small>{artifacts.length ? `${artifacts.length} finalized files` : "local acquisition volume"}</small></article><article><WorkspaceLabel>Manifest</WorkspaceLabel><b>{manifestReady ? "Ready" : "Pending"}</b><small className={manifestReady ? "good" : "attention"}>{manifestReady ? <Check size={13} /> : <Circle size={8} fill="currentColor" />} {manifestReady ? "recordings verified" : "awaiting final evidence"}</small></article></section>
-      <section className="live-stream-register"><header><div><WorkspaceLabel>Collected streams</WorkspaceLabel><h3>Recording register</h3></div><button onClick={exportManifest}><Download size={14} /> EXPORT MANIFEST</button></header>{required.map((sensor) => { const artifact = artifacts.find((item) => item.sensorId === sensor.id); const quality = artifact?.quality || sensor.quality; return <article key={sensor.id}><i className={quality === "pass" || quality === "good" ? "good" : quality === "fail" || quality === "bad" ? "bad" : "attention"} />{sensorIcon(sensor)}<strong>{sensor.label}</strong><span>{artifact ? `${formatRate(artifact.averageRateHz)} Hz · ${artifact.availabilityPct.toFixed(1)}% available` : sensor.latestValue || sensor.detail}</span><small>{quality === "pass" || quality === "good" ? "COMPLETE" : String(quality).toUpperCase()}</small></article>; })}</section>
+      <section className="live-review-summary"><article><WorkspaceLabel>Capture coverage</WorkspaceLabel><b>{clock(duration)}</b><small>{artifacts.length ? "reported file duration" : "session elapsed, no file confirmation"}</small></article><article><WorkspaceLabel>Storage</WorkspaceLabel><b>{formatBytes(totalBytes)} </b><small>{artifacts.length ? `${artifacts.length} reported files` : "local acquisition volume"}</small></article><article><WorkspaceLabel>Manifest</WorkspaceLabel><b>{manifestReady ? "Ready" : "Pending"}</b><small className={manifestReady ? "good" : "attention"}>{manifestReady ? <Check size={13} /> : <Circle size={8} fill="currentColor" />} {manifestReady ? "manifest received; check stream results" : "awaiting final evidence"}</small></article></section>
+      <section className="live-stream-register"><header><div><WorkspaceLabel>Collected streams</WorkspaceLabel><h3>Recording register</h3></div><button onClick={exportManifest}><Download size={14} /> EXPORT MANIFEST</button></header>{required.map((sensor) => { const artifact = artifacts.find((item) => item.sensorId === sensor.id); const quality = artifact?.quality || sensor.quality; return <article key={sensor.id}><i className={quality === "pass" || quality === "good" ? "good" : quality === "fail" || quality === "bad" ? "bad" : "attention"} />{sensorIcon(sensor)}<strong>{sensor.label}</strong><span>{artifact ? `${formatRate(artifact.averageRateHz)} Hz · ${artifact.availabilityPct.toFixed(1)}% available` : sensor.latestValue || sensor.detail}</span><small>{!artifact ? "NO FILE REPORT" : quality === "pass" ? "CHECKED" : String(quality).toUpperCase()}</small></article>; })}</section>
       <section className="live-review-ledger"><header><div><WorkspaceLabel>Operational record</WorkspaceLabel><h3>Session ledger</h3></div><button onClick={onLedger}>OPEN LEDGER <ArrowUpRight size={14} /></button></header>{snapshot.events.slice(-3).reverse().map((event) => <article key={event.id}><time>{timeLabel(event.createdAt)}</time><p>{event.label}</p><span>{event.eventType.replaceAll("_", " ").toUpperCase()}</span></article>)}</section>
     </section>
   );
 }
 
+function useDialogFocus(closeRef: {current: HTMLButtonElement | null}, onClose: () => void) {
+  useEffect(() => {
+    const opener=document.activeElement as HTMLElement|null;
+    const dialog=closeRef.current?.closest<HTMLElement>('[role="dialog"]');
+    if(!dialog)return;
+    const background=Array.from(document.querySelectorAll<HTMLElement>(".live-instructor-topbar,.live-instructor-layout"));
+    const prior=background.map(el=>el.inert);
+    background.forEach(el=>{el.inert=true;});
+    closeRef.current?.focus();
+    const focusables=()=>Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]')).filter(el=>el.getClientRects().length>0);
+    const keyboard=(event:KeyboardEvent)=>{
+      if(event.key==="Escape"){event.preventDefault();onClose();}
+      if(event.key==="Tab"){
+        const items=focusables(),first=items[0],last=items.at(-1);
+        if(!first){event.preventDefault();return;}
+        if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+        else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
+      }
+    };
+    const contain=(event:FocusEvent)=>{if(event.target instanceof Node&&!dialog.contains(event.target))closeRef.current?.focus();};
+    document.addEventListener("keydown",keyboard);document.addEventListener("focusin",contain);
+    return()=>{document.removeEventListener("keydown",keyboard);document.removeEventListener("focusin",contain);background.forEach((el,i)=>{el.inert=prior[i];});if(opener?.isConnected)opener.focus();};
+  },[closeRef,onClose]);
+}
+
 function SettingsDialog({ snapshot, now, act, onClose }: { snapshot: SessionSnapshot; now: number; act: Act; onClose: () => void }) {
-  const closeRef = useRef<HTMLButtonElement>(null);
-  const [devices, setDevices] = useState<DeviceConfig>(snapshot.deviceConfig);
-  const [required, setRequired] = useState(snapshot.requiredSensors);
-  useEffect(() => { closeRef.current?.focus(); const listener = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); }; window.addEventListener("keydown", listener); return () => window.removeEventListener("keydown", listener); }, [onClose]);
-  const online = isAgentOnline(snapshot, now);
-  const setupSensors = snapshot.sensors.filter((sensor) => SETUP_SENSORS.includes(sensor.id));
-  const save = async () => { await act("deviceConfig", { devices }); await act("requiredSensors", { ids: required }); };
-  return <motion.div className="live-modal-overlay" role="presentation" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><section className="live-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><div><WorkspaceLabel>Workspace settings</WorkspaceLabel><h2 id="settings-title">Recording setup</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close workspace settings"><X size={19} /></button></header><div className="live-settings-body"><section><h3>Acquisition computer</h3><div className="live-setting-status"><i className={online ? "good" : "bad"} /><span><strong>{online ? "Connected" : "Not connected"}</strong><small>{online ? snapshot.acquisition.host : "Start the local acquisition agent"}</small></span></div><dl><div><dt>Subject code</dt><dd>{snapshot.code}</dd></div><div><dt>Preflight</dt><dd>{snapshot.preflightTest.status}</dd></div><div><dt>Disk</dt><dd>{snapshot.acquisition.diskFreeGb == null ? "Not measured" : `${snapshot.acquisition.diskFreeGb.toFixed(1)} GB free`}</dd></div></dl><div className="live-settings-actions"><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("refreshDevices")}><RefreshCw size={14} /> REFRESH DEVICES</button><button disabled={!online || snapshot.configurationLocked} onClick={() => void act("startPreflight")}>RUN PREFLIGHT</button>{snapshot.status === "setup" ? <button className="primary" disabled={snapshot.preflightTest.status !== "pass"} onClick={() => void act("startSession")}>START SESSION</button> : null}</div><details><summary>Technical connection</summary><code>python -m meridian_agent --server http://localhost:3000 --code {snapshot.code} --token {snapshot.acquisitionToken}</code></details></section><section><h3>Recording devices</h3><div className="live-device-settings">{setupSensors.map((sensor) => { const kind = sensor.group === "video" ? "video" : sensor.group === "audio" ? "audio" : "serial"; const options = snapshot.acquisition.inventory[kind]; const isRequired = required.includes(sensor.id); const selected = devices[sensor.id] || "none"; return <article key={sensor.id}><label className="live-required-toggle"><input aria-label={`Require ${sensor.label}`} type="checkbox" checked={isRequired} disabled={snapshot.configurationLocked} onChange={(event) => setRequired((items) => event.target.checked ? [...new Set([...items, sensor.id])] : items.filter((id) => id !== sensor.id))} /><span><strong>{sensor.label}</strong><small>{sensor.latestValue || sensor.detail}</small></span></label>{sensor.id === "ecg" ? <label className="live-api-device"><span>Frontier X live link</span><input aria-label="Frontier X live ECG link" value={selected === "none" || selected === "auto" ? "" : selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, ecg: event.target.value || "none" }))} placeholder="Paste live ECG share link or user ID" /></label> : <select aria-label={`${sensor.label} device`} value={selected} disabled={snapshot.configurationLocked} onChange={(event) => setDevices((current) => ({ ...current, [sensor.id]: event.target.value }))}><option value="none">Not assigned</option><option value="auto">Auto-detect</option>{options.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>}</article>; })}</div><button className="live-save-settings" disabled={snapshot.configurationLocked} onClick={() => void save()}>SAVE RECORDING SETUP</button></section></div><footer><button className="danger" onClick={() => { if (window.confirm(snapshot.status === "setup" ? "Discard this session?" : "End and finalize this session?")) void act(snapshot.status === "setup" ? "abort" : "complete"); }}>{snapshot.status === "setup" ? "DISCARD SESSION" : "END SESSION"}</button><span>Settings stay outside the normal operator workflow.</span></footer></section></motion.div>;
+  const closeRef=useRef<HTMLButtonElement>(null);
+  useDialogFocus(closeRef,onClose);
+  const [devices,setDevices]=useState<DeviceConfig>(snapshot.deviceConfig);
+  const [required,setRequired]=useState(snapshot.requiredSensors);
+  const [platform,setPlatform]=useState("windows");
+  const [origin,setOrigin]=useState("");
+  const [feedback,setFeedback]=useState("");
+  const [busy,setBusy]=useState(false);const pending=useRef(false);
+  useEffect(()=>{const timer=window.setTimeout(()=>setOrigin(window.location.origin),0);return()=>clearTimeout(timer);},[]);
+  const online=isAgentOnline(snapshot,now);
+  const subjectOnline=Boolean(snapshot.subjectLastSeenAt&&now-Date.parse(snapshot.subjectLastSeenAt)<11000);
+  const dirty=JSON.stringify(devices)!==JSON.stringify(snapshot.deviceConfig)||JSON.stringify(required)!==JSON.stringify(snapshot.requiredSensors);
+  const selectedReady=required.every(id=>sensorOperational(snapshot.sensors.find(s=>s.id===id),now,online));
+  const canStart=online&&subjectOnline&&selectedReady&&!dirty&&snapshot.preflightTest.status==="pass";
+  const checkRunning=snapshot.preflightTest.status==="running";
+  const command=(platform==="windows"?".\\venv\\Scripts\\python.exe":".venv/bin/python")+" -m meridian_agent --server "+origin+" --code "+snapshot.code+" --token "+snapshot.acquisitionToken;
+  // Use the same .venv directory for installation and launch, without shell activation.
+  const launch=command.replace(".\\venv\\",".\\.venv\\");
+  const blocked=dirty?"Save your device choices first.":!online?"Connect the acquisition computer using step 2.":!subjectOnline?"Open the subject display and join this session.":checkRunning?"Checking incoming data. This normally takes about 10 seconds.":!selectedReady?"A required device needs attention. Check its connection below.":snapshot.preflightTest.status!=="pass"?"Run the readiness check before starting.":"Ready. Starting records data and begins the guided protocol.";
+  const perform=async(action:string,payload:Record<string,unknown>={})=>{
+    if(pending.current)return;pending.current=true;setBusy(true);setFeedback("");
+    try{const result=await act(action,payload);setFeedback(result?(action==="startSession"?"Recording started. You can close setup and monitor Study overview.":"Saved."): "Could not complete this action. Check the connection and try again.");}
+    finally{pending.current=false;setBusy(false);}
+  };
+  const save=async()=>{
+    if(pending.current)return;pending.current=true;setBusy(true);setFeedback("");
+    try{
+      const first=await act("deviceConfig",{devices});
+      if(!first){setFeedback("Device choices were not saved. Try again.");return;}
+      const second=await act("requiredSensors",{ids:required});
+      setFeedback(second?"Device choices saved. Now run the readiness check.":"Required-device choices were not saved. Try Save again.");
+    }finally{pending.current=false;setBusy(false);}
+  };
+  return <motion.div className="live-modal-overlay" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}>
+    <section className="live-settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header><div><WorkspaceLabel>Workspace settings</WorkspaceLabel><h2 id="settings-title">Recording setup</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close workspace settings"><X size={19}/></button></header>
+      <div className="live-settings-body">
+        <section className="setup-guide">
+          <h3>Start a recording</h3>
+          <p className="setup-next-step"><strong>Next:</strong> {blocked}</p>
+          <ol>
+            <li><h4>Open the subject display</h4><p>On the participant screen, open the Subject display for this website and enter <strong>{snapshot.code}</strong>.</p><Link href={'/subject?session='+snapshot.code} target="_blank">Open subject display <ArrowUpRight size={14}/></Link><p>{subjectOnline?"Subject display connected":"Waiting for the subject to join"}</p></li>
+            <li><h4>Connect the acquisition computer</h4><p>{online?"Connected: "+snapshot.acquisition.host:"Run the acquisition agent on the computer plugged into the sensors. Keep it running throughout the session."}</p>
+              <details open={!online}><summary>Connection instructions</summary>
+                <label>Computer operating system <select value={platform} onChange={e=>setPlatform(e.target.value)}><option value="windows">Windows</option><option value="linux">Linux / macOS</option></select></label>
+                <p>Open a terminal in the Meridian <code>acquisition_agent</code> folder. On a new computer, install once:</p>
+                <pre>{platform==="windows"?"python -m venv .venv\n.\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt":"python3 -m venv .venv\n.venv/bin/python -m pip install -r requirements.txt"}</pre>
+                <p>Then run the command for this session:</p><pre>{launch}</pre>
+                <button disabled={!origin} onClick={()=>{void navigator.clipboard.writeText(launch).then(()=>setFeedback("Command copied. Paste it into the acquisition computer's terminal.")).catch(()=>setFeedback("Clipboard unavailable. Select and copy the command above."));}}>Copy connection command</button>
+                <p>On another computer, localhost points to that computer, not this server. Use the reachable server address in both browsers and in this command. Keep the session token private.</p>
+                <p>“No module named meridian_agent”? Check that the terminal is in acquisition_agent and use the .venv interpreter shown above.</p>
+              </details>
+            </li>
+            <li><h4>Choose devices and save</h4><p>Check only devices required by this study. A checked box means required, not detected. To disable a device entirely, also choose Not assigned. Auto-detect needs compatible hardware; select a specific device if needed.</p></li>
+            <li><h4>Check, then start</h4><p id="setup-blocker" role="status">{blocked}</p><p>Readiness check: <strong>{snapshot.preflightTest.status==="idle"?"Not run":snapshot.preflightTest.status==="pass"?"Passed":snapshot.preflightTest.status==="fail"?"Needs attention":"Checking"}</strong></p>
+              {snapshot.preflightTest.status==="fail"?<p role="alert">Check required devices, free disk space (at least 10 GiB), and clock synchronization. Then run the check again.</p>:null}
+              <div className="live-settings-actions">
+                <button disabled={busy||!online||dirty||snapshot.configurationLocked||checkRunning} onClick={()=>void perform("startPreflight")}>{checkRunning?"CHECKING…":"RUN READINESS CHECK"}</button>
+                {snapshot.status==="setup"?<button className="primary" aria-describedby="setup-blocker" disabled={busy||!canStart} onClick={()=>void perform("startSession")}>START SESSION</button>:<p>{snapshot.status==="running"?"Recording is running. Device choices are locked.":"Session "+snapshot.status+"."}</p>}
+              </div>
+            </li>
+          </ol>
+          <p role="status">{feedback}</p>
+          <details><summary>Diagnostics and troubleshooting</summary><dl><div><dt>Free disk space</dt><dd>{snapshot.acquisition.diskFreeGb==null?"Not measured":snapshot.acquisition.diskFreeGb.toFixed(1)+" GiB"}</dd></div><div><dt>Readiness detail</dt><dd>{snapshot.preflightTest.detail}</dd></div></dl><p>No camera or microphone? Check OS privacy permissions, select the correct device and close other capture programs. No serial signal? Check USB drivers, cable and device assignment. No ECG? Check the current Frontier X live link.</p><button disabled={busy||!online||snapshot.configurationLocked||dirty} onClick={()=>void perform("refreshDevices")}>Refresh devices</button></details>
+        </section>
+        <section><h3>Recording devices</h3>
+          <div className="live-device-settings">{snapshot.sensors.filter(s=>SETUP_SENSORS.includes(s.id)).map(sensor=>{
+            const kind=sensor.group==="video"?"video":sensor.group==="audio"?"audio":"serial";
+            const selected=devices[sensor.id]||"none";
+            const ready=sensorOperational(sensor,now,online);
+            return <article key={sensor.id}>
+              <label className="live-required-toggle"><input type="checkbox" aria-label={'Require '+sensor.label} checked={required.includes(sensor.id)} disabled={busy||snapshot.configurationLocked} onChange={e=>setRequired(items=>e.target.checked?[...new Set([...items,sensor.id])]:items.filter(id=>id!==sensor.id))}/><span><strong>{sensor.label}</strong><small>{selected==="none"?"Not assigned":ready?"Receiving data":!online?"Connect acquisition computer":"Check device connection and assignment"}</small></span></label>
+              {sensor.id==="ecg"?<label className="live-api-device"><span>Frontier X live link</span><input value={selected==="none"||selected==="auto"?"":selected} disabled={busy||snapshot.configurationLocked} onChange={e=>setDevices(d=>({...d,ecg:e.target.value||"none"}))} placeholder="Paste live ECG share link or user ID"/></label>:<select aria-label={sensor.label+' device'} value={selected} disabled={busy||snapshot.configurationLocked} onChange={e=>setDevices(d=>({...d,[sensor.id]:e.target.value}))}><option value="none">Not assigned</option><option value="auto">Auto-detect</option>{snapshot.acquisition.inventory[kind].map(item=><option key={item.id} value={item.id}>{item.label}</option>)}</select>}
+              <details className="device-diagnostic"><summary>{sensor.label} details</summary><p>{sensor.detail}</p><p>{sensor.latestValue}</p></details>
+            </article>;
+          })}</div>
+          <button className="live-save-settings" disabled={busy||snapshot.configurationLocked||!dirty} onClick={()=>void save()}>{busy?"SAVING…":"SAVE DEVICE CHOICES"}</button>
+          {dirty?<p role="status">Unsaved choices. Save before running the readiness check.</p>:null}
+        </section>
+      </div>
+      <footer><button className="danger" disabled={busy||["complete","aborted"].includes(snapshot.status)} onClick={()=>{if(window.confirm(snapshot.status==="setup"?"Discard this session?":"End recording and finalize files? This cannot be resumed as the same recording."))void perform(snapshot.status==="setup"?"abort":"complete");}}>{snapshot.status==="setup"?"DISCARD SESSION":"END SESSION"}</button><span>Raw recordings stay on the acquisition computer. Review finalization before closing the agent.</span></footer>
+    </section>
+  </motion.div>;
 }
 
 function LedgerDialog({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { closeRef.current?.focus(); const listener = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); }; window.addEventListener("keydown", listener); return () => window.removeEventListener("keydown", listener); }, [onClose]);
+  useDialogFocus(closeRef,onClose);
   const exportLedger = () => download(`${snapshot.code.toLowerCase()}-events.json`, JSON.stringify(snapshot.events, null, 2), "application/json");
   return <motion.div className="live-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><section className="live-ledger" role="dialog" aria-modal="true" aria-labelledby="ledger-title"><header><div><WorkspaceLabel>Session ledger</WorkspaceLabel><h2 id="ledger-title">Operational record</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close session ledger"><X size={18} /></button></header><div className="live-ledger-meta"><span>{snapshot.code}</span><span>P{String(snapshot.participantId).padStart(3, "0")}</span><span>{snapshot.protocolVersion}</span></div><div className="live-ledger-events">{snapshot.events.length ? [...snapshot.events].reverse().map((event) => <article key={event.id}><time>{timeLabel(event.createdAt)}</time><span>{event.source.toUpperCase()}</span><p><strong>{event.label}</strong>{event.detail ? <small>{event.detail}</small> : null}</p></article>) : <p>No events have been recorded yet.</p>}</div><footer><span>Entries are stored with this session.</span><button onClick={exportLedger}><Download size={14} /> EXPORT JSON</button></footer></section></motion.div>;
 }
@@ -504,7 +604,7 @@ function sensorAction(sensor: SensorChannel, state: string) {
   if (state === "stalled") return "Check the device connection. No fresh samples are arriving.";
   if (state === "waiting") return sensor.id === "oximeter" ? "Confirm finger placement and wait for a valid pulse signal." : "Confirm the device is producing samples.";
   if (state === "disconnected") return "Connect the device or check its assignment in Workspace settings.";
-  return sensor.detail || "Inspect this channel before continuing.";
+  return sensor.group === "video" || sensor.group === "audio" ? "Check OS camera or microphone permissions and close other capture apps. Open Workspace settings for device details." : "Check the cable, driver and selected device. Open Workspace settings for signal details, then run the readiness check again.";
 }
 
 function qualityText(sensor: SensorChannel) { if (sensor.quality === "good") return "Good"; if (sensor.quality === "degraded") return "Degraded"; if (sensor.quality === "bad") return "Poor"; if (sensor.quality === "disabled") return "Disabled"; return "Validating"; }

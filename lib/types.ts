@@ -200,6 +200,8 @@ export type SubjectSnapshot = {
   operatorConnected: boolean;
   acquisitionReady: boolean;
   mediaSrc: string;
+  canGoBack: boolean;
+  canGoNext: boolean;
   step: SubjectStep | null;
 };
 

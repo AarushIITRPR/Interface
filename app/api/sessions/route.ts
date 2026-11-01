@@ -44,7 +44,7 @@ export async function POST(request: Request) {
   }
 }
 
-const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat"]);
+const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","subjectNavigate"]);
 
 function isSubjectAction(action:string,payload:Record<string,unknown>) {
   if (!SUBJECT_ACTIONS.has(action)) return false;
@@ -53,7 +53,11 @@ function isSubjectAction(action:string,payload:Record<string,unknown>) {
 }
 
 function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): Record<string,unknown> {
+  return {...subjectPayload(action,payload), expectedStepStartedAt:String(payload.expectedStepStartedAt ?? "").slice(0,40), expectedAttempt:payload.expectedAttempt == null ? undefined : Number(payload.expectedAttempt)};
+}
+function subjectPayload(action:string,payload:Record<string,unknown>): Record<string,unknown> {
   const expectedStepId = String(payload.expectedStepId ?? "").slice(0,80);
+  if (action === "subjectNavigate") return {expectedStepId,direction:Number(payload.direction)};
   if (action === "subjectHeartbeat") return {};
   if (action === "ack") return {};
   if (action === "pause") return {reason:"Subject requested a stop",source:"subject"};
@@ -61,6 +65,7 @@ function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): R
   if (action === "autoAdvance") return {expectedStepId};
   if (action === "rating") return {expectedStepId,valence:scale(payload.valence),arousal:scale(payload.arousal),dominance:scale(payload.dominance)};
   if (action === "taskComplete") return {expectedStepId,eventType:String(payload.eventType ?? "task_complete").slice(0,80),label:String(payload.label ?? "Task completed").slice(0,120),metadata:payload.metadata ?? {}};
+  if (action === "log" && payload.eventType === "nback_scored_onset") return {expectedStepId,eventType:"nback_scored_onset",label:"N-back scored sequence started after practice",source:"subject",metadata:{level:Math.max(1,Math.min(3,Number(payload.level)||1)),practiceScored:false}};
   const eventType = ["media_onset","media_offset","media_error"].includes(String(payload.eventType)) ? String(payload.eventType) : "subject_event";
   return {eventType,label:eventType === "media_onset" ? "Video started" : eventType === "media_offset" ? "Video completed" : eventType === "media_error" ? "Media failed to load" : "Subject event",severity:eventType === "media_error" ? "error" : "info",source:"subject"};
 }

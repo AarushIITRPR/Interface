@@ -76,7 +76,7 @@ Open the two portals separately:
 - <http://localhost:3000/instructor>
 - <http://localhost:3000/subject>
 
-Keep the terminal running. **Use the port actually printed by the server.** If it uses 3001 or 3010, both browser URLs and the acquisition command must use that port. The current Technical connection UI prints 3000 even when another port is used; correct it manually.
+Keep the terminal running. **Use the port actually printed by the server.** Recording setup now generates its connection command using the current browser origin, including its port. On a different acquisition computer, use the server's reachable address instead of localhost.
 
 Vite supplies local Cloudflare bindings from `.openai/hosting.json`: D1 `DB`, R2 `MEDIA`. Local runtime persistence is under `.wrangler`. The session engine creates session tables. Do not delete local state if you need existing sessions. `npm run db:generate` generates migration files, not a required action before every run.
 
@@ -103,7 +103,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Create a session in the instructor portal. Open **Workspace settings > Technical connection** for its code and acquisition token. Replace the placeholders below with those current values:
+Create a session in the instructor portal. Select **Prepare recording** (or **Workspace settings**), then follow **Start a recording > Connect the acquisition computer > Connection instructions**. The guide includes installation commands for Windows and Linux/macOS, a session-specific launch command and copy feedback. Replace the placeholders below with those current values:
 
 ```powershell
 .\.venv\Scripts\python.exe -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --output "C:\MeridianRecordings"
@@ -135,15 +135,15 @@ Saved portal assignments override command-line sensor defaults. Use Workspace se
 ## Run a session
 
 1. **Enter a numeric participant ID.** Contextual resume appears if an active session is found among the latest 50 sessions. A participant ID is not the generated session code.
-2. **Open Workspace settings.** Start the agent using Technical connection details. Wait for Connected.
+2. **Prepare recording.** Follow the four-step guide in Recording setup. Join the subject display, then connect the acquisition computer using the OS-specific instructions. Wait for Connected.
 3. **Assign devices.** Select Auto-detect or a specific device. A checkbox means **required for readiness**, not enabled. To disable a sensor, uncheck it **and** choose **Not assigned**. Use distinct physical indices for face and thermal cameras.
-4. **Save recording setup.** Selections are local drafts until saved. Refresh devices if hardware changed, then rerun preflight.
-5. **Run preflight.** After a 10-second observation interval, the agent checks required-stream quality, a JSON write/read test, at least 10 GiB free, and estimated server-clock offset below 100 ms. This is operational readiness, not medical certification or a complete media-integrity test.
+4. **Save device choices.** Selections are local drafts until saved. Refresh devices if hardware changed, then rerun the readiness check.
+5. **Run readiness check.** After a 10-second observation interval, the agent checks required-stream quality, a JSON write/read test, at least 10 GiB free, and estimated server-clock offset below 100 ms. This is operational readiness, not medical certification or a complete media-integrity test. The setup screen explains what blocks Start.
 6. **Connect the subject page.** Use Open subject view or enter the code/participant ID. It waits during setup or when operator/acquisition readiness is unavailable.
 7. **Start session.** Raw recording begins and configuration locks. Advance the synchronization stage after checking the rig.
 8. **Monitor and guide.** Overview shows signals and communication. Protocol workspace has instructions, navigation, gate checks, N-back level, and manual BP entry.
 9. **Pause or intervene.** Messages appear as participant announcements. Safety stages expose a stop action. **Pause stops protocol progression, not raw recording.** Markers identify pauses afterward.
-10. **End explicitly.** Choose **Workspace settings > End session** and confirm. Seeing Thank you does not prove acquisition has finalized.
+10. **End explicitly.** Choose **End session** beside the live session controls (also available in Workspace settings) and confirm. Seeing Thank you does not prove acquisition has finalized.
 11. **Verify and archive.** Wait for agent finalization and manifest synchronization. Export review metadata and copy the complete local session directory to approved storage.
 
 Do not treat reopening a completed session as an uninterrupted continuation of its old raw capture. Use a new acquisition and preserve provenance.
@@ -172,7 +172,11 @@ Do not treat reopening a completed session as an uninterrupted continuation of i
 | 33 | Return to normal and final BP | 60 s |
 | 34 | Completion | Instructor finalizes |
 
-Each clip is followed by **Valence (pleasure), Arousal (activation), Dominance (control)**, individually presented with ten numbered buttons, not sliders. Anchors: Unpleasant/Pleasant, Calm/Excited, Controlled/In control. Keys 1-9 and 0 select 1-10. These are affect ratings, not diagnostic or engagement labels.
+Each clip is followed by three plain-language questions: **How pleasant did you feel?**, **How calm or energized did you feel?**, and **How in control did you feel?** Ten numbered choices remain, with explicit Continue, Back and final submission. Arrow keys, 1-9 and 0 (for 10) work within the rating group. Saved fields remain `valence`, `arousal`, and `dominance`; events record the response UI version. These are affect ratings, not diagnostic or engagement labels. Revised wording requires validation before treating it as equivalent to a standardized instrument.
+
+N-back includes matching and non-matching practice examples before its 20-presentation sequence. Practice is unscored; the first N presentations are warm-up. A scored-onset marker and trial-level results distinguish the phases. One response is accepted per presentation; correctness is not revealed during scored trials.
+
+Participants can use **Previous task / Next task** during eligible running tasks. Confirmation warns about restarting or skipping unfinished work. Navigation is logged as interruption, previous saved responses remain, and revisits create a new attempt. Instructor-controlled gates, paused sessions and finalized sessions cannot be bypassed. Back within the rating form preserves its unsent answers.
 
 Each buffer appears once:
 

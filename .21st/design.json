@@ -9,7 +9,7 @@
   },
   "design": {
     "colorMode": "light",
-    "colors": { "paper": "#f1ece2", "paperLight": "#f9f5ee", "ink": "#1c2936", "muted": "#68727c", "terracotta": "#ad503c", "ready": "#1d7f60" },
+    "colors": { "paper": "#f1ece2", "paperLight": "#f9f5ee", "ink": "#1c2936", "muted": "#535e68", "terracotta": "#ad503c", "ready": "#17694f" },
     "typography": { "display": "Georgia", "operational": "Arial, Helvetica, sans-serif", "direction": "institutional editorial contrast with compact operational labels" },
     "spacing": { "base": 8, "section": "44-68px" },
     "radius": { "controls": "0px", "surfaces": "0px" },

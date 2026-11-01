@@ -30,6 +30,8 @@ export function SubjectPortal() {
   const [error,setError] = useState("");
   const [connecting,setConnecting] = useState(false);
   const [audioEnabled,setAudioEnabled] = useState(true);
+  const [moving,setMoving] = useState(false);
+  const movementPending = useRef(false);
   const activeCode = useRef("");
 
   const acceptSnapshot = useCallback((next:SubjectSnapshot) => {
@@ -89,7 +91,13 @@ export function SubjectPortal() {
   },[acceptSnapshot,code]);
 
   useEffect(() => { if(!code)return; const first=window.setTimeout(refresh,0); const id=window.setInterval(refresh,850); return()=>{clearTimeout(first);clearInterval(id)}; },[code,refresh]);
-  const act = useCallback(async (action:string,payload:Record<string,unknown>={}) => { if(!code)return;const requestedCode=code;const next=await sessionRequest(requestedCode,action,payload);if(activeCode.current===requestedCode)acceptSnapshot(next); },[acceptSnapshot,code]);
+  const act = useCallback(async (action:string,payload:Record<string,unknown>={}) => {
+    if(!code)return;
+    const requestedCode=code;
+    const next=await sessionRequest(requestedCode,action,payload);
+    if(activeCode.current===requestedCode)acceptSnapshot(next);
+    if(["rating","taskComplete"].includes(action)&&next.step?.id===payload.expectedStepId)throw new Error("The session paused or changed before saving. Retry when the instructor resumes.");
+  },[acceptSnapshot,code]);
   useEffect(()=>{if(!code||snapshot?.status==="complete"||snapshot?.status==="aborted")return;const requestedCode=code;const beat=()=>sessionRequest(requestedCode,"subjectHeartbeat").then(next=>{if(activeCode.current===requestedCode)acceptSnapshot(next)}).catch(()=>undefined);const first=window.setTimeout(beat,0);const id=window.setInterval(beat,5000);return()=>{clearTimeout(first);clearInterval(id)}},[acceptSnapshot,code,snapshot?.status]);
   useEffect(()=>{
     if(!snapshot||!["complete","aborted"].includes(snapshot.status))return;
@@ -120,11 +128,25 @@ export function SubjectPortal() {
   if (snapshot.status === "setup" || !snapshot.operatorConnected || !snapshot.acquisitionReady) return <SubjectFrame code={snapshot.code} progress={progress} label="Study preparation" title={<>Please wait.<br /><i>We will begin shortly.</i></>} description="There is nothing you need to do yet." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
 
   const presentation = subjectPresentation(step);
-  return <SubjectFrame code={snapshot.code} progress={progress} label={presentation.label} title={presentation.title} description={step.subjectPrompt || presentation.description} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}>
+  const move = async (direction:number) => {
+    if (movementPending.current || !window.confirm(direction < 0 ? "Go back? The previous task will restart. Saved responses remain in the study record; unfinished responses on this screen will be lost." : "Go to the next task? The unfinished part of this task will be marked as skipped, not completed.")) return;
+    movementPending.current=true;setMoving(true);
+    try { await act("subjectNavigate",{direction,expectedStepId:step.id,expectedStepStartedAt:snapshot.stepStartedAt,expectedAttempt:snapshot.attempt});setError(""); }
+    catch(reason){setError(reason instanceof Error ? reason.message : "Could not change tasks. Try again.");}
+    finally {movementPending.current=false;setMoving(false);}
+  };
+  return <SubjectFrame code={snapshot.code} progress={progress} label={presentation.label} title={presentation.title} description={step.type === "nback" ? `Compare each square with the one ${snapshot.nbackLevel} ${snapshot.nbackLevel===1?"step":"steps"} earlier. Try the examples before you begin.` : step.subjectPrompt || presentation.description} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}>
+    {error ? <p className="subject-request-error" role="alert">{error} Your task has not been discarded.</p> : null}
     {snapshot.status === "paused" ? <div className="subject-overlay"><p>{snapshot.announcement?.text || "Please wait a moment."}</p><button className="paper-button" onClick={changeSession}>Change session</button></div> : null}
     {snapshot.status !== "paused" && snapshot.announcement ? <div className="subject-overlay announcement" role="alert"><p>{snapshot.announcement.text}</p><button className="paper-button" onClick={()=>act("ack")}>Understood</button></div> : null}
     {step.safety && snapshot.status === "running" ? <button className="safety-stop" onClick={()=>act("pause",{reason:"Subject requested a stop",source:"subject"})}>I need to stop</button> : null}
     <div className={`live-subject-task task-${step.type}`}><StepView key={`${step.id}-${snapshot.attempt}`} step={step} snapshot={snapshot} act={act} audioEnabled={audioEnabled} /></div>
+    <nav className="subject-task-navigation" aria-label="Task navigation">
+      <button disabled={moving || !snapshot.canGoBack || Boolean(snapshot.announcement)} onClick={()=>void move(-1)}>Previous task</button>
+      <button disabled={moving || !snapshot.canGoNext || Boolean(snapshot.announcement)} onClick={()=>void move(1)}>Next task</button>
+      {step.type === "gate" || step.type === "setup" ? <small>The instructor will continue when checks are complete.</small> : null}
+      {!snapshot.canGoNext && step.type !== "gate" && step.type !== "setup" ? <small>Finish this activity. The instructor will end the session.</small> : null}
+    </nav>
   </SubjectFrame>;
 }
 
@@ -150,13 +172,14 @@ function subjectPresentation(step:SubjectStep) {
   return {label:"Current task",title:<>A moment<br/><i>of attention.</i></>,description:"Follow the instruction shown on the screen."};
 }
 
-function StepView({step,snapshot,act,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(action:string,payload?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean}) {
+function StepView({step,snapshot,act:request,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(action:string,payload?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean}) {
+  const act = useCallback((action:string,payload:Record<string,unknown>={})=>request(action,{...payload,expectedStepId:step.id,expectedStepStartedAt:snapshot.stepStartedAt,expectedAttempt:snapshot.attempt}),[request,step.id,snapshot.stepStartedAt,snapshot.attempt]);
   if (step.type === "setup") return <CenteredInstruction text={step.subjectPrompt} />;
   if (step.type === "clip") return <ClipScreen step={step} src={snapshot.mediaSrc} act={act} audioEnabled={audioEnabled} />;
   if (step.type === "sam") return <RatingScreen step={step} act={act} />;
   if (step.type === "washout") return <WashoutScreen step={step} snapshot={snapshot} act={act} />;
   if (step.type === "stroop") return <StroopTask step={step} act={act} />;
-  if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} act={act} />;
+  if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} active={snapshot.status === "running" && !snapshot.announcement} act={act} />;
   if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} />;
   if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
@@ -222,15 +245,34 @@ function ClipScreen({step,src,act,audioEnabled}:{step:SubjectStep;src:string;act
 }
 
 const DIMS = [
-  {key:"valence",prompt:"Valence (pleasure)",lo:"Unpleasant",hi:"Pleasant"},
-  {key:"arousal",prompt:"Arousal (activation)",lo:"Calm",hi:"Excited"},
-  {key:"dominance",prompt:"Dominance (control)",lo:"Controlled",hi:"In control"},
+  {key:"valence",prompt:"How pleasant did you feel?",help:"Think about how you felt during the activity you just finished.",lo:"Very unpleasant",hi:"Very pleasant"},
+  {key:"arousal",prompt:"How calm or energized did you feel?",help:"Choose how quiet or activated you felt, whether the feeling was pleasant or unpleasant.",lo:"Very calm",hi:"Very energized"},
+  {key:"dominance",prompt:"How in control did you feel?",help:"Choose how much you felt in control of your experience, rather than overwhelmed by it.",lo:"Not in control",hi:"Fully in control"},
 ] as const;
 function RatingScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [stage,setStage]=useState(0); const values=useRef([5,5,5]); const dim=DIMS[stage];
-  const choose=(value:number)=>{values.current[stage]=value;if(stage<2)window.setTimeout(()=>setStage(stage+1),180);else act("rating",{expectedStepId:step.id,valence:values.current[0],arousal:values.current[1],dominance:value});};
-  useEffect(()=>{const key=(event:KeyboardEvent)=>{const value=event.key==="0"?10:Number(event.key);if(value>=1&&value<=10)choose(value)};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key)});
-  return <section className="rating-screen subject-enter"><p className="rating-count">{stage+1} / 3</p><h1>{dim.prompt}</h1><div className="rating-options" role="radiogroup" aria-label={`${dim.prompt}, ${dim.lo} to ${dim.hi}`}>{Array.from({length:10},(_,index)=>index+1).map(value=><button key={value} role="radio" aria-checked="false" aria-label={`${value} of 10${value===1?`, ${dim.lo}`:value===10?`, ${dim.hi}`:""}`} onClick={()=>choose(value)}>{value}</button>)}</div><div className="rating-anchors"><span>{dim.lo}</span><span>{dim.hi}</span></div></section>;
+  const [stage,setStage]=useState(0);
+  const [values,setValues]=useState<Array<number|null>>([null,null,null]);
+  const [saving,setSaving]=useState(false);const [error,setError]=useState("");const pending=useRef(false);
+  const heading=useRef<HTMLHeadingElement>(null);const dim=DIMS[stage];
+  const choose=(value:number)=>{if(!pending.current)setValues(old=>old.map((v,i)=>i===stage?value:v));};
+  useEffect(()=>{heading.current?.focus();},[stage]);
+  const submit=async()=>{
+    if(pending.current || values[stage] == null)return;
+    if(stage<2){setStage(stage+1);return;}
+    pending.current=true;setSaving(true);setError("");
+    try{await act("rating",{expectedStepId:step.id,valence:values[0],arousal:values[1],dominance:values[2]});}
+    catch{setError("Your answers are still here. Check the connection and select Submit responses again.");}
+    finally{pending.current=false;setSaving(false);}
+  };
+  return <section className="rating-screen subject-enter"><p className="rating-count">Question {stage+1} of 3</p><h1 ref={heading} tabIndex={-1} id="rating-title">{dim.prompt}</h1><p>{dim.help}</p><div className="rating-options" role="radiogroup" tabIndex={-1} aria-labelledby="rating-title" onKeyDown={event=>{
+    if(saving)return;
+    const numeric=event.key==="0"?10:Number(event.key);
+    let value=Number.isInteger(numeric)&&numeric>=1&&numeric<=10?numeric:null;
+    if(["ArrowRight","ArrowDown"].includes(event.key))value=(values[stage]??0)%10+1;
+    if(["ArrowLeft","ArrowUp"].includes(event.key))value=((values[stage]??2)+8)%10+1;
+    if(event.key==="Home")value=1;if(event.key==="End")value=10;
+    if(value!==null){event.preventDefault();choose(value);event.currentTarget.querySelectorAll<HTMLButtonElement>('button')[value-1]?.focus();}
+  }}>{Array.from({length:10},(_,index)=>index+1).map(value=><button key={value} role="radio" disabled={saving} tabIndex={(values[stage]??1)===value?0:-1} aria-checked={values[stage]===value} aria-label={`${value} of 10${value===1?`, ${dim.lo}`:value===10?`, ${dim.hi}`:""}`} onClick={()=>choose(value)}>{value}</button>)}</div><div className="rating-anchors"><span>1 · {dim.lo}</span><span>10 · {dim.hi}</span></div><p className="rating-keyboard-help">Choose a number, then continue. Keyboard: arrow keys or 1–9; 0 selects 10.</p><div className="subject-response-actions"><button className="paper-button" disabled={stage===0||saving} onClick={()=>setStage(stage-1)}>Back</button><button className="paper-button" disabled={values[stage]===null||saving} onClick={()=>void submit()}>{saving?"Saving…":stage===2?"Submit responses":"Continue"}</button></div>{error?<p role="alert">{error}</p>:null}</section>;
 }
 
 const COLOURS = [{name:"Red",hex:"#b83232"},{name:"Blue",hex:"#245fa9"},{name:"Green",hex:"#34743b"},{name:"Yellow",hex:"#d3a522"},{name:"Purple",hex:"#76509a"},{name:"Orange",hex:"#c66728"}];
@@ -243,12 +285,50 @@ function StroopTask({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,
 }
 function makeStimulus(){const word=COLOURS[Math.floor(Math.random()*COLOURS.length)];let ink=COLOURS[Math.floor(Math.random()*COLOURS.length)];if(Math.random()>.35)while(ink.name===word.name)ink=COLOURS[Math.floor(Math.random()*COLOURS.length)];return{word:word.name.toUpperCase(),ink:ink.name,hex:ink.hex}}
 
-function NBackTask({step,level,act}:{step:SubjectStep;level:number;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [started,setStarted]=useState(false);const [lit,setLit]=useState<number|null>(null);const sequence=useRef<number[]>([]);const index=useRef(0);const matches=useRef(0);const presses=useRef(0);const target=useRef(false);const ended=useRef(false);
-  useEffect(()=>{if(!started)return;const next=()=>{if(index.current>=20){if(!ended.current){ended.current=true;act("taskComplete",{expectedStepId:step.id,eventType:"nback_complete",label:"N-back completed",metadata:{level,trials:20,matches:matches.current,responses:presses.current}})}return}let pos=Math.floor(Math.random()*9);if(index.current>=level&&Math.random()<.3)pos=sequence.current[index.current-level];sequence.current.push(pos);target.current=index.current>=level&&pos===sequence.current[index.current-level];setLit(pos);window.setTimeout(()=>setLit(null),800);index.current+=1};next();const id=window.setInterval(next,1100);return()=>clearInterval(id)},[act,level,started,step.id]);
-  const press=()=>{if(lit===null)return;presses.current+=1;if(target.current)matches.current+=1};
-  if(!started)return <section className="subject-center"><h1>{step.subjectPrompt}</h1><button className="paper-button" onClick={()=>setStarted(true)}>Begin</button></section>;
-  return <section className="task-screen"><div className="nback-grid">{Array.from({length:9},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" onClick={press}>Match</button></section>;
+function NBackTask({step,level:configuredLevel,active,act}:{step:SubjectStep;level:number;active:boolean;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
+  const [level]=useState(configuredLevel);
+  const [started,setStarted]=useState(false);const [lit,setLit]=useState<number|null>(null);
+  const [trial,setTrial]=useState(0);const [responded,setResponded]=useState(false);
+  const [practice,setPractice]=useState(0);const [feedback,setFeedback]=useState("");
+  const [finished,setFinished]=useState(false);const [error,setError]=useState("");
+  const sequence=useRef<number[]>([]);const onset=useRef(0);const response=useRef<number|null>(null);
+  const results=useRef<Array<{position:number;target:boolean;response:boolean;rtMs:number|null;warmup:boolean}>>([]);
+  const saving=useRef(false);
+  const finish=useCallback(async()=>{
+    if(saving.current)return;saving.current=true;setError("");
+    const scored=results.current.filter(r=>!r.warmup);
+    try{await act("taskComplete",{expectedStepId:step.id,eventType:"nback_complete",label:"N-back completed",metadata:{level,trials:20,scoredTrials:scored.length,practiceScored:false,hits:scored.filter(r=>r.target&&r.response).length,misses:scored.filter(r=>r.target&&!r.response).length,falseAlarms:scored.filter(r=>!r.target&&r.response).length,correctRejections:scored.filter(r=>!r.target&&!r.response).length,trialResults:results.current}});}
+    catch{setError("Results are still here. Check your connection, then retry saving.");}
+    finally{saving.current=false;}
+  },[act,level,step.id]);
+  useEffect(()=>{
+    if(!started||!active||finished)return;
+    if(trial>=20){const done=window.setTimeout(()=>{setFinished(true);void finish();},0);return()=>clearTimeout(done);}
+    if(sequence.current[trial]===undefined){let pos=Math.floor(Math.random()*9);if(trial>=level&&Math.random()<.3)pos=sequence.current[trial-level];sequence.current[trial]=pos;}
+    const show=window.setTimeout(()=>{setLit(sequence.current[trial]);setResponded(false);response.current=null;onset.current=performance.now();},0);
+    const hide=window.setTimeout(()=>setLit(null),800);
+    const next=window.setTimeout(()=>{
+      results.current[trial]={position:sequence.current[trial],target:trial>=level&&sequence.current[trial]===sequence.current[trial-level],response:response.current!==null,rtMs:response.current,warmup:trial<level};
+      setTrial(trial+1);
+    },1100);
+    return()=>{clearTimeout(show);clearTimeout(hide);clearTimeout(next);};
+  },[active,finish,finished,level,started,trial]);
+  const press=useCallback(()=>{if(!active||!started||finished||response.current!==null)return;response.current=Math.round(performance.now()-onset.current);setResponded(true);},[active,started,finished]);
+  useEffect(()=>{if(!started||finished)return;const key=(e:KeyboardEvent)=>{if(e.code==="Space"&&!e.repeat&&!(e.target instanceof HTMLButtonElement)){e.preventDefault();press();}};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);},[press,started,finished]);
+  if(finished)return <section className="subject-center"><h1>Task finished.</h1><p role="status">{error||"Saving your responses…"}</p>{error?<button className="paper-button" onClick={()=>void finish()}>Retry saving</button>:null}</section>;
+  if(!started){
+    const example=[0,...Array.from({length:level-1},(_,i)=>i+1),practice===1||practice===3?8:0];
+    return <section className="nback-intro">
+      <h2>Remember the position</h2><p>A square lights up in the grid. Press <strong>Match</strong> only when it is in the same place as <strong>{level} {level===1?"step":"steps"} earlier</strong>. Otherwise, do nothing and watch the next square.</p>
+      <p>Watch the first {level} {level===1?"square":"squares"} without responding. Each square appears briefly; you can respond until the next one appears.</p>
+      <h3>Practice example · not scored</h3><div className="nback-example">{example.map((position,i)=><div key={i}><span>{i===level?"Now":`${level-i} ${level-i===1?"step":"steps"} ago`}</span><div className="nback-mini" aria-label={`Square in position ${position+1}`}>{Array.from({length:9},(_,cell)=><i key={cell} className={cell===position?"lit":""}/>)}</div></div>)}</div>
+      <p>Does “Now” match the position {level} {level===1?"step":"steps"} ago?</p>
+      <div className="subject-response-actions"><button className="paper-button" onClick={()=>{setFeedback(practice===1?"Not this time. The positions differ, so wait for the next square.":"Correct. These positions match.");if(practice!==1)setPractice(2);}}>Match</button><button className="paper-button" onClick={()=>{setFeedback(practice===1?"Correct. During the real task, simply wait when they differ.":"Compare the first and last grids. They are the same, so press Match.");if(practice===1)setPractice(3);}}>No match: wait</button></div>
+      <p role="status">{feedback}</p>{practice===2?<button className="paper-button" onClick={()=>{setPractice(1);setFeedback("");}}>Try a different example</button>:null}{practice===3?<button className="paper-button" disabled={!active} onClick={()=>{void act("log",{eventType:"nback_scored_onset",level}).then(()=>setStarted(true)).catch(()=>setFeedback("Could not start. Check the connection and try again."));}}>Begin 20-square task</button>:null}
+      <p className="rating-keyboard-help">In the task, click Match or press Space once. No correctness feedback is shown during the recorded task.</p>
+    </section>;
+  }
+  return <section className="task-screen nback-running"><p>Square {Math.min(trial+1,20)} of 20</p><p>Match the position from <strong>{level} {level===1?"step":"steps"} ago</strong>.</p><div className="nback-grid" role="img" aria-label={lit===null?"Between squares":`Square in position ${lit+1}`} >{Array.from({length:9},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" disabled={!active||responded} onClick={press} onKeyDown={e=>{if(e.repeat)e.preventDefault();}}>Match</button><p role="status">{responded?"Response received":trial<level?"Watch and remember. There is no earlier square to compare yet.":"Different position? Wait for the next square."}</p><small>Click Match or press Space.</small></section>;
 }
 
 function BreathingScreen({step,snapshot,act,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;src:string;audioEnabled:boolean}) {
