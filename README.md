@@ -8,6 +8,64 @@ Meridian is a **research collection platform**, not an implemented diagnostic or
 
 This README describes the active editorial interface and **v8 self-guided protocol**. Existing v7 sessions retain instructor-guided recovery checks. Read the [full documentation PDF](docs/meridian_portal_documentation.pdf) or its [editable LaTeX source](docs/meridian_portal_documentation.tex) for workflow-by-workflow cognitive rationale, data definitions, and proposed task-specific modeling pipelines. Older console components remain in the repository but are not rendered by the current instructor route.
 
+## Project credits
+
+| Team member | Name | Student ID |
+| --- | --- | --- |
+| Member A | Aarush Gupta | 2024AIB1174 |
+| Member B | Arjun Aggarwal | 2024AIB1289 |
+
+Member A leads the submission documentation, GitHub collaboration materials, and evaluator setup instructions.
+
+## Submission materials
+
+| Material | Location |
+| --- | --- |
+| Presentation (PPT) | Link pending |
+| Demonstration video | Link pending |
+| Workflow and design report | [Portal documentation (PDF)](docs/meridian_portal_documentation.pdf) |
+| Implementation history | [GitHub commits](https://github.com/AarushIITRPR/Interface/commits/main/) |
+
+## Evaluator walkthrough
+
+Use one laptop for this walkthrough. The web server and the recorder run in separate terminals. You can inspect both portals and the [standalone memory-task demo](http://localhost:3000/nback-practice) with only the web server running.
+
+1. **Launch the web application.** Follow [Start the website](#start-the-website) for the exact clone, install and launch commands for your OS. Leave that terminal running. Open the [instructor portal](http://localhost:3000/instructor), enter an unused numeric test participant ID, and select **Continue**. You should see **Recording setup**.
+2. **Pair a subject browser.** In **Connect the subject computer**, expand **Test both portals on this computer instead** and select **Create local test invitation**. Copy the invitation into a second browser profile or private window on the same laptop. Select **Pair this subject computer**. Keep both windows open using the same hostname and port.
+3. **Review consent.** In the subject window, read the selected sensor and research-use information. To proceed with this test session, select all three statements and **Give consent**. The instructor should now see **Wait for the subject recorder**.
+4. **Connect simulated sensors.** Open a second terminal at the cloned repository root. Follow the [manual acquisition setup](#start-the-acquisition-agent) for your OS to create the Python environment. In the instructor's **Manual connection (advanced)** section, find the session code and private token. From the **acquisition_agent** directory, run the command below for your OS, replacing both placeholders with the actual values. This route uses the Python agent directly; you do not need to launch the Windows installer as well.
+
+   **Windows PowerShell**
+   ```powershell
+   .\.venv\Scripts\python.exe -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --simulate-all --output ./recordings
+   ```
+   **Linux / macOS**
+   ```bash
+   .venv/bin/python -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --simulate-all --output ./recordings
+   ```
+5. **Record a short session.** Leave the agent running. When required streams are ready and the readiness check passes, select **Start recording**, then **Begin first activity** on the subject display. On the baseline screen, the timer should stay at its full duration until you choose **Start task**. In the instructor's **Live study** view, confirm that sensor reports are arriving. Send a short instruction and acknowledge it on the subject display.
+6. **Verify the result.** For a short evaluation, select **End session** in the instructor portal and confirm. Leave the recorder running until it finalizes. Submit or skip the optional feedback on the subject display. In **Recording review**, open the session ledger and export the JSON record. The agent prints the local session directory under `acquisition_agent/recordings/`; inspect its `manifest.json`. Simulation demonstrates the workflow and file reporting. To evaluate actual camera and microphone files, use the [physical sensor setup](#supported-sensors).
+
+For a repeatable software check, run the [automated tests](#verification). If a control stays disabled, see [Troubleshooting](#troubleshooting).
+
+## Repository guide
+
+| Path | What to inspect |
+| --- | --- |
+| [app/instructor](app/instructor/) | Instructor entry, recording setup, live monitoring, protocol and review. The active workspace is `editorial-operator-console.tsx`. |
+| [app/subject](app/subject/) | Consent, participant instructions, timers, video playback, ratings, cognitive tasks and feedback. |
+| [app/api](app/api/) and [lib](lib/) | Session and recorder APIs, authoritative state transitions, protocol assignment and timing rules. |
+| [acquisition_agent](acquisition_agent/) | Python recorder, device detection, simulated inputs and recording writers. |
+| [public/protocol-media](public/protocol-media/) | Bundled clips used by the subject portal. |
+| [tests](tests/) | Session-state, interface, playback and browser checks. |
+| [docs](docs/) and [engagement_model](engagement_model/) | Portal documentation, research material and the separate modeling project. |
+
+### GitHub collaboration
+
+For a change, branch from the current `main`, keep the implementation and its tests together, and open a pull request describing the operator or participant workflow affected. Include the test command and result. Keep session tokens, recordings and participant data out of Git. This describes the contribution workflow; the commit history is the record of work already submitted.
+
+Examples of delivered changes include [subject workstation pairing](https://github.com/AarushIITRPR/Interface/commit/f63c591), [consent, paced tasks and video playback](https://github.com/AarushIITRPR/Interface/commit/8447f8c), and [rating-screen readability](https://github.com/AarushIITRPR/Interface/commit/d811671).
+
 ## Architecture and stack
 
 ```text
@@ -60,7 +118,7 @@ npm.cmd ci
 npm.cmd run dev -- --host 127.0.0.1 --port 3000
 ```
 
-For an existing checkout, open the directory containing `package.json` and run the last command. `npm.cmd` avoids PowerShell's `npm.ps1` execution-policy issue without changing machine policy.
+For an existing checkout, open the directory containing `package.json`. Run `npm.cmd ci` after changing branches or pulling a new lockfile, then start the server. `npm.cmd` avoids PowerShell's `npm.ps1` execution-policy issue without changing machine policy.
 
 ### Linux / macOS
 
@@ -95,7 +153,7 @@ Run this on the **computer connected to the sensors**, in a second terminal. It 
 
 ### Windows: one-time installation
 
-From the repository root:
+For the **manual or simulated agent**, run the commands below from the repository root. The Windows installer described afterward is an alternative for a physical lab station.
 
 ```powershell
 cd acquisition_agent
@@ -127,7 +185,9 @@ Command Prompt, from the same `acquisition_agent` folder:
 
 Explicitly using the venv interpreter avoids both activation-policy issues and accidentally running another Python. `No module named meridian_agent` usually means the working directory or interpreter is wrong.
 
-### Linux
+### Linux / macOS manual agent
+
+From the repository root:
 
 ```bash
 cd acquisition_agent
@@ -145,15 +205,15 @@ Saved portal assignments override command-line sensor defaults. Use Recording se
 ## Run a session
 
 1. **Enter a numeric participant ID.** Contextual resume appears if an active session is found for that participant. A participant ID is not the generated session code.
-2. **Prepare recording.** Follow the four-step guide in Recording setup. Pair the subject browser first, connect the recorder on that computer, verify devices and start. Wait for Connected.
+2. **Pair and obtain consent.** In Recording setup, prepare the subject invitation. Open it on the subject computer, pair that browser, and let the participant review and submit their consent. Then connect the recorder on the computer attached to the sensors.
 3. **Assign devices.** Select Auto-detect or a specific device. A checkbox means **required for readiness**, not enabled. To disable a sensor, uncheck it **and** choose **Not assigned**. Use distinct physical indices for face and thermal cameras.
 4. **Save device choices.** Selections are local drafts until saved. Refresh devices if hardware changed, then rerun the readiness check.
 5. **Run readiness check.** After a 10-second observation interval, the agent checks required-stream quality, a JSON write/read test, at least 10 GiB free, and estimated server-clock offset below 100 ms. This is operational readiness, not medical certification or a complete media-integrity test. The setup screen explains what blocks Start.
-6. **Connect the subject page.** Use Open subject view or enter the code/participant ID. It waits for recording readiness. Once the acquisition computer reports fresh, usable samples with the saved configuration, Meridian requests the readiness check automatically, even before the participant joins.
+6. **Check the subject display.** Keep the paired subject browser open. After consent, Meridian requests the readiness check when the acquisition computer reports fresh, usable samples with the saved configuration. Adding another recording source brings the participant back to the consent form.
 7. **Start recording.** Once readiness passes, the participant chooses Start recording. Configuration locks; the first activity unlocks after the agent reports recording. The instructor can still start explicitly.
 8. **Monitor if needed.** Start opens Live study whether the instructor or participant started the session. Its handoff tells you who acts next. Live study shows signals and communication. Protocol workspace has instructions, navigation, gate checks, N-back level, and manual BP entry.
-9. **Pause or intervene.** Messages appear as participant announcements. Safety stages expose a stop action. **Pause stops protocol progression, not raw recording.** Markers identify pauses afterward.
-10. **Finish or stop.** In v8 the final recovery closes the session and requests recorder finalization. The participant can end early; the instructor can also intervene. Seeing Thank you does not prove acquisition has finalized.
+9. **Pause or intervene.** Messages appear as participant announcements. Safety stages expose a stop action. **Pause holds the protocol while raw recording continues.** Markers identify pauses afterward.
+10. **Finish or stop.** The default protocol closes the session after the final recovery. Either portal can end early. Keep the agent running until it reports that the manifest synchronized. The participant can then submit or skip feedback.
 11. **Verify and archive.** Wait for agent finalization and manifest synchronization. Export review metadata and copy the complete local session directory to approved storage.
 
 Do not treat reopening a completed session as an uninterrupted continuation of its old raw capture. Use a new acquisition and preserve provenance.
@@ -297,7 +357,7 @@ npm.cmd run lint
 npm.cmd test
 ```
 
-`npm test` builds and checks rendered HTML/source assertions. Some assertions inspect the older instructor component, so passing is **not** end-to-end certification of the active console.
+`npm test` builds and checks rendered HTML/source assertions. The suite also checks consent gating, timed starts, session transitions, Stroop colour balance and seekable video responses. These checks run independently of physical hardware.
 
 From `acquisition_agent`:
 
