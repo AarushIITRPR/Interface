@@ -34,6 +34,8 @@ Member A leads the submission documentation, GitHub collaboration materials, and
 3. [User evaluation 3](https://youtu.be/WiWRewQwbkc?si=ooakhyFuJwYsXVMW)
 4. [User evaluation 4](https://youtu.be/2groqSur4pQ?si=V7gFkAp0GJ-VcVJL)
 
+[Nielsen’s heuristic overview](https://youtu.be/5HEk-oA2Vig)
+
 ## Evaluator walkthrough
 
 Use one laptop for this walkthrough. The web server and the recorder run in separate terminals. You can inspect both portals and the [standalone memory-task demo](http://localhost:3000/nback-practice) with only the web server running.
