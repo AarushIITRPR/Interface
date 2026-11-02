@@ -14,18 +14,19 @@ The supplied Meridian redesign archive is the authoritative visual and informati
 
 ## Instructor portal
 
-- Use one workspace shell with Overview, Protocol, and Recording review.
+- Use one workspace shell with Recording setup, Live study, Protocol, and Recording review.
 - Use the left sidebar as the only workspace navigation. Do not duplicate it with horizontal tabs.
 - Do not place participant switching inside the workspace navigation.
 - Keep participant, current stage, subject connection, required recording health, interventions, and genuine live sensor input visible.
 - Keep the operational ledger in Recording review rather than duplicating it on Study overview.
-- Keep device assignment, preflight, acquisition command, token dependent setup, and destructive actions inside Workspace settings.
+- Keep device assignment, preflight, acquisition command, token dependent setup, and destructive actions inside the sequential Recording setup tab.
 - Never replace real state with archive demo values.
 - Make healthy streams quiet and missing streams clearly actionable.
 
 ## Subject portal
 
 - Use the archive split stage composition.
+- Pair the subject browser once before data collection; install and open the native recorder on that computer. Keep workstation setup controls off the measured tasks.
 - Show only the present task, its short instruction, its interaction, and restrained session framing.
 - Preserve announcements, safety stop, session switching, audio control, task timers, responses, and automatic transitions.
 - Never reveal target emotion or internal sensor state.

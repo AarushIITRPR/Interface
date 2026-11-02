@@ -1,3 +1,4 @@
+import {allowedSubject} from "@/lib/subject-station-access";
 import { getOperatorUser } from "@/app/operator-auth";
 import { createSession, getLatestActiveSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
 
@@ -12,30 +13,38 @@ export async function GET(request: Request) {
     return Response.json({ sessions: await listSessions() });
   }
   const participantId = Number(url.searchParams.get("participantId"));
+  if (!subjectView && Number.isSafeInteger(participantId) && participantId>0) {
+    if (!operator) return unauthorized();
+    const existing=await getLatestActiveSessionForParticipant(participantId);
+    return Response.json({active:existing?{code:existing.code}:null});
+  }
   if (subjectView && Number.isSafeInteger(participantId) && participantId > 0) {
     const active = await getLatestActiveSessionForParticipant(participantId);
+    if(active && !await allowedSubject(request,active.code))return wrongStation();
     return active ? Response.json({session:toSubjectSnapshot(active)}) : Response.json({error:"No active session for this participant."},{status:404});
   }
   const code = url.searchParams.get("code")?.trim().toUpperCase() ?? "";
   if (!code) return Response.json({ error:"Session code is required." },{status:400});
   if (!subjectView && !operator) return unauthorized();
+  if(subjectView && !await allowedSubject(request,code))return wrongStation();
   const session = await getSession(code);
   return session ? Response.json({ session:subjectView ? toSubjectSnapshot(session) : session }) : Response.json({ error:"Session not found." },{status:404});
 }
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { action?:string; code?:string; participantId?:number; operator?:string; view?:string; payload?:Record<string,unknown> };
+    const body = await request.json() as { action?:string; code?:string; participantId?:number; operator?:string; protocolVersion?:string; view?:string; payload?:Record<string,unknown> };
     const subjectView = body.view === "subject";
     const operator = subjectView ? null : await getOperatorUser();
     if (body.action === "create") {
       if (!operator) return unauthorized();
       if (!body.participantId || body.participantId < 1) return Response.json({error:"Participant ID is required."},{status:400});
-      return Response.json({ session:await createSession(body.participantId,body.operator ?? "Operator") },{status:201});
+      return Response.json({ session:await createSession(body.participantId,body.operator ?? "Operator",body.protocolVersion) },{status:201});
     }
     if (!body.code || !body.action) return Response.json({error:"Session code and action are required."},{status:400});
     if (subjectView && !isSubjectAction(body.action,body.payload ?? {})) return unauthorized();
     if (!subjectView && !operator) return unauthorized();
+    if(subjectView && !await allowedSubject(request,body.code))return wrongStation();
     const payload = subjectView ? sanitizeSubjectPayload(body.action,body.payload ?? {}) : body.payload ?? {};
     const session = await mutateSession(body.code,body.action,payload);
     return session ? Response.json({session:subjectView ? toSubjectSnapshot(session) : session}) : Response.json({error:"Session not found."},{status:404});
@@ -44,7 +53,7 @@ export async function POST(request: Request) {
   }
 }
 
-const SUBJECT_ACTIONS = new Set(["ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","subjectNavigate"]);
+const SUBJECT_ACTIONS = new Set(["subjectBeginMovement","subjectStart","subjectSkip","subjectEnd","ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","subjectNavigate"]);
 
 function isSubjectAction(action:string,payload:Record<string,unknown>) {
   if (!SUBJECT_ACTIONS.has(action)) return false;
@@ -53,10 +62,11 @@ function isSubjectAction(action:string,payload:Record<string,unknown>) {
 }
 
 function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): Record<string,unknown> {
-  return {...subjectPayload(action,payload), expectedStepStartedAt:String(payload.expectedStepStartedAt ?? "").slice(0,40), expectedAttempt:payload.expectedAttempt == null ? undefined : Number(payload.expectedAttempt)};
+  return {...subjectPayload(action,payload), subjectRequest:true, expectedStepStartedAt:String(payload.expectedStepStartedAt ?? "").slice(0,40), expectedAttempt:payload.expectedAttempt == null ? undefined : Number(payload.expectedAttempt)};
 }
 function subjectPayload(action:string,payload:Record<string,unknown>): Record<string,unknown> {
   const expectedStepId = String(payload.expectedStepId ?? "").slice(0,80);
+  if (action === "subjectSkip" || action==="subjectBeginMovement") return {expectedStepId};
   if (action === "subjectNavigate") return {expectedStepId,direction:Number(payload.direction)};
   if (action === "subjectHeartbeat") return {};
   if (action === "ack") return {};
@@ -67,8 +77,9 @@ function subjectPayload(action:string,payload:Record<string,unknown>): Record<st
   if (action === "taskComplete") return {expectedStepId,eventType:String(payload.eventType ?? "task_complete").slice(0,80),label:String(payload.label ?? "Task completed").slice(0,120),metadata:payload.metadata ?? {}};
   if (action === "log" && payload.eventType === "nback_scored_onset") return {expectedStepId,eventType:"nback_scored_onset",label:"N-back scored sequence started after practice",source:"subject",metadata:{level:Math.max(1,Math.min(3,Number(payload.level)||1)),practiceScored:false}};
   const eventType = ["media_onset","media_offset","media_error"].includes(String(payload.eventType)) ? String(payload.eventType) : "subject_event";
-  return {eventType,label:eventType === "media_onset" ? "Video started" : eventType === "media_offset" ? "Video completed" : eventType === "media_error" ? "Media failed to load" : "Subject event",severity:eventType === "media_error" ? "error" : "info",source:"subject"};
+  return {expectedStepId,eventType,label:eventType === "media_onset" ? "Video started" : eventType === "media_offset" ? "Video completed" : eventType === "media_error" ? "Media failed to load" : "Subject event",severity:eventType === "media_error" ? "error" : "info",source:"subject"};
 }
 
 function scale(value:unknown) { return Math.max(1,Math.min(10,Math.round(Number(value) || 1))); }
+function wrongStation(){return Response.json({error:"This study is assigned to a different subject browser. Open it on the paired subject computer."},{status:403});}
 function unauthorized() { return Response.json({error:"Instructor authorization is required."},{status:401}); }

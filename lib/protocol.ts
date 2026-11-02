@@ -1,4 +1,4 @@
-import { EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolStep } from "./types";
+import { PROTOCOL_VERSION, EMOTIONS, type Assignment, type BufferKind, type Emotion, type ProtocolStep } from "./types";
 
 const WILLIAMS6 = [[1,2,6,3,5,4],[2,3,1,4,6,5],[3,4,2,5,1,6],[4,5,3,6,2,1],[5,6,4,1,3,2],[6,1,5,2,4,3]];
 const BUFFER_ORDERS: BufferKind[][] = [
@@ -14,7 +14,7 @@ export function assignFor(raw: number | string): Assignment {
   return { pid, row: row + 1, buf1: buffers[0], buf2: buffers[1], buf3: buffers[2], block1: [order[0],order[1]], block2: [order[2],order[3]], block3: [order[4],order[5]], fullOrder: order };
 }
 
-export function buildPlan(a: Assignment): ProtocolStep[] {
+export function buildPlan(a: Assignment, version: string = PROTOCOL_VERSION): ProtocolStep[] {
   const steps: ProtocolStep[] = [];
   const add = (step: Omit<ProtocolStep,"id"|"index">) => steps.push({ ...step, id:`s${String(steps.length).padStart(2,"0")}-${step.type}${step.emo ? `-${step.emo}` : ""}`, index:steps.length });
   const clip = (emo: Emotion, phase: string) => add({ type:"clip", title:`Emotion clip: ${emo}`, subjectPrompt:"Watch naturally.", operatorScript:"Watch the clip naturally and react however feels natural. There is no right or wrong response.", operatorNote:"Onset and offset are logged automatically.", phase, emo, advance:"media", estimatedSec:12 });
@@ -44,6 +44,14 @@ export function buildPlan(a: Assignment): ProtocolStep[] {
   add({ type:"bodyscan", title:"Guided body scan", subjectPrompt:"Get comfortable. Close your eyes.", operatorScript:"Sit comfortably, close your eyes, and follow the guided audio.", operatorNote:"Four minute guided body scan.", phase:"Relaxation", durationSec:240, advance:"timer", estimatedSec:240 });
   add({ type:"recovery", title:"Return to normal", subjectPrompt:"Open your eyes when you are ready.", operatorScript:"Open your eyes whenever you are ready.", operatorNote:"Final eyes-open return and BP.", phase:"Relaxation", durationSec:60, bp:true, bpLabel:"Relaxed final", advance:"timer", estimatedSec:60 });
   add({ type:"end", title:"Session complete", subjectPrompt:"Thank you.", operatorScript:"That is everything. Thank you.", operatorNote:"Confirm recorders saved, then export.", phase:"All done", advance:"operator", estimatedSec:15 });
+  if (version === "v8") {
+    for (const step of steps) {
+      if (step.type === "setup") Object.assign(step, {advance:"subject", subjectPrompt:"Sit comfortably, facing the screen. Begin when you are ready.", operatorNote:"The participant begins after required streams report recording."});
+      if (step.type === "gate") Object.assign(step, {advance:"subject", title:"Quiet rest and readiness", subjectPrompt:"Rest quietly. Continue when the timer ends and you feel ready.", operatorScript:"The participant can rest longer before continuing.", operatorNote:"A minimum rest and participant confirmation, not a measured return to baseline."});
+      if (step.type === "conversation") Object.assign(step, {title:"Speaking prompt", subjectPrompt:"Describe a familiar place or hobby aloud, as if telling a friend.", operatorScript:"No interviewer is needed.", operatorNote:"Timed individual speech sample, not a two-person conversation."});
+      if (step.type === "end") Object.assign(step, {advance:"task", operatorNote:"The session closes automatically. Check the acquisition manifest for file results."});
+    }
+  }
   return steps;
 }
 

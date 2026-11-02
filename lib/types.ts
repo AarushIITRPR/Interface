@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = "v7";
+export const PROTOCOL_VERSION = "v8";
 
 export const EMOTIONS = ["happy", "sad", "anger", "fear", "surprise", "disgust"] as const;
 export type Emotion = (typeof EMOTIONS)[number];
@@ -198,7 +198,11 @@ export type SubjectSnapshot = {
   announcement: SessionSnapshot["announcement"];
   nbackLevel: 1 | 2 | 3;
   operatorConnected: boolean;
+  recorderOnline: boolean;
   acquisitionReady: boolean;
+  selfGuided: boolean;
+  canStartRecording: boolean;
+  awaitingMovement: boolean;
   mediaSrc: string;
   canGoBack: boolean;
   canGoNext: boolean;

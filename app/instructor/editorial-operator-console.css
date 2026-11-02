@@ -306,3 +306,50 @@
   .live-subject { height: auto !important; overflow: visible !important; }
   .live-subject-stage { min-height: 600px; }
 }
+.live-subject-field:has(.subject-study-options) { grid-template-rows: minmax(0,1fr) auto; }
+.live-subject-field:has(.subject-study-options) .live-subject-task { overflow:auto; }
+.subject-study-options { width:100%; display:flex; align-items:center; justify-content:flex-end; gap:16px; padding:8px 20px; border-top:1px solid var(--live-line); background:var(--live-paper-light); position:relative; z-index:101; }
+.subject-study-options button { min-height:44px; color:var(--live-muted); text-decoration:underline; padding:6px 10px; }
+.guided-action { display:grid; justify-items:center; align-content:center; gap:12px; height:100%; }
+.guided-action .paper-button { min-height:44px; }
+.live-subject-field::before, .live-subject-field::after { pointer-events:none; }
+.live-subject-field > .guided-action { position:relative; z-index:1; }
+.live-subject { grid-template-columns:minmax(0,1fr); }
+.live-subject-progress { overflow:hidden; }
+.live-subject-copy h1 { overflow-wrap:break-word; line-height:.98; }
+.operator-tools > summary { padding:12px 18px; cursor:pointer; color:var(--live-muted); }
+.subject-recorder { position:relative; z-index:1; max-width:30rem; padding:24px; line-height:1.5; }
+.subject-recorder details,.live-entry-context details { margin-top:18px; }
+.subject-recorder summary,.live-entry-context summary { cursor:pointer; min-height:44px; padding-block:10px; }
+.subject-recorder .wizard-primary,.recorder-pair button.wizard-primary { display:inline-flex; align-items:center; min-height:44px; padding:10px 18px; background:var(--live-ink); color:var(--live-paper-light); }
+.subject-recorder a:not(.wizard-primary),.subject-recorder p button,.live-entry-context details a { text-decoration:underline; }
+.setup-workflow,.recorder-pair { max-width:52rem; margin:0 auto; padding:clamp(28px,5vw,72px); color:var(--live-ink); }
+.recorder-pair { min-height:100vh; background:var(--live-paper-light); }
+.setup-workflow h2,.recorder-pair h1 { font:normal clamp(2rem,4vw,3.4rem)/1.08 Georgia,serif; margin:12px 0 24px; }
+.setup-workflow p,.recorder-pair p { margin:16px 0; line-height:1.55; }
+.setup-workflow button,.setup-workflow summary,.setup-workflow a,.recorder-pair a,.recording-handoff button { min-height:44px; }
+.setup-workflow button,.recording-handoff button { border:1px solid var(--live-line); padding:10px 16px; }
+.setup-workflow .wizard-primary,.recorder-pair .wizard-primary { display:inline-flex; align-items:center; gap:8px; background:var(--live-ink); color:var(--live-paper-light); padding:12px 18px; text-decoration:none; }
+.setup-workflow .wizard-link { border:0; text-decoration:underline; }
+.setup-workflow details { margin:14px 0; border-top:1px solid var(--live-line); }
+.setup-workflow summary { padding:14px 0; cursor:pointer; }
+.setup-workflow pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:.95rem; }
+.setup-workflow input[readonly] { width:100%; padding:10px; }
+.setup-workflow footer { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:32px; border-top:1px solid var(--live-line); }
+.setup-workflow footer details { border:0; margin-left:auto; }
+.setup-streams li { display:flex; flex-wrap:wrap; justify-content:space-between; gap:12px; padding:14px 0; border-bottom:1px solid var(--live-line); }
+.recording-handoff { padding:22px 0; border-bottom:1px solid var(--live-line); }
+.recording-handoff p { margin:8px 0; }
+.recording-handoff label { display:block; padding:6px; }
+.live-subject-task .clip-ready:has(.stimulus-video:not([hidden])) { padding:0; }
+.live-subject-task video[hidden] { display:none; }
+.run-mode { margin:12px 0; color:var(--live-muted); }
+.run-mode summary { cursor:pointer; }
+.live-entry .run-mode label { display:flex; align-items:center; gap:8px; font-size:1rem; text-transform:none; }
+.live-entry .run-mode input { width:20px; height:20px; }
+@media(max-width:650px) {
+  .live-subject .live-subject-copy { min-height:auto; padding:24px 20px; }
+  .live-subject .live-subject-copy h1 { font-size:clamp(2rem,8vw,3rem); }
+  .live-subject .live-subject-stage { grid-template-rows:auto minmax(320px,1fr); }
+  .subject-study-options { flex-wrap:wrap; }
+}

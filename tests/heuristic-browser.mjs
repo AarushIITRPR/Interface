@@ -1,5 +1,6 @@
 // Explicit opt-in integration test. Creates and aborts ONE labelled local test session.
 // No physical sensors or recording agent are started. Never run against production.
+import {enrollStation} from "./enroll-station.mjs";
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mkdir} from 'node:fs/promises';
@@ -13,12 +14,12 @@ const generated=await bundle.generate({format:'es'});await bundle.close();
 const {buildPlan}=await import('data:text/javascript;base64,'+Buffer.from(generated.output[0].code).toString('base64'));
 const browser=await chromium.launch({channel:process.env.BROWSER_CHANNEL||'chrome',headless:true});
 const context=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
-const instructor=await context.newPage();const subject=await context.newPage();
+const instructor=await context.newPage();const subjectContext=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:"reduce"});const subject=await subjectContext.newPage();
 const errors=[];for(const page of [instructor,subject])page.on('pageerror',e=>errors.push(e.message));
-let code,beat;
-async function post(action,payload={},view){const r=await context.request.post(base+'/api/sessions',{data:{action,code,payload,view}});const data=await r.json();assert.ok(r.ok(),data.error);return data.session;}
+let code,beat,second;
+async function post(action,payload={},view){const r=await (view==="subject"?subjectContext:context).request.post(base+'/api/sessions',{data:{action,code,payload,view}});const data=await r.json();assert.ok(r.ok(),data.error);return data.session;}
 async function get(){return (await (await context.request.get(base+'/api/sessions?code='+code)).json()).session;}
-async function until(check,message){for(let i=0;i<300;i++){if(await check())return;await new Promise(r=>setTimeout(r,100));}throw Error(message);}
+async function until(check,message,limit=300){for(let i=0;i<limit;i++){if(await check())return;await new Promise(r=>setTimeout(r,100));}throw Error(message);}
 const output='.local-run/heuristic-verification';await mkdir(output,{recursive:true});
 try{
   const pid=980000+Math.floor(Math.random()*9999);
@@ -30,29 +31,53 @@ try{
   await instructor.waitForTimeout(3000);
   await instructor.getByLabel('Participant ID',{exact:true}).fill(String(pid));
   await instructor.getByRole('button',{name:'RESUME SESSION',exact:true}).click();
-  await instructor.getByRole('button',{name:'PREPARE RECORDING'}).click();
-  const dialog=instructor.getByRole('dialog');await dialog.waitFor();
-  assert.equal(await dialog.getByRole('button',{name:'START SESSION',exact:true}).isDisabled(),true);
-  await until(async()=> (await dialog.locator('pre').last().textContent()).includes(base),'command should use current origin');
-  const close=dialog.getByRole('button',{name:'Close workspace settings'});
-  await close.focus();await instructor.keyboard.press('Shift+Tab');
-  assert.ok(await dialog.evaluate(el=>el.contains(document.activeElement)));
-  for(let i=0;i<45;i++){await instructor.keyboard.press('Tab');assert.ok(await dialog.evaluate(el=>el.contains(document.activeElement)));}
-  await dialog.getByLabel('Face camera device').selectOption('none');
-  await instructor.waitForTimeout(2200);
-  assert.equal(await dialog.getByLabel('Face camera device').inputValue(),'none','polling must preserve unsaved selection');
-  await dialog.getByRole('button',{name:'SAVE DEVICE CHOICES'}).click();
-  await until(async()=> (await get()).deviceConfig.face==='none','device save');
-  await dialog.locator('.live-settings-body').evaluate(el=>{el.scrollTop=0;});
+  const wizard=instructor.getByRole('region',{name:'Recording setup',exact:true});
+  await wizard.getByRole('heading',{name:'Connect the subject computer',exact:true}).waitFor();
+  await instructor.reload();
+  const station=(ctx,data)=>ctx.request.post(base+'/api/station',{data});
+  assert.equal((await station(subjectContext,{action:'ticket',code})).status(),403);
+  const {invite,link}=await enrollStation(instructor,subject);
+  assert.equal(await context.request.get(base+'/recorder-tools/MeridianRecorderSetup.exe').then(r=>r.status()),200);
+  assert.equal(link.searchParams.get("code"),code);
+  const outsider=await browser.newContext();
+  const used=new URLSearchParams(new URL(invite).hash.slice(1)).get('invite');
+  assert.equal((await station(outsider,{action:'enroll',invite:used})).status(),410);
+  assert.equal((await station(outsider,{action:'ticket',code})).status(),403);
+  assert.equal((await outsider.request.post(base+'/api/sessions',{data:{action:'subjectHeartbeat',code,view:'subject'}})).status(),403);
+  await outsider.close();
+  const redeem=()=>context.request.post(base+'/api/recorder-pair',{data:{action:'redeem',code,secret:link.searchParams.get('key')}});
+  assert.equal((await (await redeem()).json()).token,initial.acquisitionToken);
+  assert.equal((await redeem()).status(),410);
   await instructor.screenshot({path:output+'/setup-desktop.png'});
-  await instructor.keyboard.press('Escape');
-  await until(()=>instructor.getByRole('button',{name:'PREPARE RECORDING'}).evaluate(el=>el===document.activeElement),'restore opener focus');
-  console.log('PASS: setup blockers, host-aware command, draft retention, modal containment and focus restoration');
+  console.log('PASS: two-browser enrollment, subject-only installation, assignment-bound ticket and replay rejection');
+  // Only this labelled session receives simulated reports. Never access physical hardware.
+  const headers={}; let isRecording=false, pass=false;
+  const report=async()=>{
+    const session=await get();
+    const response=await context.request.post(base+'/api/acquisition',{headers,data:{action:"heartbeat",code,token:initial.acquisitionToken,
+      agent:{id:"ux-simulation",host:"Simulated recorder",configRevision:session.configRevision,preflightTest:{status:pass?"pass":"running"}},
+      sensors:session.requiredSensors.map(id=>({id,status:isRecording?"recording":"connected",quality:"good",dataDetected:true}))}});
+    assert.ok(response.ok());
+  };
+  await report();clearInterval(beat);beat=setInterval(()=>report().catch(()=>{}),2500);
+  await wizard.getByRole('heading',{name:'Check recording devices'}).waitFor();
+  await wizard.getByText('Change devices',{exact:true}).click();
+  await wizard.getByLabel('Face camera device').selectOption('none');
+  await instructor.waitForTimeout(2200);
+  assert.equal(await wizard.getByLabel('Face camera device').inputValue(),'none');
+  await wizard.getByLabel('Face camera device').selectOption('auto');
+  pass=true;await report();
+  await wizard.getByRole('heading',{name:'Start recording'}).waitFor();
+  await subject.getByRole('button',{name:'Start recording',exact:true}).click();
+  await instructor.getByRole('heading',{name:'Live study',exact:true}).waitFor();
+  await until(async()=> (await get()).status==='running','subject started recording');
+  isRecording=true;await report();
+  await subject.getByRole('button',{name:'Begin first activity'}).click();
+  await until(async()=> (await get()).stepIndex===1,'subject began baseline');
+  console.log('PASS: participant-initiated recording after readiness, no manual setup advance');
 
-  // Explicit test-only override; no claim of hardware or file-quality validation.
-  await post('hardwareGateOverride',{enabled:true});await post('startSession');
   const sam=plan.findIndex(s=>s.type==='sam');
-  for(let i=0;i<sam;i++)await post('navigate',{direction:1});
+  for(let i=1;i<sam;i++)await post('navigate',{direction:1});
   await subject.goto(base+'/subject?session='+code);
   await subject.getByRole('heading',{name:'How pleasant did you feel?'}).waitFor();
   await subject.getByRole('radio',{name:'3 of 10',exact:true}).click();
@@ -82,17 +107,11 @@ try{
   console.log('PASS: plain-language rating, explicit continuation, arrow/numeric keys, correction, failed-save recovery');
 
   const from=await get();
-  subject.once('dialog',d=>d.dismiss());await subject.getByRole('button',{name:'Previous task',exact:true}).click();
+  assert.equal(await subject.getByRole('button',{name:'Previous task',exact:true}).count(),0);
+  assert.equal(await subject.getByRole('button',{name:'Next task',exact:true}).count(),0);
+  await post('subjectNavigate',{direction:-1,expectedStepId:plan[from.stepIndex].id,expectedStepStartedAt:from.stepStartedAt},'subject');
   assert.equal((await get()).stepIndex,from.stepIndex);
-  subject.once('dialog',d=>d.accept());await subject.getByRole('button',{name:'Previous task',exact:true}).click();
-  await until(async()=> (await get()).stepIndex===sam,'subject back synchronized');
-  const revisited=await get();assert.ok(revisited.attempt>1);assert.equal(revisited.ratings.length,1);
-  const stale={expectedStepId:plan[sam].id,expectedStepStartedAt:initial.stepStartedAt,expectedAttempt:1,valence:1,arousal:1,dominance:1};
-  await post('rating',stale,'subject');assert.equal((await get()).ratings.length,1);
-  subject.once('dialog',d=>d.accept());await subject.getByRole('button',{name:'Next task',exact:true}).click();
-  await until(async()=> (await get()).stepIndex===sam+1,'subject next synchronized');
-  assert.ok((await get()).events.some(e=>e.eventType==='subject_navigation'&&e.metadata.disposition==='interrupted'));
-  console.log('PASS: subject back/next, cancel, retained history, stale-visit protection and audit markers');
+  console.log('PASS: no generic replay or skip during timed measurements');
 
   const nback=plan.findIndex(s=>s.type==='nback');let current=await get();
   while(current.stepIndex!==nback)current=await post('navigate',{direction:current.stepIndex<nback?1:-1});
@@ -103,15 +122,15 @@ try{
   await subject.getByRole('button',{name:'Try a different example'}).click();
   await subject.getByRole('button',{name:'No match: wait',exact:true}).click();
   await subject.screenshot({path:output+'/nback-practice.png',fullPage:true});
-  await subject.setViewportSize({width:390,height:844});
-  assert.ok(await subject.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),'subject reflow');
+  await subject.setViewportSize({width:375,height:812});
+  await subject.waitForFunction(()=>document.documentElement.scrollWidth<=window.innerWidth+1,undefined,{timeout:1500});
   await subject.screenshot({path:output+'/nback-mobile.png',fullPage:true});
-  await subject.getByRole('button',{name:'Begin 20-square task'}).click();
+  await subject.bringToFront();await subject.getByRole('button',{name:'Begin 20-square task'}).click();
   await subject.locator('.nback-running').waitFor();
   await subject.waitForTimeout(50);
   await subject.getByRole('button',{name:'Match',exact:true}).click();
   assert.ok(await subject.getByRole('button',{name:'Match',exact:true}).isDisabled(),'one response per square');
-  await until(async()=> (await get()).events.some(e=>e.eventType==='nback_complete'),'nback completion');
+  await until(async()=> (await get()).events.some(e=>e.eventType==='nback_complete'),'nback completion',650);
   const event=(await get()).events.find(e=>e.eventType==='nback_complete');
   assert.equal(event.metadata.trials,20);assert.equal(event.metadata.trialResults.length,20);assert.equal(event.metadata.practiceScored,false);
   assert.equal(event.metadata.hits+event.metadata.misses+event.metadata.falseAlarms+event.metadata.correctRejections,20-event.metadata.level);
@@ -123,6 +142,9 @@ try{
   await post('pause');const paused=await get();
   await post('subjectNavigate',{direction:-1,expectedStepId:plan[paused.stepIndex].id,expectedStepStartedAt:paused.stepStartedAt},'subject');
   assert.equal((await get()).stepIndex,paused.stepIndex);
+  const extra=await context.request.post(base+'/api/sessions',{data:{action:'create',participantId:pid+10000,operator:'Station reuse test, no hardware'}});
+  second=(await extra.json()).session.code;
+  assert.equal((await station(context,{action:'assign',code:second})).status(),409);
   await post('complete');const done=await get();
   await post('subjectNavigate',{direction:-1,expectedStepId:plan[done.stepIndex].id,expectedStepStartedAt:done.stepStartedAt},'subject');
   assert.equal((await get()).status,'complete');
@@ -135,20 +157,26 @@ try{
   await until(()=>instructor.getByRole('button',{name:'OPEN LEDGER',exact:true}).evaluate(el=>el===document.activeElement),'ledger focus restoration');
   await instructor.setViewportSize({width:720,height:500});
   await instructor.getByRole('button',{name:'Toggle workspace navigation'}).click();
-  await instructor.getByRole('button',{name:'WORKSPACE SETTINGS'}).click();
-  await instructor.getByRole('dialog').waitFor();
+  await instructor.getByRole('button',{name:'Recording setup',exact:true}).click();
+  await instructor.getByText('Device choices are locked for this session.',{exact:false}).waitFor();
   assert.ok(await instructor.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),'compact operator reflow');
   await instructor.screenshot({path:output+'/setup-compact.png'});
   await instructor.keyboard.press('Escape');
   console.log('PASS: visible end action, cancel safety, paused/finalized navigation rejected');
+  await instructor.goto(base+'/instructor?session='+second);
+  await subject.getByRole('link',{name:'Connect recorder',exact:true}).waitFor();
+  assert.equal(new URL(subject.url()).searchParams.get('session'),second);
+  assert.equal((await station(subjectContext,{action:'ticket',code})).status(),403);
+  console.log('PASS: trusted subject PC receives the next assigned study without a second invitation');
   assert.deepEqual(errors,[],'browser exceptions');
 }catch(error){
-  console.error('Browser exceptions:',errors);
+  console.error('Browser exceptions:',errors);console.error((await subject.locator('body').innerText()).slice(-1300));
   console.error((await instructor.locator('body').innerText()).slice(0,1600));
   await instructor.screenshot({path:output+'/failure.png',fullPage:true});
   throw error;
 }finally{
   clearInterval(beat);
   if(code)await post('abort').catch(()=>{});
+  if(second)await context.request.post(base+'/api/sessions',{data:{code:second,action:"abort"}}).catch(()=>{});
   await browser.close();
 }

@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
+import { permitsGuidedTransition } from "./guided-flow";
 import { subjectNavigationTarget } from "./subject-navigation";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
@@ -26,7 +27,7 @@ export async function ensureSchema() {
 }
 
 function appendEvent(snapshot: SessionSnapshot, input: Partial<ExperimentEvent> & Pick<ExperimentEvent,"eventType"|"label"|"source">) {
-  const plan = buildPlan(snapshot.assignment);
+  const plan = buildPlan(snapshot.assignment, snapshot.protocolVersion);
   const step = plan[snapshot.stepIndex];
   const event: ExperimentEvent = {
     id: uid("ev"), sequence: snapshot.events.length + 1, stepId: step?.id ?? "", stepIndex: snapshot.stepIndex,
@@ -88,13 +89,13 @@ function hydrateSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
   return snapshot;
 }
 
-export async function createSession(participantId: number, operator: string) {
+export async function createSession(participantId: number, operator: string, protocolVersion: string = PROTOCOL_VERSION) {
   await ensureSchema();
   const assignment = assignFor(participantId);
   const createdAt = now();
   const snapshot: SessionSnapshot = {
     id: uid("ses"), code: sessionCode(assignment.pid), revision: 1, participantId: assignment.pid,
-    operator: operator.trim() || "Operator", protocolVersion: PROTOCOL_VERSION, assignment, status:"setup",
+    operator: operator.trim() || "Operator", protocolVersion:protocolVersion==="v7"?"v7":PROTOCOL_VERSION, assignment, status:"setup",
     stepIndex:0, attempt:1, stepStartedAt:createdAt, pausedAt:null, announcement:null, events:[], notes:[], ratings:[],
     sensors:SENSOR_CATALOG.map((sensor) => emptySensor(sensor,createdAt)),
     bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt,subjectLastSeenAt:null,
@@ -130,7 +131,7 @@ export async function listSessions() {
 }
 
 export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
-  const plan = buildPlan(snapshot.assignment);
+  const plan = buildPlan(snapshot.assignment, snapshot.protocolVersion);
   const current = plan[snapshot.stepIndex] ?? null;
   let mediaSrc = "";
   if (current?.type === "clip" && current.emo) mediaSrc = snapshot.media.emotions[current.emo];
@@ -157,10 +158,15 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
     announcement: snapshot.announcement,
     nbackLevel: snapshot.nbackLevel,
     operatorConnected,
+    recorderOnline:agentConnected,
     acquisitionReady,
+    selfGuided: snapshot.protocolVersion === "v8",
+    awaitingMovement: snapshot.protocolVersion==="v8" && !!current?.safety && current.advance==="timer" &&
+      [...snapshot.events].reverse().find(e=>e.stepIndex===snapshot.stepIndex && ["movement_onset","step_start","step_repeated"].includes(e.eventType))?.eventType!=="movement_onset",
+    canStartRecording: snapshot.status === "setup" && snapshot.preflightTest.status === "pass" && requiredSensorsReady(snapshot) && snapshot.acquisition.configRevision === snapshot.configRevision,
     mediaSrc,
-    canGoBack: subjectNavigationTarget(snapshot.status, snapshot.stepIndex, plan.map(s => s.type), -1) !== null,
-    canGoNext: subjectNavigationTarget(snapshot.status, snapshot.stepIndex, plan.map(s => s.type), 1) !== null,
+    canGoBack: snapshot.protocolVersion !== "v8" && subjectNavigationTarget(snapshot.status, snapshot.stepIndex, plan.map(s => s.type), -1) !== null,
+    canGoNext: snapshot.protocolVersion !== "v8" && subjectNavigationTarget(snapshot.status, snapshot.stepIndex, plan.map(s => s.type), 1) !== null,
     step: current ? {
       id: current.id,
       index: current.index,
@@ -180,10 +186,10 @@ async function persistEvent(sessionId: string, event: ExperimentEvent) {
     .bind(event.id,sessionId,event.sequence,event.stepId,event.eventType,event.severity,event.source,JSON.stringify(event),event.createdAt).run();
 }
 
-function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"operator"|"system") {
-  const plan = buildPlan(snapshot.assignment);
+function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"operator"|"system", skipped = false) {
+  const plan = buildPlan(snapshot.assignment, snapshot.protocolVersion);
   const current = plan[snapshot.stepIndex];
-  appendEvent(snapshot,{ eventType:"step_end", label:"Step completed", detail:reason || shortLabel(current), source });
+  appendEvent(snapshot,{ eventType:skipped ? "step_skipped" : "step_end", label:skipped ? "Activity skipped" : "Step completed", detail:reason || shortLabel(current), source });
   if (snapshot.stepIndex >= plan.length - 1) {
     snapshot.status = "complete";
     appendEvent(snapshot,{ eventType:"session_complete", label:"Session completed", source:"system" });
@@ -194,6 +200,10 @@ function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"o
   snapshot.stepStartedAt = now();
   snapshot.announcement = null;
   appendEvent(snapshot,{ eventType:"step_start", label:"Step started", detail:shortLabel(plan[snapshot.stepIndex]), source:"system" });
+  if (snapshot.protocolVersion === "v8" && plan[snapshot.stepIndex].type === "end") {
+    snapshot.status = "complete";
+    appendEvent(snapshot,{eventType:"session_complete",label:"Protocol finished; recorder finalization requested",source:"system"});
+  }
 }
 
 function requiredSensorsReady(snapshot: SessionSnapshot) {
@@ -212,7 +222,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (!current) return null;
     const beforeRevision = current.revision;
     const beforeCount = current.events.length;
-    const plan = buildPlan(current.assignment);
+    const plan = buildPlan(current.assignment, current.protocolVersion);
     const step = plan[current.stepIndex];
     const expectedStepId = String(payload.expectedStepId ?? "");
     if (expectedStepId && step?.id !== expectedStepId) return current;
@@ -220,7 +230,26 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (payload.expectedAttempt != null && Number(payload.expectedAttempt) !== current.attempt) return current;
     if (["rating", "taskComplete"].includes(action) && current.status !== "running") return current;
     if (action === "rating" && step?.type !== "sam") return current;
+    const guided = current.protocolVersion === "v8";
+    if (["subjectStart","subjectSkip","subjectEnd","subjectBeginMovement"].includes(action) && !guided) return current;
+    if (guided && payload.subjectRequest && ["autoAdvance","advance","taskComplete","rating","subjectSkip"].includes(action)) {
+      if (!expectedStepId || !payload.expectedStepStartedAt || payload.expectedAttempt == null || current.status !== "running" || current.announcement ||
+          !toSubjectSnapshot(current).acquisitionReady || !permitsGuidedTransition(step,action,payload.eventType,Date.now()-Date.parse(current.stepStartedAt))) return current;
+    }
+    if (action==="subjectBeginMovement") {
+      if (!expectedStepId || !payload.expectedStepStartedAt || payload.expectedAttempt == null ||
+          current.status!=="running" || current.announcement || !toSubjectSnapshot(current).acquisitionReady || !toSubjectSnapshot(current).awaitingMovement) return current;
+      current.stepStartedAt=now();
+      appendEvent(current,{eventType:"movement_onset",label:"Participant began optional movement",source:"subject"});
+    }
+    if (guided && payload.subjectRequest && action==="autoAdvance" && toSubjectSnapshot(current).awaitingMovement) return current;
+    if (action === "subjectSkip") advance(current,"Participant opted out of optional movement","subject",true);
+    if (action === "subjectEnd" && ["running","paused"].includes(current.status)) {
+      current.status="aborted"; current.stepStartedAt=now(); current.announcement=null;
+      appendEvent(current,{eventType:"session_aborted",label:"Participant ended recording",source:"subject",severity:"warn"});
+    }
     if (action === "subjectNavigate") {
+      if (guided) return current;
       if (!expectedStepId || !payload.expectedStepStartedAt) throw new Error("Refresh the subject display before changing tasks.");
       const targetIndex = subjectNavigationTarget(current.status, current.stepIndex, plan.map(s => s.type), Number(payload.direction));
       if (targetIndex === null) return current;
@@ -232,17 +261,36 @@ export async function mutateSession(code: string, action: string, payload: Actio
       appendEvent(current, {eventType:"step_start", label:"Step started after subject navigation", source:"subject"});
     }
 
-    if (action === "advance" && current.status === "running") advance(current,String(payload.reason ?? ""),(payload.source === "subject" ? "subject" : "operator"));
+    if (action==="advance" && payload.subjectRequest && step.type==="clip" && current.status==="running")
+      appendEvent(current,{eventType:"media_offset",label:"Video completed",source:"subject"});
+    if (action === "advance" && current.status === "running") advance(current, guided && step.type==="gate" && payload.subjectRequest ? "Minimum rest elapsed; participant confirmed readiness (not physiological verification)" : String(payload.reason ?? ""),(payload.source === "subject" ? "subject" : "operator"));
     if (action === "heartbeat") {
       const previousSeen = current.operatorLastSeenAt ? Date.parse(current.operatorLastSeenAt) : NaN;
       const gap = Number.isFinite(previousSeen) ? Date.now() - previousSeen : 0;
-      if (gap > OPERATOR_LEASE_MS && current.status === "running") {
+      if (!guided && gap > OPERATOR_LEASE_MS && current.status === "running") {
         current.stepStartedAt = new Date(Date.parse(current.stepStartedAt) + gap - OPERATOR_LEASE_MS).toISOString();
       }
       current.operatorLastSeenAt = now();
     }
-    if (action === "subjectHeartbeat") current.subjectLastSeenAt=now();
-    if (action === "navigate" && !["setup","aborted"].includes(current.status)) {
+    if (action === "subjectHeartbeat") {
+      current.subjectLastSeenAt=now();
+      if (guided && current.status==="setup" && current.preflightTest.status==="idle" && requiredSensorsReady(current) && current.acquisition.configRevision===current.configRevision) {
+        current.preflightTest={status:"running",detail:"Checking recording readiness",completedAt:null};
+        appendEvent(current,{eventType:"preflight_started",label:"Readiness check started",source:"system"});
+      }
+      const ready=toSubjectSnapshot(current).acquisitionReady;
+      if (guided && current.status==="running" && !ready && step.type!=="setup") {
+        current.status="paused"; current.pausedAt=now();
+        appendEvent(current,{eventType:"recorder_hold",label:"Recording interrupted; task held",source:"system",severity:"warn"});
+      } else if (guided && ready && current.status==="paused" && !current.announcement &&
+          [...current.events].reverse().find(e=>["recorder_hold","session_paused","session_resumed"].includes(e.eventType))?.eventType==="recorder_hold") {
+        const delay=current.pausedAt ? Date.now()-Date.parse(current.pausedAt) : 0;
+        current.stepStartedAt=new Date(Date.parse(current.stepStartedAt)+delay).toISOString();
+        current.status="running";current.pausedAt=null;
+        appendEvent(current,{eventType:"session_resumed",label:"Recording restored; task resumed",source:"system"});
+      }
+    }
+    if (action === "navigate" && ["running","paused"].includes(current.status)) {
       const direction = Number(payload.direction) < 0 ? -1 : 1;
       const targetIndex = Math.max(0,Math.min(plan.length - 1,current.stepIndex + direction));
       if (targetIndex !== current.stepIndex) {
@@ -252,17 +300,23 @@ export async function mutateSession(code: string, action: string, payload: Actio
         current.stepIndex = targetIndex;
         current.attempt = 1;
         current.stepStartedAt = now();
-        if (current.status === "complete") current.status = "running";
+        if (guided && target.type === "end") {current.status="complete";appendEvent(current,{eventType:"session_complete",label:"Operator moved to protocol end",source:"operator"});}
         if (current.status === "paused") current.pausedAt = current.stepStartedAt;
         appendEvent(current,{eventType:"step_start",label:"Step started",detail:shortLabel(target),source:"operator"});
       }
     }
     if (action === "autoAdvance" && current.status === "running" && step?.durationSec) advance(current,"Timer completed","system");
-    if (action === "pause" && current.status === "running") { current.status="paused"; current.pausedAt=now(); current.announcement={id:uid("ann"),text:"Please wait a moment.",kind:"pause",createdAt:now()}; appendEvent(current,{eventType:"session_paused",label:"Session paused",detail:String(payload.reason ?? ""),severity:"warn",source:payload.source === "subject" ? "subject" : "operator"}); }
+    if (action === "pause" && (current.status === "running" || (guided && current.status==="paused" && !current.announcement))) { current.status="paused"; current.pausedAt??=now(); current.announcement={id:uid("ann"),text:"Please wait a moment.",kind:"pause",createdAt:now()}; appendEvent(current,{eventType:"session_paused",label:"Session paused",detail:String(payload.reason ?? ""),severity:"warn",source:payload.source === "subject" ? "subject" : "operator"}); }
     if (action === "resume" && current.status === "paused") { const delta = current.pausedAt ? Date.now()-Date.parse(current.pausedAt) : 0; current.stepStartedAt=new Date(Date.parse(current.stepStartedAt)+delta).toISOString(); current.status="running"; current.pausedAt=null; current.announcement=null; appendEvent(current,{eventType:"session_resumed",label:"Session resumed",source:"operator",metadata:{pauseMs:delta}}); }
     if (action === "repeat") { current.attempt += 1; current.stepStartedAt=now(); appendEvent(current,{eventType:"step_repeated",label:"Step repeated by operator",detail:String(payload.reason ?? "No reason entered"),severity:"warn",source:"operator",metadata:{attempt:current.attempt}}); }
-    if (action === "message") { const text=String(payload.text ?? "").trim().slice(0,180); if(text){ current.announcement={id:uid("ann"),text,kind:payload.kind === "safety" ? "safety" : "info",createdAt:now()}; appendEvent(current,{eventType:"operator_message",label:"Operator message sent",detail:text,source:"operator"}); } }
-    if (action === "ack") { if(current.announcement) appendEvent(current,{eventType:"message_ack",label:"Message acknowledged",source:"subject"}); current.announcement=null; }
+    if (action === "message" && current.status !== "paused") { const text=String(payload.text ?? "").trim().slice(0,180); if(text){ current.announcement={id:uid("ann"),text,kind:payload.kind === "safety" ? "safety" : "info",createdAt:current.announcement?.createdAt ?? now()}; appendEvent(current,{eventType:"operator_message",label:"Operator message sent",detail:text,source:"operator"}); } }
+    if (action === "ack") {
+      if(current.status==="paused")return current;
+      if(guided && current.announcement && current.status==="running"){
+        const held=Math.max(0,Date.now()-Math.max(Date.parse(current.stepStartedAt),Date.parse(current.announcement.createdAt)));
+        current.stepStartedAt=new Date(Date.parse(current.stepStartedAt)+held).toISOString();
+      }
+      if(current.announcement) appendEvent(current,{eventType:"message_ack",label:"Message acknowledged",source:"subject"}); current.announcement=null; }
     if (action === "log") appendEvent(current,{eventType:String(payload.eventType ?? "subject_event"),label:String(payload.label ?? "Subject event"),detail:String(payload.detail ?? ""),severity:(payload.severity as ExperimentEvent["severity"]) ?? "info",source:(payload.source as ExperimentEvent["source"]) ?? "subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}});
     if (action === "rating") { current.ratings.push({emotion:step?.emo ?? "happy",valence:Number(payload.valence),arousal:Number(payload.arousal),dominance:Number(payload.dominance),createdAt:now()}); appendEvent(current,{eventType:"rating_submitted",label:"Rating submitted",source:"subject",metadata:{emotion:step?.emo,valence:payload.valence,arousal:payload.arousal,dominance:payload.dominance,responseUiVersion:"plain-language-2026-10-14"}}); advance(current,"Response submitted","subject"); }
     if (action === "taskComplete") { appendEvent(current,{eventType:String(payload.eventType ?? "task_complete"),label:String(payload.label ?? "Task completed"),source:"subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}}); advance(current,"Task completed","subject"); }
@@ -275,6 +329,11 @@ export async function mutateSession(code: string, action: string, payload: Actio
       const incoming = payload.devices && typeof payload.devices === "object" ? payload.devices as Record<string,unknown> : {};
       current.deviceConfig = { ...current.deviceConfig };
       for (const sensor of SENSOR_CATALOG.slice(0,8)) current.deviceConfig[sensor.id]=clean(incoming[sensor.id]??current.deviceConfig[sensor.id]??"none",180)||"none";
+      if(Array.isArray(payload.required)){
+        current.requiredSensors=[...new Set(payload.required.map(String).filter(id=>SENSOR_CATALOG.some(s=>s.id===id)))];
+        current.hardwareGateOverride=false;
+        appendEvent(current,{eventType:"required_sensors_updated",label:"Required sensors saved with device choices",detail:current.requiredSensors.join(", ")||"None",source:"operator"});
+      }
       current.configRevision += 1;
       current.preflightTest={status:"idle",detail:"Run preflight after changing hardware",completedAt:null};
       appendEvent(current,{eventType:"device_configuration",label:"Device assignments updated",detail:`Configuration ${current.configRevision}`,source:"operator"});
@@ -285,19 +344,22 @@ export async function mutateSession(code: string, action: string, payload: Actio
       appendEvent(current,{eventType:"device_refresh",label:"Hardware discovery requested",source:"operator"});
     }
     if (action === "startPreflight" && current.status === "setup") {
-      current.preflightTest={status:"running",detail:"Validating selected devices for 10 seconds",completedAt:null};
+      current.preflightTest={status:"running",detail:"Validating selected devices for 10 seconds",completedAt:current.preflightTest.completedAt};
       appendEvent(current,{eventType:"preflight_started",label:"Preflight test started",source:"operator"});
     }
-    if (action === "startSession" && current.status === "setup") {
-      if (!current.hardwareGateOverride && (!requiredSensorsReady(current) || current.preflightTest.status!=="pass")) throw new Error("Complete a successful preflight before starting the session.");
+    if ((action === "startSession" || action === "subjectStart") && current.status === "setup") {
+      if (action==="subjectStart" && !toSubjectSnapshot(current).canStartRecording) throw new Error("Recording is not ready yet. Please wait and try again.");
+      if (!current.hardwareGateOverride && (!requiredSensorsReady(current) || current.preflightTest.status!=="pass" || current.acquisition.configRevision!==current.configRevision)) throw new Error("Complete a successful preflight before starting the session.");
       current.status="running";
       current.configurationLocked=true;
       current.recordingStartedAt=now();
       current.stepStartedAt=current.recordingStartedAt;
-      appendEvent(current,{eventType:"session_start",label:"Recording started",detail:`Participant ${current.participantId}`,source:"operator"});
+      appendEvent(current,{eventType:"session_start",label:"Recording started",detail:`Participant ${current.participantId}`,source:action==="subjectStart"?"subject":"operator"});
       appendEvent(current,{eventType:"step_start",label:"Step started",detail:shortLabel(plan[current.stepIndex]),source:"system"});
     }
     if (action === "requiredSensors" && !current.configurationLocked) {
+      current.configRevision+=1;
+      current.preflightTest={status:"idle",detail:"Verify the required devices",completedAt:null};
       const ids = Array.isArray(payload.ids) ? payload.ids.map(String).filter((id)=>SENSOR_CATALOG.some((sensor)=>sensor.id===id)) : [];
       current.requiredSensors = [...new Set(ids)];
       current.hardwareGateOverride = false;
@@ -311,7 +373,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "nbackLevel") current.nbackLevel = Math.max(1,Math.min(3,Number(payload.level))) as 1|2|3;
     if (action === "media") { current.media = payload.media as MediaConfig; appendEvent(current,{eventType:"media_config",label:"Media configuration updated",source:"operator"}); }
     if (action === "complete") { current.status="complete"; current.stepIndex=plan.length-1; current.stepStartedAt=now(); appendEvent(current,{eventType:"session_complete",label:"Session completed by operator",source:"operator"}); }
-    if (action === "abort") { current.status="aborted"; appendEvent(current,{eventType:"session_aborted",label:"Session aborted",severity:"warn",source:"operator"}); }
+    if (action === "abort") { current.status="aborted"; current.stepStartedAt=now(); appendEvent(current,{eventType:"session_aborted",label:"Session aborted",severity:"warn",source:"operator"}); }
 
     current.revision = beforeRevision + 1;
     current.updatedAt = now();
@@ -372,15 +434,21 @@ function applyAcquisitionHeartbeat(snapshot: SessionSnapshot, payload: ActionPay
       metadata:{sensorId:sensor.id,status,rateHz:sensor.rateHz,sampleCount:sensor.sampleCount},
     });
   }
-  if (payload.preflightTest && typeof payload.preflightTest === "object") {
+  if (snapshot.acquisition.configRevision===snapshot.configRevision && payload.preflightTest && typeof payload.preflightTest === "object") {
     const test=payload.preflightTest as Record<string,unknown>;
     const status=["idle","running","pass","fail"].includes(String(test.status)) ? String(test.status) as SessionSnapshot["preflightTest"]["status"] : "idle";
     const completedAt=clean(test.completedAt,40)||null;
-    if (!(snapshot.preflightTest.status==="running"&&status==="idle")) {
+    const staleResult=snapshot.preflightTest.status==="running" && (status==="idle" || (!!completedAt && completedAt===snapshot.preflightTest.completedAt && ["pass","fail"].includes(status)));
+    if (!staleResult) {
       const changed=status!==snapshot.preflightTest.status || completedAt!==snapshot.preflightTest.completedAt;
       snapshot.preflightTest={status,detail:clean(test.detail,220),completedAt};
       if(changed&&["pass","fail"].includes(status)) appendEvent(snapshot,{eventType:"preflight_completed",label:`Preflight ${status}`,detail:snapshot.preflightTest.detail,severity:status==="fail"?"error":"info",source:"sensor"});
     }
+  }
+  if(snapshot.status==="setup" && snapshot.preflightTest.status==="idle" &&
+    snapshot.acquisition.configRevision===snapshot.configRevision && requiredSensorsReady(snapshot)){
+    snapshot.preflightTest={status:"running",detail:"Checking required devices and storage",completedAt:null};
+    appendEvent(snapshot,{eventType:"preflight_started",label:"Automatic recording check started",source:"system"});
   }
 }
 
@@ -411,7 +479,7 @@ function sanitizeInventory(value: unknown):DeviceInventory { const result:Device
 function sanitizePreviewUrls(value: unknown){const result:Record<string,string>={};if(!value||typeof value!=="object")return result;for(const id of ["face","thermal"]){const url=clean((value as Record<string,unknown>)[id],300);if(/^http:\/\/(127\.0\.0\.1|localhost):\d+\/preview\//.test(url))result[id]=url}return result;}
 
 export function acquisitionCommand(snapshot: SessionSnapshot) {
-  const step = buildPlan(snapshot.assignment)[snapshot.stepIndex] ?? null;
+  const step = buildPlan(snapshot.assignment, snapshot.protocolVersion)[snapshot.stepIndex] ?? null;
   const command = ["complete","aborted"].includes(snapshot.status)?"finalize":snapshot.status==="setup"?(snapshot.preflightTest.status==="running"?"test":"probe"):"record";
   return {
     serverTime:now(), sessionCode:snapshot.code, participantId:snapshot.participantId,

@@ -6,7 +6,7 @@ Participants follow one activity at a time. Instructors prepare recording, obser
 
 Meridian is a **research collection platform**, not an implemented diagnostic or engagement-prediction model. Sensor readiness, experimental condition, self-reported affect, and clinical diagnosis are different things.
 
-This README describes the active editorial interface and protocol **v7**, audited on **7 October 2026**. Read the [full documentation PDF](docs/meridian_portal_documentation.pdf) or its [editable LaTeX source](docs/meridian_portal_documentation.tex) for workflow-by-workflow cognitive rationale, data definitions, and proposed task-specific modeling pipelines. Older console components remain in the repository but are not rendered by the current instructor route.
+This README describes the active editorial interface and **v8 self-guided protocol**. Existing v7 sessions retain instructor-guided recovery checks. Read the [full documentation PDF](docs/meridian_portal_documentation.pdf) or its [editable LaTeX source](docs/meridian_portal_documentation.tex) for workflow-by-workflow cognitive rationale, data definitions, and proposed task-specific modeling pipelines. Older console components remain in the repository but are not rendered by the current instructor route.
 
 ## Architecture and stack
 
@@ -40,7 +40,7 @@ Local MJPEG preview --> browser on the acquisition computer
 | Route | Purpose |
 | --- | --- |
 | `/` | Portal selection |
-| `/instructor` | Participant entry, Study overview, Protocol workspace, Recording review, Workspace settings |
+| `/instructor` | Participant entry, Recording setup, Live study, Protocol, Recording review |
 | `/subject` | Join by session code or numeric participant ID |
 | `/subject?session=SESSION_CODE` | Join a specific session |
 | `/api/sessions` | Authoritative session reads and mutations |
@@ -103,7 +103,13 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Create a session in the instructor portal. Select **Prepare recording** (or **Workspace settings**), then follow **Start a recording > Connect the acquisition computer > Connection instructions**. The guide includes installation commands for Windows and Linux/macOS, a session-specific launch command and copy feedback. Replace the placeholders below with those current values:
+**Two computers (normal lab setup).** Use the same authenticated, reachable HTTPS deployment on both PCs. Do not publish the development server with its local operator bypass. On the instructor PC, create a session and use **Recording setup → Connect the subject computer → Create subject invitation**. Open this private invitation on the subject PC, in the browser profile that will remain at that station, and select **Pair this subject computer**. Do not open it on the instructor PC. A first-use invitation is single-use, expires after 30 minutes, and is replaced if another is generated.
+
+On the **subject display**, expand **First time on this computer?** and install Meridian Recorder for Windows x64. Return to that display and choose **Connect recorder**. Windows and the native recorder ask for confirmation; the portal advances only when the agent reports back. The unsigned installer needs network access on first use; have lab IT review and sign it for managed distribution. No repository checkout, terminal or system Python is needed.
+
+**Later studies:** Use the same instructor and subject browser profiles. Leave `/subject` open (or reopen it); it picks up the next assigned study after the previous one ends. The subject clicks **Connect recorder** to authorize hardware for the new session. There is no new invitation, session code to enter, or pairing link to transfer. The station trust lasts up to 90 days; clearing cookies requires enrollment again. The separate five-minute native launch credential is refreshed on the preparation screen and does not limit recording duration. To change subject machines, finish or discard the old session and use **Recording setup → Subject computer → Forget subject computer** in that session. A localhost invitation is only for testing on one machine.
+
+**Manual fallback:** For a manually managed agent, expand **Manual connection** in the recorder step. Replace the placeholders below with the values for the current session:
 
 ```powershell
 .\.venv\Scripts\python.exe -m meridian_agent --server http://localhost:3000 --code YOUR_SESSION_CODE --token YOUR_ACQUISITION_TOKEN --output "C:\MeridianRecordings"
@@ -130,37 +136,37 @@ Depending on the distribution, install its Python venv, PortAudio and OpenCV run
 
 For separate computers, replace localhost with the reachable, authenticated Meridian server origin. **Localhost always means the machine running the command.** Camera previews currently remain local to the acquisition machine.
 
-Saved portal assignments override command-line sensor defaults. Use Workspace settings, save, then preflight. `--simulate-all` deliberately overrides devices with simulation. `--help` lists all flags. Bundled launcher scripts use the default remote server unless environment configuration changes it; explicit commands above are clearer for local testing.
+Saved portal assignments override command-line sensor defaults. Use Recording setup → Check recording devices → Change devices. Save and wait for the automatic readiness check. `--simulate-all` deliberately overrides devices with simulation. `--help` lists all flags. Bundled launcher scripts use the default remote server unless environment configuration changes it; explicit commands above are clearer for local testing.
 
 ## Run a session
 
-1. **Enter a numeric participant ID.** Contextual resume appears if an active session is found among the latest 50 sessions. A participant ID is not the generated session code.
-2. **Prepare recording.** Follow the four-step guide in Recording setup. Join the subject display, then connect the acquisition computer using the OS-specific instructions. Wait for Connected.
+1. **Enter a numeric participant ID.** Contextual resume appears if an active session is found for that participant. A participant ID is not the generated session code.
+2. **Prepare recording.** Follow the four-step guide in Recording setup. Pair the subject browser first, connect the recorder on that computer, verify devices and start. Wait for Connected.
 3. **Assign devices.** Select Auto-detect or a specific device. A checkbox means **required for readiness**, not enabled. To disable a sensor, uncheck it **and** choose **Not assigned**. Use distinct physical indices for face and thermal cameras.
 4. **Save device choices.** Selections are local drafts until saved. Refresh devices if hardware changed, then rerun the readiness check.
 5. **Run readiness check.** After a 10-second observation interval, the agent checks required-stream quality, a JSON write/read test, at least 10 GiB free, and estimated server-clock offset below 100 ms. This is operational readiness, not medical certification or a complete media-integrity test. The setup screen explains what blocks Start.
-6. **Connect the subject page.** Use Open subject view or enter the code/participant ID. It waits during setup or when operator/acquisition readiness is unavailable.
-7. **Start session.** Raw recording begins and configuration locks. Advance the synchronization stage after checking the rig.
-8. **Monitor and guide.** Overview shows signals and communication. Protocol workspace has instructions, navigation, gate checks, N-back level, and manual BP entry.
+6. **Connect the subject page.** Use Open subject view or enter the code/participant ID. It waits for recording readiness. Once the acquisition computer reports fresh, usable samples with the saved configuration, Meridian requests the readiness check automatically, even before the participant joins.
+7. **Start recording.** Once readiness passes, the participant chooses Start recording. Configuration locks; the first activity unlocks after the agent reports recording. The instructor can still start explicitly.
+8. **Monitor if needed.** Start opens Live study whether the instructor or participant started the session. Its handoff tells you who acts next. Live study shows signals and communication. Protocol workspace has instructions, navigation, gate checks, N-back level, and manual BP entry.
 9. **Pause or intervene.** Messages appear as participant announcements. Safety stages expose a stop action. **Pause stops protocol progression, not raw recording.** Markers identify pauses afterward.
-10. **End explicitly.** Choose **End session** beside the live session controls (also available in Workspace settings) and confirm. Seeing Thank you does not prove acquisition has finalized.
+10. **Finish or stop.** In v8 the final recovery closes the session and requests recorder finalization. The participant can end early; the instructor can also intervene. Seeing Thank you does not prove acquisition has finalized.
 11. **Verify and archive.** Wait for agent finalization and manifest synchronization. Export review metadata and copy the complete local session directory to approved storage.
 
 Do not treat reopening a completed session as an uninterrupted continuation of its old raw capture. Use a new acquisition and preserve provenance.
 
 ## Protocol and participant tests
 
-`lib/protocol.ts` is the sequence source of truth; `lib/types.ts` declares v7 and default media. There are **34 stages**. Six emotion clips form three pairs using a deterministic six-row Williams-style schedule. Buffer-task order also depends on participant ID. Counterbalancing manages order effects; it does not prove an intended emotion was elicited.
+`lib/protocol.ts` is the sequence source of truth; `lib/types.ts` declares v8 and default media. There are **34 stages**. Six emotion clips form three pairs using a deterministic six-row Williams-style schedule. Buffer-task order also depends on participant ID. Counterbalancing manages order effects; it does not prove an intended emotion was elicited.
 
 | Stages | Activity | Timing / completion |
 | --- | --- | --- |
-| 1 | Sensor/synchronization check | Instructor advances |
+| 1 | Sensor/synchronization check | Participant begins once streams report recording |
 | 2 | Eyes-open baseline and BP anchor | 120 s |
 | 3 | Eyes-closed baseline | 90 s |
 | 4-10 | Clip, rating, neutral fixation, clip, rating, buffer, baseline gate | Clip end; rating completion; 20 s fixation; 40 s gate display |
 | 11-17 | Second paired block | Same structure |
 | 18-23 | Third paired block | Same structure without trailing gate |
-| 24 | Settle before sweep | 40 s display, instructor gate |
+| 24 | Settle before sweep | 40 s minimum, participant confirms readiness |
 | 25 | Seated rest | 20 s |
 | 26 | Box breathing | 45 s, four-second phases |
 | 27 | Voluntary breath hold | Participant starts/releases, comfort limited |
@@ -170,13 +176,15 @@ Do not treat reopening a completed session as an uninterrupted continuation of i
 | 31 | Recovery and BP | 60 s |
 | 32 | Guided body scan | 240 s |
 | 33 | Return to normal and final BP | 60 s |
-| 34 | Completion | Instructor finalizes |
+| 34 | Completion | System requests recorder finalization |
 
 Each clip is followed by three plain-language questions: **How pleasant did you feel?**, **How calm or energized did you feel?**, and **How in control did you feel?** Ten numbered choices remain, with explicit Continue, Back and final submission. Arrow keys, 1-9 and 0 (for 10) work within the rating group. Saved fields remain `valence`, `arousal`, and `dominance`; events record the response UI version. These are affect ratings, not diagnostic or engagement labels. Revised wording requires validation before treating it as equivalent to a standardized instrument.
 
 N-back includes matching and non-matching practice examples before its 20-presentation sequence. Practice is unscored; the first N presentations are warm-up. A scored-onset marker and trial-level results distinguish the phases. One response is accepted per presentation; correctness is not revealed during scored trials.
 
-Participants can use **Previous task / Next task** during eligible running tasks. Confirmation warns about restarting or skipping unfinished work. Navigation is logged as interruption, previous saved responses remain, and revisits create a new attempt. Instructor-controlled gates, paused sessions and finalized sessions cannot be bypassed. Back within the rating form preserves its unsent answers.
+In v8, Back and Continue belong to the editable three-question form. Timed exposures, fixation and scored trials have no generic skip/replay. Optional physical tasks can be skipped, with a distinct skip event rather than a false completion. The speaking buffer is an individual spoken response; recovery checks are minimum rests plus self-reported readiness, not proof that HR or GSR returned to baseline. Choose **Session mode → Instructor-guided (v7)** at entry when the study requires physiological clearance or a dialogue partner. Manual BP and physical setup still need appropriate staff; no measurements are inferred. Keep protocol version with all exported data.
+
+In v7 only, participants can use **Previous task / Next task** during eligible running tasks. Confirmation warns about restarting or skipping unfinished work. Navigation is logged as interruption, previous saved responses remain, and revisits create a new attempt. Instructor-controlled gates, paused sessions and finalized sessions cannot be bypassed. Back within the rating form preserves its unsent answers.
 
 Each buffer appears once:
 
