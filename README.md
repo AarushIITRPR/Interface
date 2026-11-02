@@ -15,7 +15,6 @@ This README describes the active editorial interface and **v8 self-guided protoc
 | Member A | Aarush Gupta | 2024AIB1174 |
 | Member B | Arjun Aggarwal | 2024AIB1289 |
 
-Member A leads the submission documentation, GitHub collaboration materials, and evaluator setup instructions.
 
 ## Submission materials
 
