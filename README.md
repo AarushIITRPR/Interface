@@ -20,7 +20,7 @@ This README describes the active editorial interface and **v8 self-guided protoc
 
 | Material | Location |
 | --- | --- |
-| Presentation (PPT) | Link pending |
+| Final project presentation | [View presentation on Canva](https://canva.link/e2bby66279clv8b) |
 | Demonstration video | Link pending |
 | Workflow and design report | [Portal documentation (PDF)](docs/meridian_portal_documentation.pdf) |
 | Subject portal usability | [SUS evaluation (PDF)](docs/usability/sus-evaluation.pdf) · [Report A](docs/usability/report-a.pdf) · [Report B](docs/usability/report-b.pdf) |
@@ -33,7 +33,7 @@ This README describes the active editorial interface and **v8 self-guided protoc
 3. [User evaluation 3](https://youtu.be/WiWRewQwbkc?si=ooakhyFuJwYsXVMW)
 4. [User evaluation 4](https://youtu.be/2groqSur4pQ?si=V7gFkAp0GJ-VcVJL)
 
-[Nielsen’s heuristic overview](https://youtu.be/5HEk-oA2Vig)
+[Nielsen’s heuristic overview](https://www.youtube.com/watch?v=otdm9f5vJJE)
 
 ## Evaluator walkthrough
 
