@@ -48,6 +48,8 @@ Use one laptop for this walkthrough. The web server and the recorder run in sepa
 
 For a repeatable software check, run the [automated tests](#verification). If a control stays disabled, see [Troubleshooting](#troubleshooting).
 
+The Windows walkthrough was checked with Node.js 24.13.0 and npm 11.6.2. In a clean checkout, `npm.cmd ci`, the production build and all 23 web tests passed. The instructor, subject, memory demo and session-list endpoints returned HTTP 200 on the local development server. The recorder’s 21 Python tests also passed in a separate Python 3.14.2 environment.
+
 ## Repository guide
 
 | Path | What to inspect |
@@ -115,7 +117,7 @@ Prerequisites: **Node.js 22.13.0+**, npm, and Python **3.11+** for acquisition. 
 git clone https://github.com/AarushIITRPR/Interface.git
 cd Interface
 npm.cmd ci
-npm.cmd run dev -- --host 127.0.0.1 --port 3000
+npm.cmd run dev -- --hostname localhost --port 3000
 ```
 
 For an existing checkout, open the directory containing `package.json`. Run `npm.cmd ci` after changing branches or pulling a new lockfile, then start the server. `npm.cmd` avoids PowerShell's `npm.ps1` execution-policy issue without changing machine policy.
@@ -126,7 +128,7 @@ For an existing checkout, open the directory containing `package.json`. Run `npm
 git clone https://github.com/AarushIITRPR/Interface.git
 cd Interface
 npm ci
-npm run dev -- --host 127.0.0.1 --port 3000
+npm run dev -- --hostname localhost --port 3000
 ```
 
 Open the two portals separately:
