@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { assignFor, buildPlan, shortLabel } from "./protocol";
 import { permitsGuidedTransition } from "./guided-flow";
 import { subjectNavigationTarget } from "./subject-navigation";
+import {experienceRatings, feedbackStage, FORM_VERSION, hasConsent, selectedSources} from "./participation";
 import { DEFAULT_MEDIA, PROTOCOL_VERSION, SENSOR_CATALOG, type AcquisitionAgent, type DeviceConfig, type DeviceInventory, type ExperimentEvent, type MediaConfig, type RecordingArtifact, type SensorChannel, type SensorQuality, type SensorStatus, type SessionSnapshot, type SubjectSnapshot } from "./types";
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket };
@@ -86,6 +87,13 @@ function hydrateSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
   }
   snapshot.media.boxBreathing ||= DEFAULT_MEDIA.boxBreathing;
   snapshot.media.bodyScan ||= DEFAULT_MEDIA.bodyScan;
+  // Preserve the clock of a timed activity already underway before start controls existed.
+  if(snapshot.timedTaskStarted===undefined){
+    const step=buildPlan(snapshot.assignment,snapshot.protocolVersion)[snapshot.stepIndex];
+    const neededMovementStart=snapshot.protocolVersion==="v8" && step?.safety && step.advance==="timer";
+    snapshot.timedTaskStarted=!!step?.durationSec && ["running","paused"].includes(snapshot.status) && (!neededMovementStart ||
+      [...snapshot.events].reverse().find(e=>e.stepIndex===snapshot.stepIndex && ["movement_onset","step_start","step_repeated"].includes(e.eventType))?.eventType==="movement_onset");
+  }
   return snapshot;
 }
 
@@ -96,7 +104,7 @@ export async function createSession(participantId: number, operator: string, pro
   const snapshot: SessionSnapshot = {
     id: uid("ses"), code: sessionCode(assignment.pid), revision: 1, participantId: assignment.pid,
     operator: operator.trim() || "Operator", protocolVersion:protocolVersion==="v7"?"v7":PROTOCOL_VERSION, assignment, status:"setup",
-    stepIndex:0, attempt:1, stepStartedAt:createdAt, pausedAt:null, announcement:null, events:[], notes:[], ratings:[],
+    stepIndex:0, attempt:1, timedTaskStarted:false, stepStartedAt:createdAt, pausedAt:null, announcement:null, events:[], notes:[], ratings:[],
     sensors:SENSOR_CATALOG.map((sensor) => emptySensor(sensor,createdAt)),
     bpReadings:[], media:structuredClone(DEFAULT_MEDIA), nbackLevel:1, operatorLastSeenAt:createdAt,subjectLastSeenAt:null,
     acquisitionToken:acquisitionToken(), acquisition:emptyAcquisition(), recordings:[], requiredSensors:["face","audio","oximeter"], hardwareGateOverride:false,deviceConfig:{...DEFAULT_DEVICE_CONFIG},configRevision:1,configurationLocked:false,recordingStartedAt:null,preflightTest:{status:"idle",detail:"Not run",completedAt:null}, createdAt, updatedAt:createdAt,
@@ -148,6 +156,7 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
   }));
   return {
     code: snapshot.code,
+    consentGiven:hasConsent(snapshot), consentSources:selectedSources(snapshot), feedbackStage:feedbackStage(snapshot),
     participantId: snapshot.participantId,
     revision: snapshot.revision,
     status: snapshot.status,
@@ -161,12 +170,11 @@ export function toSubjectSnapshot(snapshot: SessionSnapshot): SubjectSnapshot {
     recorderOnline:agentConnected,
     acquisitionReady,
     selfGuided: snapshot.protocolVersion === "v8",
-    awaitingMovement: snapshot.protocolVersion==="v8" && !!current?.safety && current.advance==="timer" &&
-      [...snapshot.events].reverse().find(e=>e.stepIndex===snapshot.stepIndex && ["movement_onset","step_start","step_repeated"].includes(e.eventType))?.eventType!=="movement_onset",
-    canStartRecording: snapshot.status === "setup" && snapshot.preflightTest.status === "pass" && requiredSensorsReady(snapshot) && snapshot.acquisition.configRevision === snapshot.configRevision,
+    awaitingTaskStart: Boolean(current?.durationSec) && !snapshot.timedTaskStarted,
+    canStartRecording: snapshot.status === "setup" && hasConsent(snapshot) && snapshot.preflightTest.status === "pass" && requiredSensorsReady(snapshot) && snapshot.acquisition.configRevision === snapshot.configRevision,
     mediaSrc,
     canGoBack: snapshot.protocolVersion !== "v8" && subjectNavigationTarget(snapshot.status, snapshot.stepIndex, plan.map(s => s.type), -1) !== null,
-    canGoNext: snapshot.protocolVersion !== "v8" && subjectNavigationTarget(snapshot.status, snapshot.stepIndex, plan.map(s => s.type), 1) !== null,
+    canGoNext: false,
     step: current ? {
       id: current.id,
       index: current.index,
@@ -186,10 +194,10 @@ async function persistEvent(sessionId: string, event: ExperimentEvent) {
     .bind(event.id,sessionId,event.sequence,event.stepId,event.eventType,event.severity,event.source,JSON.stringify(event),event.createdAt).run();
 }
 
-function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"operator"|"system", skipped = false) {
+function advance(snapshot: SessionSnapshot, reason: string, source: "subject"|"operator"|"system") {
   const plan = buildPlan(snapshot.assignment, snapshot.protocolVersion);
   const current = plan[snapshot.stepIndex];
-  appendEvent(snapshot,{ eventType:skipped ? "step_skipped" : "step_end", label:skipped ? "Activity skipped" : "Step completed", detail:reason || shortLabel(current), source });
+  appendEvent(snapshot,{ eventType:"step_end", label:"Step completed", detail:reason || shortLabel(current), source });
   if (snapshot.stepIndex >= plan.length - 1) {
     snapshot.status = "complete";
     appendEvent(snapshot,{ eventType:"session_complete", label:"Session completed", source:"system" });
@@ -221,7 +229,34 @@ export async function mutateSession(code: string, action: string, payload: Actio
     const current = await getSession(code);
     if (!current) return null;
     const beforeRevision = current.revision;
+    const beforeStep=current.stepIndex, beforeAttempt=current.attempt;
     const beforeCount = current.events.length;
+    const sources = selectedSources(current);
+    if(action==="consent" || action==="declineConsent"){
+      if(!payload.subjectRequest || current.status!=="setup") throw new Error("Consent is available only on the participant’s preparation screen.");
+      if(action==="declineConsent"){
+        current.status="aborted"; current.stepStartedAt=now(); delete current.consent;
+        appendEvent(current,{eventType:"consent_declined",label:"Participant declined recording",source:"subject"});
+      }else{
+        if(payload.version!==FORM_VERSION || !Array.isArray(payload.sources) || JSON.stringify(payload.sources)!==JSON.stringify(sources))
+          throw new Error("The recording setup changed. Review the updated form.");
+        if(payload.participate!==true || payload.record!==true || payload.research!==true) throw new Error("Select all three statements to give consent.");
+        if(hasConsent(current))return current;
+        current.consent={version:FORM_VERSION,sources,acceptedAt:now()};
+        appendEvent(current,{eventType:"consent_given",label:"Participant consent saved",source:"subject",metadata:{...current.consent,participate:true,record:true,research:true}});
+      }
+    }
+    if(action==="feedback"){
+      if(!payload.subjectRequest)throw new Error("Feedback belongs to the participant.");
+      if(current.feedback)return current;
+      if(feedbackStage(current)!=="open")throw new Error("Feedback opens after recording stops.");
+      const skipped=payload.skip===true;
+      const rating=skipped?null:payload.rating??null, comment=skipped?"":String(payload.comment??"").trim();
+      if((rating!==null && !experienceRatings.some(value=>value===rating)) || comment.length>500 || (!skipped && !rating && !comment))throw new Error("Choose a response, write a comment, or select Skip.");
+      current.feedback={rating:rating as string|null,comment,skipped,savedAt:now()};
+    }
+    if(["startSession","subjectStart","startPreflight","resume"].includes(action) && !hasConsent(current))
+      throw new Error("Waiting for participant consent on the subject display.");
     const plan = buildPlan(current.assignment, current.protocolVersion);
     const step = plan[current.stepIndex];
     const expectedStepId = String(payload.expectedStepId ?? "");
@@ -231,29 +266,31 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (["rating", "taskComplete"].includes(action) && current.status !== "running") return current;
     if (action === "rating" && step?.type !== "sam") return current;
     const guided = current.protocolVersion === "v8";
-    if (["subjectStart","subjectSkip","subjectEnd","subjectBeginMovement"].includes(action) && !guided) return current;
-    if (guided && payload.subjectRequest && ["autoAdvance","advance","taskComplete","rating","subjectSkip"].includes(action)) {
+    if (action==="subjectStart" && !guided) return current;
+    if (guided && payload.subjectRequest && ["autoAdvance","advance","taskComplete","rating"].includes(action)) {
       if (!expectedStepId || !payload.expectedStepStartedAt || payload.expectedAttempt == null || current.status !== "running" || current.announcement ||
           !toSubjectSnapshot(current).acquisitionReady || !permitsGuidedTransition(step,action,payload.eventType,Date.now()-Date.parse(current.stepStartedAt))) return current;
     }
-    if (action==="subjectBeginMovement") {
-      if (!expectedStepId || !payload.expectedStepStartedAt || payload.expectedAttempt == null ||
-          current.status!=="running" || current.announcement || !toSubjectSnapshot(current).acquisitionReady || !toSubjectSnapshot(current).awaitingMovement) return current;
+    if(action==="subjectBeginTask"){
+      if(!payload.subjectRequest || !expectedStepId || !payload.expectedStepStartedAt || payload.expectedAttempt==null ||
+        !step.durationSec || current.timedTaskStarted || current.status!=="running" || current.announcement || !toSubjectSnapshot(current).acquisitionReady)return current;
+      current.timedTaskStarted=true;
       current.stepStartedAt=now();
-      appendEvent(current,{eventType:"movement_onset",label:"Participant began optional movement",source:"subject"});
+      appendEvent(current,{eventType:step.safety?"movement_onset":"timed_task_onset",label:"Participant started timed activity",source:"subject"});
     }
-    if (guided && payload.subjectRequest && action==="autoAdvance" && toSubjectSnapshot(current).awaitingMovement) return current;
-    if (action === "subjectSkip") advance(current,"Participant opted out of optional movement","subject",true);
-    if (action === "subjectEnd" && ["running","paused"].includes(current.status)) {
+    if(step.durationSec && (action==="autoAdvance" || (payload.subjectRequest && action==="advance")) &&
+      (!current.timedTaskStarted || Date.now()-Date.parse(current.stepStartedAt)<step.durationSec*1000))return current;
+    if (action === "subjectEnd" && ["setup","running","paused"].includes(current.status)) {
+      const preparing=current.status==="setup";
       current.status="aborted"; current.stepStartedAt=now(); current.announcement=null;
-      appendEvent(current,{eventType:"session_aborted",label:"Participant ended recording",source:"subject",severity:"warn"});
+      appendEvent(current,{eventType:"session_aborted",label:preparing?"Participant ended setup":"Participant ended recording",source:"subject",severity:"warn"});
     }
     if (action === "subjectNavigate") {
-      if (guided) return current;
+      if (guided || Number(payload.direction)!==-1) return current;
       if (!expectedStepId || !payload.expectedStepStartedAt) throw new Error("Refresh the subject display before changing tasks.");
       const targetIndex = subjectNavigationTarget(current.status, current.stepIndex, plan.map(s => s.type), Number(payload.direction));
       if (targetIndex === null) return current;
-      appendEvent(current, {eventType:"subject_navigation", label:Number(payload.direction) < 0 ? "Subject revisited previous step" : "Subject skipped remaining step", source:"subject", severity:"warn", metadata:{fromIndex:current.stepIndex,toIndex:targetIndex,disposition:"interrupted",retainedPreviousResponses:true}});
+      appendEvent(current, {eventType:"subject_navigation", label:"Subject revisited previous step", source:"subject", severity:"warn", metadata:{fromIndex:current.stepIndex,toIndex:targetIndex,disposition:"interrupted",retainedPreviousResponses:true}});
       current.stepIndex = targetIndex;
       current.attempt = Math.max(0, ...current.events.filter(e => e.stepIndex === targetIndex).map(e => e.attempt)) + 1;
       current.stepStartedAt = now();
@@ -274,7 +311,7 @@ export async function mutateSession(code: string, action: string, payload: Actio
     }
     if (action === "subjectHeartbeat") {
       current.subjectLastSeenAt=now();
-      if (guided && current.status==="setup" && current.preflightTest.status==="idle" && requiredSensorsReady(current) && current.acquisition.configRevision===current.configRevision) {
+      if (guided && hasConsent(current) && current.status==="setup" && current.preflightTest.status==="idle" && requiredSensorsReady(current) && current.acquisition.configRevision===current.configRevision) {
         current.preflightTest={status:"running",detail:"Checking recording readiness",completedAt:null};
         appendEvent(current,{eventType:"preflight_started",label:"Readiness check started",source:"system"});
       }
@@ -322,7 +359,10 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "taskComplete") { appendEvent(current,{eventType:String(payload.eventType ?? "task_complete"),label:String(payload.label ?? "Task completed"),source:"subject",metadata:(payload.metadata as Record<string,unknown>) ?? {}}); advance(current,"Task completed","subject"); }
     if (action === "note") { const body=String(payload.body ?? "").trim().slice(0,500); if(body){ current.notes.push({id:uid("note"),body,category:String(payload.category ?? "general"),stepId:step?.id ?? "",stepLabel:step ? shortLabel(step) : "",createdAt:now()}); appendEvent(current,{eventType:"operator_note",label:"Operator note",detail:body,source:"operator"}); } }
     if (action === "sensor") { const sensor=current.sensors.find((item)=>item.id===payload.id); if(sensor){ sensor.status=String(payload.status) as SensorStatus; sensor.detail=String(payload.detail ?? sensor.detail); sensor.updatedAt=now(); appendEvent(current,{eventType:"sensor_status",label:`${sensor.label}: ${sensor.status}`,severity:["missing","error"].includes(sensor.status)?"error":sensor.status==="delayed"?"warn":"info",source:"sensor",metadata:{sensorId:sensor.id,status:sensor.status}}); } }
-    if (action === "acquisitionHeartbeat") applyAcquisitionHeartbeat(current,payload);
+    if (action === "acquisitionHeartbeat") {
+      if(!hasConsent(current) || current.acquisition.finalizedAt && ["complete","aborted"].includes(current.status))return current;
+      applyAcquisitionHeartbeat(current,payload);
+    }
     if (action === "acquisitionFinalize") applyAcquisitionFinalize(current,payload);
     if (action === "deviceConfig") {
       if (current.configurationLocked) throw new Error("Device configuration is locked while recording.");
@@ -375,6 +415,11 @@ export async function mutateSession(code: string, action: string, payload: Actio
     if (action === "complete") { current.status="complete"; current.stepIndex=plan.length-1; current.stepStartedAt=now(); appendEvent(current,{eventType:"session_complete",label:"Session completed by operator",source:"operator"}); }
     if (action === "abort") { current.status="aborted"; current.stepStartedAt=now(); appendEvent(current,{eventType:"session_aborted",label:"Session aborted",severity:"warn",source:"operator"}); }
 
+    if(current.consent && selectedSources(current).some(id=>!sources.includes(id))) {
+      delete current.consent;
+      appendEvent(current,{eventType:"consent_required",label:"Recording sources changed. Renew participant consent.",source:"system"});
+    }
+    if(beforeStep!==current.stepIndex || beforeAttempt!==current.attempt)current.timedTaskStarted=false;
     current.revision = beforeRevision + 1;
     current.updatedAt = now();
     const result = await bindings().DB.prepare(`UPDATE sessions SET status=?, step_index=?, revision=?, snapshot_json=?, updated_at=? WHERE code=? AND revision=?`)
@@ -480,10 +525,11 @@ function sanitizePreviewUrls(value: unknown){const result:Record<string,string>=
 
 export function acquisitionCommand(snapshot: SessionSnapshot) {
   const step = buildPlan(snapshot.assignment, snapshot.protocolVersion)[snapshot.stepIndex] ?? null;
-  const command = ["complete","aborted"].includes(snapshot.status)?"finalize":snapshot.status==="setup"?(snapshot.preflightTest.status==="running"?"test":"probe"):"record";
+  const permitted=hasConsent(snapshot);
+  const command = !permitted || ["complete","aborted"].includes(snapshot.status)?"finalize":snapshot.status==="setup"?(snapshot.preflightTest.status==="running"?"test":"probe"):"record";
   return {
     serverTime:now(), sessionCode:snapshot.code, participantId:snapshot.participantId,
-    command,deviceConfig:snapshot.deviceConfig,configRevision:snapshot.configRevision,requiredSensors:snapshot.requiredSensors,
+    command,deviceConfig:permitted?snapshot.deviceConfig:{},configRevision:command==="finalize"?snapshot.acquisition.configRevision:snapshot.configRevision,requiredSensors:permitted?snapshot.requiredSensors:[],
     sessionStatus:snapshot.status, revision:snapshot.revision, stepIndex:snapshot.stepIndex,
     step:step?{id:step.id,label:shortLabel(step),phase:step.phase,startedAt:snapshot.stepStartedAt,attempt:snapshot.attempt}:null,
   };

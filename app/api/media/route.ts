@@ -8,11 +8,28 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const key = url.searchParams.get("key");
   if (key) {
-    const object = await getBindings().MEDIA.get(key);
+    const bucket = getBindings().MEDIA;
+    const bytes = /^bytes=(\d*)-(\d*)$/i.exec(request.headers.get("range") ?? "");
+    let range: {offset:number;length:number} | undefined;
+    if (bytes && (bytes[1] || bytes[2])) {
+      const info = await bucket.head(key);
+      if (!info) return new Response("Not found",{status:404});
+      const ifRange = request.headers.get("if-range");
+      if (!ifRange || ifRange === info.httpEtag) {
+        const start = bytes[1] ? Number(bytes[1]) : Math.max(0,info.size-Number(bytes[2]));
+        const end = bytes[1] && bytes[2] ? Math.min(Number(bytes[2]),info.size-1) : info.size-1;
+        if (start > end) return new Response(null,{status:416,headers:{"Content-Range":`bytes */${info.size}`,"Accept-Ranges":"bytes"}});
+        range = {offset:start,length:end-start+1};
+      }
+    }
+    const object = await bucket.get(key, range ? {range} : undefined);
     if (!object) return new Response("Not found",{status:404});
     const headers = new Headers();
     object.writeHttpMetadata(headers); headers.set("etag",object.httpEtag); headers.set("cache-control","public, max-age=86400");
-    return new Response(object.body,{headers});
+    headers.set("accept-ranges","bytes");
+    headers.set("content-length",String(range?.length ?? object.size));
+    if(range) headers.set("content-range",`bytes ${range.offset}-${range.offset+range.length-1}/${object.size}`);
+    return new Response(object.body,{status:range?206:200,headers});
   }
   if (!await getOperatorUser()) return Response.json({error:"Instructor authorization is required."},{status:401});
   const rows = await getBindings().DB.prepare(`SELECT id, object_key, filename, content_type, size, created_at FROM media_assets ORDER BY created_at DESC LIMIT 100`).all();

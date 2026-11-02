@@ -1,0 +1,97 @@
+/* Functional colours apply across portals. Components retain their own layout and typography. */
+#meridian {
+  --action-secondary: #405560;
+  --action-secondary-ink: #fff;
+  --action-secondary-edge: #405560;
+  --action-fill: var(--action-secondary);
+  --action-ink: var(--action-secondary-ink);
+  --action-edge: var(--action-secondary-edge);
+  --action-primary: #28594f;
+  --action-danger: #943e33;
+}
+#meridian button {
+  background-color: var(--action-fill);
+  color: var(--action-ink);
+  border: 1px solid var(--action-edge);
+  border-radius: 2px;
+  text-decoration: none;
+}
+#meridian button:where(.paper-button, .wizard-primary, .light-button, .match-button, .live-save-settings,
+  [type=submit], [data-tone=primary]) {
+  --action-fill: var(--action-primary);
+  --action-ink: white;
+  --action-edge: var(--action-primary);
+}
+#meridian button:where([data-tone=danger], .safety-stop) {
+  --action-fill: var(--action-danger);
+  --action-edge: var(--action-danger);
+  --action-ink: white;
+}
+#meridian button[data-tone=caution] {
+  --action-fill: #82581e;
+  --action-edge: #82581e;
+  --action-ink: white;
+}
+#meridian button[data-tone=secondary] {
+  --action-fill: var(--action-secondary);
+  --action-ink: var(--action-secondary-ink);
+  --action-edge: var(--action-secondary-edge);
+}
+#meridian button:where([aria-current], [aria-checked=true], .selected, [aria-pressed=true]) {
+  --action-fill: #24353d;
+  --action-edge: #24353d;
+  --action-ink: white;
+}
+#meridian button:disabled {
+  --action-fill: #65635f;
+  --action-ink: white;
+  --action-edge: transparent;
+  opacity: 1;
+}
+#meridian button[data-tone=danger]:disabled {
+  --action-fill: #79504a;
+  --action-ink: white;
+}
+#meridian button:enabled:hover {
+  background-color: color-mix(in srgb, var(--action-fill), #000 8%);
+}
+#meridian :where(button, summary, a, input):focus-visible {
+  outline: 3px solid #172d37;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px white;
+}
+#meridian :where(.portal-header button, .participant-form-actions button, .live-review-ledger header button,
+  .live-stream-register header button, .live-stage-lower button, .subject-recorder p button) {
+  padding-inline: .8rem;
+}
+#meridian .portal-header-left { gap: 6px; }
+#meridian .live-instructor-menu { padding: 0; }
+#meridian .live-instructor-sidebar nav button {
+  background: transparent;
+  border: 0;
+  border-inline-start: 3px solid transparent;
+  border-radius: 0;
+  color: var(--live-muted);
+}
+#meridian .live-instructor-sidebar nav button:hover { color: var(--live-ink); background: transparent; text-decoration: underline; }
+#meridian .live-instructor-sidebar nav button[aria-current=page] { border-inline-start-color: var(--live-terra); color: var(--live-ink); }
+#meridian :is(.live-subject-card, .live-interventions) button {
+  background: transparent;
+  color: var(--live-ink);
+  border-color: var(--live-muted);
+}
+#meridian :is(.live-subject-card, .live-interventions) button:hover { background: transparent; border-color: var(--live-ink); text-decoration: underline; }
+#meridian .live-subject-card button { display: inline-flex; align-items: center; gap: .4rem; align-self: start; padding: .4rem .65rem; }
+#meridian .live-interventions .live-message { padding-top: 16px; }
+#meridian .live-protocol-list button[aria-current] > span { color: white; }
+#meridian .nb-tap-target { background: var(--action-primary); }
+@media (max-width: 450px) {
+  #meridian .portal-header button { padding-inline: 5px; }
+  #meridian .portal-header-left { gap: 3px; }
+  #meridian .portal-header .live-instructor-menu { width: 26px; padding: 0; }
+}
+@media (max-width: 360px) {
+  #meridian .portal-header { padding-inline: 6px; }
+  #meridian .portal-header button { font-size: .75rem; padding-inline: 3px; }
+  #meridian .portal-header-title { font-size: .8rem; }
+}

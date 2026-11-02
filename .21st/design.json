@@ -23,6 +23,7 @@
     "avoid": ["Engineering telemetry in the primary workflow", "Rounded SaaS cards, pills, gradients, glass effects, and decorative shadows", "Fake sensor values or hardcoded session progress", "Adding visible information merely because the backend exposes it"]
   },
   "decisions": [
+    { "scope":"n-back demonstration", "decision":"Play the 40 slides automatically with a corner reference grid and an illustrated Match tap.", "reason":"Participants can see the comparison without practising or recalling positions before learning the rule." },
     { "date":"2026-11-02", "scope":"subject station", "decision":"Enroll the subject browser once, install the recorder there, then automatically assign subsequent sessions to that station.", "reason":"Sensor access belongs to the subject PC; routine recording should not require transferring codes or switching computers." },
     { "date": "2026-11-02", "scope":"instructor setup", "decision":"Open new sessions in Recording setup and move to Live study after Start. Guide the operator through one step at a time.", "reason":"First-time operators could not discover the settings or tell whose turn it was after recording started." },
     { "date": "2026-08-24", "scope": "instructor and subject portals", "decision": "Adopt the supplied Meridian redesign archive as the authoritative visual and information architecture, then bind it to Meridian's real state.", "reason": "The supplied direction matches the requested restraint, hierarchy, subject focus, and operational clarity." },

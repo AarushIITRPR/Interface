@@ -1,11 +1,16 @@
 "use client";
 
+import {createPortal} from "react-dom";
+import {SubjectCopySlot,SubjectFrame} from "./subject-frame";
+import {ConsentForm, FeedbackForm} from "./participation-forms";
+import {NBackTask} from "./nback-task";
+import {StudyPlayer} from "./study-player";
+import {SpeakingPrompt} from "./speaking-prompt";
+import {COLOURS, makeStroopTrials} from "@/lib/stroop";
 import {SubjectRecorder,useStation} from "./subject-station";
-import { ArrowUpRight, Eye, Volume2, VolumeX } from "lucide-react";
-import { MotionConfig, motion } from "motion/react";
-import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { ArrowUpRight } from "lucide-react";
+import {PortalHeader} from "../portal-header";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { SubjectSnapshot, SubjectStep } from "@/lib/types";
 
 async function sessionRequest(code: string, action?: string, payload?: Record<string,unknown>) {
@@ -80,7 +85,8 @@ export function SubjectPortal() {
 
   const ignoredStation=useRef("");
   const knownStatus=useRef<SubjectSnapshot["status"]|null>(null);
-  useEffect(()=>{knownStatus.current=snapshot?.status??null;},[snapshot?.status]);
+  const awaitingFeedback=Boolean(snapshot?.feedbackStage && snapshot.feedbackStage!=="none");
+  useEffect(()=>{knownStatus.current=awaitingFeedback?"running":snapshot?.status??null;},[snapshot?.status,awaitingFeedback]);
   const onAssignment=useCallback((assigned:string,enrolling:boolean)=>{
     if(assigned===activeCode.current || (!enrolling && ignoredStation.current===assigned))return;
     // Never move a participant out of a running activity to another session.
@@ -125,18 +131,28 @@ export function SubjectPortal() {
     const requestedCode=code;
     const next=await sessionRequest(requestedCode,action,payload);
     if(activeCode.current===requestedCode)acceptSnapshot(next);
-    if(["rating","taskComplete","autoAdvance","advance","subjectSkip"].includes(action)&&next.step?.id===payload.expectedStepId)throw new Error("The session paused or changed before saving. Retry when the instructor resumes.");
+    if(action==="subjectBeginTask" && next.awaitingTaskStart)throw new Error("Could not start the activity. Try again when recording is ready.");
+    if(["rating","taskComplete","autoAdvance","advance"].includes(action)&&next.step?.id===payload.expectedStepId)throw new Error("The session paused or changed before saving. Retry when the instructor resumes.");
   },[acceptSnapshot,code]);
   useEffect(()=>{if(!code||snapshot?.status==="complete"||snapshot?.status==="aborted")return;const requestedCode=code;const beat=()=>sessionRequest(requestedCode,"subjectHeartbeat").then(next=>{if(activeCode.current===requestedCode)acceptSnapshot(next)}).catch(()=>undefined);const first=window.setTimeout(beat,0);const id=window.setInterval(beat,5000);return()=>{clearTimeout(first);clearInterval(id)}},[acceptSnapshot,code,snapshot?.status]);
   useEffect(()=>{
-    if(!snapshot||snapshot.selfGuided||!["complete","aborted"].includes(snapshot.status))return;
+    if(!snapshot||awaitingFeedback||snapshot.selfGuided||!["complete","aborted"].includes(snapshot.status))return;
     let cancelled=false;
     const follow=()=>participantSessionRequest(snapshot.participantId).then(next=>{if(!cancelled&&next.code!==snapshot.code)connectSnapshot(next)}).catch(()=>undefined);
     const first=window.setTimeout(follow,0);const id=window.setInterval(follow,1200);
     return()=>{cancelled=true;clearTimeout(first);clearInterval(id)};
-  },[connectSnapshot,snapshot]);
+  },[connectSnapshot,snapshot,awaitingFeedback]);
   const changeSession = useCallback(() => { ignoredStation.current=activeCode.current;window.localStorage.removeItem("meridian.subject.code");window.history.replaceState(null,"","/subject");activeCode.current="";setSnapshot(null);setDraft("");setError("");setCode(""); },[]);
 
+  const endSession=snapshot && ["setup","running","paused"].includes(snapshot.status)?()=>{
+    const preparing=snapshot.status==="setup";
+    if(window.confirm(preparing?"End this session before recording starts?":"End your session now? Recording will stop and saved responses will be kept."))
+      void act("subjectEnd").catch(()=>window.alert("Could not end this session. Please try again."));
+  }:undefined;
+  const switchDisplay=()=>{
+    if(snapshot && ["running","paused"].includes(snapshot.status) && !window.confirm("Leave this display to join another session? This does not end the current session."))return;
+    changeSession();
+  };
   const submit = async () => {
     const value=draft.trim().toUpperCase();if(!value)return;
     setConnecting(true);setError("");
@@ -149,59 +165,62 @@ export function SubjectPortal() {
 
   if (station.invite) return <main className="recorder-pair"><h1>Pair this subject computer?</h1><p>Use the lab computer connected to the sensors. This browser will remember the instructor station and join its next studies. Pairing does not start a recording.</p><button className="wizard-primary" disabled={station.busy} onClick={()=>void station.enroll()}>{station.busy?"Pairing…":"Pair this subject computer"}</button>{station.issue?<p role="alert">{station.issue}</p>:null}</main>;
   if (!code) return <SubjectConnect draft={draft} error={station.issue || error} connecting={connecting} setDraft={setDraft} submit={submit} />;
-  if (!snapshot) return <SubjectFrame code={code} progress={0} label="Session connection" title={<>Please wait.<br /><i>Connecting.</i></>} description={error || "The study will appear here when the connection is ready."} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
+  if (!snapshot) return <SubjectFrame code={code} progress={0} label="Session connection" title={<>Please wait.<br /><i>Connecting.</i></>} description={error || "The study will appear here when the connection is ready."} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}><QuietField /></SubjectFrame>;
 
   const step = snapshot.step;
   const progress = snapshot.stepCount ? Math.round(((snapshot.stepIndex + .35) / snapshot.stepCount) * 100) : 0;
-  if (snapshot.status === "aborted") return <SubjectFrame code={snapshot.code} progress={progress} label="Session ended" title="Session ended." description="There are no more activities." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
-  if (!step || snapshot.status === "complete" || step.type === "end") return <SubjectFrame code={snapshot.code} progress={100} label="Session complete" title="Thank you." description="You have finished the study. You can leave this screen." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField complete /></SubjectFrame>;
+  if(snapshot.status==="setup" && !snapshot.consentGiven)return <SubjectFrame code={code} progress={0} label="Before recording" title={<>Your<br/><i>permission.</i></>} description="Taking part is voluntary. You can decline now or stop during the study." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}>
+    <ConsentForm key={code+snapshot.consentSources.join(",")} sources={snapshot.consentSources} act={act}/></SubjectFrame>;
+  if(snapshot.feedbackStage==="stopping")return <SubjectFrame code={code} progress={100} label="Finishing up" title={<>Stopping the<br/><i>recording.</i></>} description="Keep this page open while the recorder finishes." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}><QuietField/></SubjectFrame>;
+  if(snapshot.feedbackStage==="open")return <SubjectFrame code={code} progress={100} label="Recording stopped" title={<>How did<br/><i>it go?</i></>} description="Your feedback is optional. You can answer either question or skip both." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}><FeedbackForm key={code} act={act}/></SubjectFrame>;
+  if (snapshot.status === "aborted") return <SubjectFrame code={snapshot.code} progress={progress} label="Session ended" title="Session ended." description="There are no more activities." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}><QuietField /></SubjectFrame>;
+  if (!step || snapshot.status === "complete" || step.type === "end") return <SubjectFrame code={snapshot.code} progress={100} label="Session complete" title="Thank you." description="You have finished the study. You can leave this screen." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}><QuietField complete /></SubjectFrame>;
   if(snapshot.status==="setup" && !snapshot.recorderOnline && !snapshot.canStartRecording){
     const trusted=station.assigned===code;
-    return <SubjectFrame code={code} progress={0} label="Before you begin" title={trusted?"Connect this computer.":"Preparing this computer."} description={trusted?"The recorder connects the sensors on this computer to your study. Starting the study is a separate step.":"Open the subject invitation from Recording setup on the computer connected to the sensors."} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}>
+    return <SubjectFrame code={code} progress={0} label="Before you begin" title={trusted?"Connect this computer.":"Preparing this computer."} description={trusted?"The recorder connects the sensors on this computer to your study. Starting the study is a separate step.":"Open the subject invitation from Recording setup on the computer connected to the sensors."} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}>
       {trusted?<SubjectRecorder key={code} code={code}/>:<QuietField/>}</SubjectFrame>;
   }
-  if (snapshot.selfGuided && snapshot.status === "setup") return <SubjectFrame code={code} progress={0} label="Before you begin" title={snapshot.canStartRecording?"Ready to begin.":"Getting ready."} description={snapshot.canStartRecording?"Starting will record this session. Follow one activity at a time. You can end your session at any point.":"Keep this page open while the recording equipment is prepared."} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}>{snapshot.canStartRecording?<ActionButton label="Start recording" run={()=>act("subjectStart")}/>:<QuietField/>}</SubjectFrame>;
-  if (!snapshot.selfGuided && (snapshot.status === "setup" || !snapshot.operatorConnected || !snapshot.acquisitionReady)) return <SubjectFrame code={snapshot.code} progress={progress} label="Study preparation" title={<>Please wait.<br /><i>We will begin shortly.</i></>} description="There is nothing you need to do yet." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}><QuietField /></SubjectFrame>;
+  if (snapshot.selfGuided && snapshot.status === "setup") return <SubjectFrame code={code} progress={0} label="Before you begin" title={snapshot.canStartRecording?"Ready to begin.":"Getting ready."} description={snapshot.canStartRecording?"Starting will record this session. Follow one activity at a time. You can end your session at any point.":"Keep this page open while the recording equipment is prepared."} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}>{snapshot.canStartRecording?<ActionButton label="Start recording" run={()=>act("subjectStart")}/>:<QuietField/>}</SubjectFrame>;
+  if (!snapshot.selfGuided && (snapshot.status === "setup" || !snapshot.operatorConnected || !snapshot.acquisitionReady)) return <SubjectFrame code={snapshot.code} progress={progress} label="Study preparation" title={<>Please wait.<br /><i>We will begin shortly.</i></>} description="There is nothing you need to do yet." audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}><QuietField /></SubjectFrame>;
 
   const presentation = subjectPresentation(step);
   const blocked=snapshot.status!=="running" || Boolean(snapshot.announcement) || !snapshot.acquisitionReady;
   const move = async (direction:number) => {
-    if (movementPending.current || !window.confirm(direction < 0 ? "Go back? The previous task will restart. Saved responses remain in the study record; unfinished responses on this screen will be lost." : "Go to the next task? The unfinished part of this task will be marked as skipped, not completed.")) return;
+    if (movementPending.current || !window.confirm("Go back? The previous task will restart. Saved responses remain in the study record; unfinished responses on this screen will be lost.")) return;
     movementPending.current=true;setMoving(true);
     try { await act("subjectNavigate",{direction,expectedStepId:step.id,expectedStepStartedAt:snapshot.stepStartedAt,expectedAttempt:snapshot.attempt});setError(""); }
     catch(reason){setError(reason instanceof Error ? reason.message : "Could not change tasks. Try again.");}
     finally {movementPending.current=false;setMoving(false);}
   };
-  return <SubjectFrame code={snapshot.code} progress={progress} allowSwitch={!snapshot.selfGuided} label={presentation.label} title={presentation.title} description={step.type==="baseline" && !step.fixation ? (audioEnabled?"Close your eyes and breathe naturally. A tone marks the end.":"Close your eyes and breathe naturally for about 90 seconds, then open them.") :step.type==="sam"?"Rate how you felt during the last clip.":step.type === "nback" ? `Compare each square with the one ${snapshot.nbackLevel} ${snapshot.nbackLevel===1?"step":"steps"} earlier. Try the examples before you begin.` : step.subjectPrompt || presentation.description} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={changeSession}>
+  return <SubjectFrame code={snapshot.code} progress={progress} label={presentation.label} showLabel={false} title={presentation.title} description={step.type==="baseline" && !step.fixation ? (audioEnabled?"Close your eyes and breathe naturally. A tone marks the end.":"Close your eyes and breathe naturally for about 90 seconds, then open them.") :step.type==="sam"?"Rate how you felt during the last clip.":step.type === "nback" ? "Keep track of the positions, not the colour. Use Match only when the position repeats at the right distance." : step.subjectPrompt || presentation.description} audioEnabled={audioEnabled} setAudioEnabled={setAudioEnabled} changeSession={switchDisplay} endSession={endSession}>
     {error ? <p className="subject-request-error" role="alert">{error} Your task has not been discarded.</p> : null}
     {snapshot.status === "running" && !snapshot.acquisitionReady ? <div className="subject-overlay" role="status"><p>Waiting for the recording connection. Keep this page open.</p></div> : null}
-    {snapshot.status === "paused" ? <div className="subject-overlay"><p>{step.safety?"Stop the movement and breathe normally. The activity is paused.":snapshot.announcement?.text || "Recording paused. Your activity will continue when the connection returns."}</p>{!snapshot.selfGuided?<button className="paper-button" onClick={changeSession}>Change session</button>:null}</div> : null}
+    {snapshot.status === "paused" ? <div className="subject-overlay"><p>{step.safety?"Stop the movement and breathe normally. The activity is paused.":snapshot.announcement?.text || "Recording paused. Your activity will continue when the connection returns."}</p></div> : null}
     {snapshot.status !== "paused" && snapshot.announcement ? <div className="subject-overlay announcement" role="alert"><p>{snapshot.announcement.text}</p><button className="paper-button" onClick={()=>act("ack")}>Understood</button></div> : null}
     {!snapshot.selfGuided && step.safety && snapshot.status === "running" ? <button className="safety-stop" onClick={()=>act("pause",{reason:"Subject requested a stop",source:"subject"})}>I need to stop</button> : null}
-    <div inert={blocked} className={`live-subject-task task-${step.type}`}><StepView key={`${step.id}-${snapshot.attempt}`} step={step} snapshot={snapshot} act={act} audioEnabled={audioEnabled} /></div>
-    {snapshot.selfGuided ? <div className="subject-study-options">{step.safety && !blocked?<ActionButton label="Skip this movement" run={()=>act("subjectSkip",{expectedStepId:step.id,expectedStepStartedAt:snapshot.stepStartedAt,expectedAttempt:snapshot.attempt})}/>:null}<button onClick={()=>{if(window.confirm("End your session now? Recording will stop and responses already saved will be kept."))void act("subjectEnd").catch(()=>setError("Could not end this session. Please try again."));}}>End my session</button></div> : <nav className="subject-task-navigation" aria-label="Task navigation">
+    <div inert={blocked} className={`live-subject-task task-${step.type}`}><StepView key={`${step.id}-${snapshot.attempt}`} step={step} snapshot={snapshot} act={act} audioEnabled={audioEnabled} onAudioChange={setAudioEnabled} /></div>
+    {!snapshot.selfGuided && <nav className="subject-task-navigation" aria-label="Task navigation">
       <button disabled={moving || !snapshot.canGoBack || Boolean(snapshot.announcement)} onClick={()=>void move(-1)}>Previous task</button>
-      <button disabled={moving || !snapshot.canGoNext || Boolean(snapshot.announcement)} onClick={()=>void move(1)}>Next task</button>
       {step.type === "gate" || step.type === "setup" ? <small>The instructor will continue when checks are complete.</small> : null}
-      {!snapshot.canGoNext && step.type !== "gate" && step.type !== "setup" ? <small>Finish this activity. The instructor will end the session.</small> : null}
     </nav>}
   </SubjectFrame>;
 }
 
-function ActionButton({label,run}:{label:string;run:()=>Promise<void>}) {
+function ActionButton({label,run,disabled=false}:{label:string;run:()=>Promise<void>;disabled?:boolean}) {
   const lock=useRef(false); const [busy,setBusy]=useState(false); const [failed,setFailed]=useState(false);
-  return <div className="guided-action"><button className="paper-button" disabled={busy} onClick={async()=>{
+  return <div className="guided-action"><button className="paper-button" disabled={busy||disabled} onClick={async()=>{
     if(lock.current)return;lock.current=true;setBusy(true);setFailed(false);
     try{await run();}catch{setFailed(true);}finally{lock.current=false;setBusy(false);}
-  }}>{busy?"Saving…":label}</button>{failed?<p role="alert">Could not continue. Check the connection and try again.</p>:null}</div>;
+  }}>{busy?(label==="Start task"?"Starting…":"Saving…"):label}</button>{failed?<p role="alert">Could not continue. Check the connection and try again.</p>:null}</div>;
+}
+
+function TaskStart({run,active,label="Start task"}:{run:()=>Promise<void>;active:boolean;label?:string}) {
+  const slot=useContext(SubjectCopySlot);
+  return slot && createPortal(<div className="task-start-action"><ActionButton label={label} run={run} disabled={!active}/></div>,slot);
 }
 
 function SubjectConnect({draft,error,connecting,setDraft,submit}:{draft:string;error:string;connecting:boolean;setDraft:(value:string)=>void;submit:()=>Promise<void>}) {
-  return <main className="live-entry live-subject-connect"><header className="live-entry-topbar"><Link href="/">MERIDIAN</Link><span>THE MERIDIAN STUDY</span><span>SUBJECT DISPLAY</span></header><section className="live-entry-grid"><div className="live-entry-index"><i /><span>01</span><p>Guided<br />session</p></div><form onSubmit={(event)=>{event.preventDefault();void submit()}}><h1>Join your session.</h1><label htmlFor="session-code">Session code or participant ID</label><input id="session-code" value={draft} onChange={(event)=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} placeholder="0009AB7K" />{error ? <p className="live-entry-error" role="alert">{error}</p> : <div className="live-entry-state">Use the details provided for your study.</div>}<button type="submit" disabled={connecting || !draft.trim()}>{connecting ? "CONNECTING" : "CONNECT"}<ArrowUpRight size={16} /></button></form><div className="live-entry-context"><span>GUIDED DISPLAY</span><strong>One task at a time.</strong><p>Only the current instruction will appear during the study.</p><details><summary>First-time lab setup</summary><p>Open the instructor’s private invitation on this computer to pair its browser. You can install the recorder before the study.</p><a download href="/recorder-tools/MeridianRecorderSetup.exe">Install recorder for Windows (64-bit)</a></details></div></section><footer className="live-entry-footer"><span><Eye size={14} /> SUBJECT EXPERIENCE</span><span>THE MERIDIAN STUDY</span></footer></main>;
-}
-
-function SubjectFrame({code,progress,label,title,description,audioEnabled,setAudioEnabled,changeSession,children,allowSwitch=true}:{allowSwitch?:boolean;code:string;progress:number;label:string;title:ReactNode;description:string;audioEnabled:boolean;setAudioEnabled:(value:boolean)=>void;changeSession:()=>void;children:ReactNode}) {
-  return <MotionConfig reducedMotion="user"><main className="live-subject"><header className="live-subject-topbar"><Link href="/" className="live-wordmark">MERIDIAN</Link><span>SUBJECT DISPLAY</span><span>{code}</span></header><div className="live-subject-progress" aria-hidden="true"><motion.i initial={false} animate={{width:`${Math.max(0,Math.min(progress,100))}%`}} /></div><section className="live-subject-stage"><motion.div className="live-subject-copy" key={`${code}-${label}`} initial={{opacity:0,y:7}} animate={{opacity:1,y:0}}><p className="live-subject-label">{label}</p><h1>{title}</h1><p className="live-subject-description">{description}</p><div className="live-subject-actions"><button className="live-subject-secondary" onClick={()=>setAudioEnabled(!audioEnabled)} aria-pressed={audioEnabled}>{audioEnabled?<Volume2 size={16}/>:<VolumeX size={16}/>} {audioEnabled?"AUDIO ON":"AUDIO OFF"}</button></div></motion.div><div className="live-subject-field">{children}</div></section><footer className="live-subject-footer"><span>THE MERIDIAN STUDY</span>{allowSwitch?<button onClick={changeSession}>CHANGE SESSION <ArrowUpRight size={14}/></button>:null}</footer><p className="sr-only" aria-live="polite">Audio is {audioEnabled?"on":"off"}.</p></main></MotionConfig>;
+  return <main className="live-entry live-subject-connect"><PortalHeader role="Subject"/><section className="live-entry-grid"><div className="live-entry-index"><i /><span>01</span><p>Guided<br />session</p></div><form onSubmit={(event)=>{event.preventDefault();void submit()}}><h1>Join your session.</h1><label htmlFor="session-code">Session code or participant ID</label><input id="session-code" value={draft} onChange={(event)=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} placeholder="0009AB7K" />{error ? <p className="live-entry-error" role="alert">{error}</p> : <div className="live-entry-state">Use the details provided for your study.</div>}<button type="submit" disabled={connecting || !draft.trim()}>{connecting ? "CONNECTING" : "CONNECT"}<ArrowUpRight size={16} /></button></form><div className="live-entry-context"><span>GUIDED DISPLAY</span><strong>One task at a time.</strong><p>Only the current instruction will appear during the study.</p><details><summary>First-time lab setup</summary><p>Open the instructor’s private invitation on this computer to pair its browser. You can install the recorder before the study.</p><a download href="/recorder-tools/MeridianRecorderSetup.exe">Install recorder for Windows (64-bit)</a></details></div></section></main>;
 }
 
 function QuietField({complete=false}:{complete?:boolean}) { return <div className={`live-subject-cross ${complete?"complete":""}`} aria-hidden="true"><i/><i/></div>; }
@@ -222,22 +241,27 @@ function subjectPresentation(step:SubjectStep) {
   return {label:"Current task",title:<>A moment<br/><i>of attention.</i></>,description:"Follow the instruction shown on the screen."};
 }
 
-function StepView({step,snapshot,act:request,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(action:string,payload?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean}) {
+function StepView({step,snapshot,act:request,audioEnabled,onAudioChange}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(action:string,payload?:Record<string,unknown>)=>Promise<void>;onAudioChange:(enabled:boolean)=>void;audioEnabled:boolean}) {
   const act = useCallback((action:string,payload:Record<string,unknown>={})=>request(action,{...payload,expectedStepId:step.id,expectedStepStartedAt:snapshot.stepStartedAt,expectedAttempt:snapshot.attempt}),[request,step.id,snapshot.stepStartedAt,snapshot.attempt]);
-  if (snapshot.awaitingMovement) return <section className="subject-center"><p>Only do this if it feels comfortable.</p><ActionButton label="Begin movement" run={()=>act("subjectBeginMovement")}/></section>;
+  const active=snapshot.status==="running" && snapshot.acquisitionReady && !snapshot.announcement;
+  if(snapshot.awaitingTaskStart)return <section className="subject-center timed-screen">
+    <TaskStart active={active} run={()=>act("subjectBeginTask")}/>
+    <time aria-label="Task duration">{clock(step.durationSec??0)}</time>
+    {step.safety && <p>Only begin if you feel comfortable.</p>}
+  </section>;
   if (snapshot.selfGuided && step.type==="setup") return <ActionButton label="Begin first activity" run={()=>act("advance",{source:"subject"})}/>;
   if (step.type === "setup") return <CenteredInstruction text={step.subjectPrompt} />;
-  if (step.type === "clip") return <ClipScreen active={snapshot.status==="running" && snapshot.acquisitionReady && !snapshot.announcement} step={step} src={snapshot.mediaSrc} act={act} audioEnabled={audioEnabled} />;
+  if (step.type === "clip") return <ClipScreen active={snapshot.status==="running" && snapshot.acquisitionReady && !snapshot.announcement} step={step} src={snapshot.mediaSrc} act={act} audioEnabled={audioEnabled} onAudioChange={onAudioChange} />;
   if (step.type === "sam") return <RatingScreen step={step} act={act} />;
   if (step.type === "washout") return <WashoutScreen step={step} snapshot={snapshot} act={act} />;
-  if (step.type === "stroop") return <StroopTask step={step} act={act} />;
+  if (step.type === "stroop") return <StroopTask step={step} act={act} active={active} />;
   if (step.type === "nback") return <NBackTask step={step} level={snapshot.nbackLevel} active={snapshot.status === "running" && snapshot.acquisitionReady && !snapshot.announcement} act={act} />;
-  if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} />;
+  if (step.type === "conversation") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="conversation" src="" audioEnabled={audioEnabled} onAudioChange={onAudioChange} />;
   if (step.type === "gate") return <GateScreen step={step} snapshot={snapshot} proceed={()=>act("advance",{source:"subject"})} />;
-  if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
-  if (step.type === "sweep" && step.variant === "breath_hold") return <BreathHoldScreen key={snapshot.status+(snapshot.announcement?.id??"")} step={step} act={act} />;
-  if (step.type === "bodyscan") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="bodyscan" src={snapshot.mediaSrc} audioEnabled={audioEnabled} />;
-  if (step.durationSec) return <TimedScreen step={step} snapshot={snapshot} act={act} mode={step.fixation ? "fixation" : "timer"} src="" audioEnabled={audioEnabled} />;
+  if (step.type === "sweep" && step.variant === "box_breathing") return <BreathingScreen step={step} snapshot={snapshot} act={act} src={snapshot.mediaSrc} audioEnabled={audioEnabled} onAudioChange={onAudioChange} />;
+  if (step.type === "sweep" && step.variant === "breath_hold") return <BreathHoldScreen active={active} key={snapshot.status+(snapshot.announcement?.id??"")} step={step} act={act} />;
+  if (step.type === "bodyscan") return <TimedScreen step={step} snapshot={snapshot} act={act} mode="bodyscan" src={snapshot.mediaSrc} audioEnabled={audioEnabled} onAudioChange={onAudioChange} />;
+  if (step.durationSec) return <TimedScreen step={step} snapshot={snapshot} act={act} mode={step.fixation ? "fixation" : "timer"} src="" audioEnabled={audioEnabled} onAudioChange={onAudioChange} />;
   return <CenteredInstruction text={step.subjectPrompt || "Please wait."} />;
 }
 
@@ -259,16 +283,18 @@ function useRemaining(step:SubjectStep,snapshot:SubjectSnapshot,onDone?:()=>Prom
   return remaining;
 }
 
-function TimedScreen({step,snapshot,act,mode,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;mode:"timer"|"fixation"|"conversation"|"bodyscan";src:string;audioEnabled:boolean}) {
+function TimedScreen({step,snapshot,act,mode,src,audioEnabled,onAudioChange}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;mode:"timer"|"fixation"|"conversation"|"bodyscan";src:string;onAudioChange:(enabled:boolean)=>void;audioEnabled:boolean}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
   const remaining=useRemaining(step,snapshot,done);
-  if(mode==="bodyscan") return <section className="body-scan">
-    {src ? <ProtocolVideo className="body-scan-video" src={src} audioEnabled={audioEnabled} loop /> : null}
-    <div className="body-scan-content"><div className="breathing-orb"/><time>{clock(remaining)}</time></div>
-  </section>;
-  return <section className="subject-center timed-screen">
-    {mode==="fixation" ? <div className="fixation" aria-label="Focus on the cross"/> : <span className="sr-only">Time remaining</span>}
-    {mode==="conversation" ? <time>{clock(remaining)}</time> : mode!=="fixation" ? <time>{Math.ceil(remaining)}</time> : <small>{Math.ceil(remaining)}</small>}
+  if(mode==="conversation") return <SpeakingPrompt elapsedSeconds={(step.durationSec ?? 0)-remaining}/>;
+  if(mode==="bodyscan") {
+    const guide=<div className="body-scan-content"><div className="breathing-orb"/><time>{clock(remaining)}</time></div>;
+    return <section className="body-scan">{src?<StudyPlayer className="body-scan-video" src={src} aria-label="Guided body scan video"
+      active={snapshot.status==="running" && snapshot.acquisitionReady && !snapshot.announcement} onAudioChange={onAudioChange} autoPlay muted={!audioEnabled} loop>{guide}</StudyPlayer>:guide}</section>;
+  }
+  return <section className={`subject-center timed-screen ${mode==="fixation"?"fixation-screen":""}`}>
+    {mode==="fixation" && <div className="fixation" aria-label="Focus on the cross"/>}
+    <time className={mode==="fixation"?"task-countdown":undefined} aria-label="Time remaining">{clock(remaining)}</time>
   </section>;
 }
 
@@ -281,10 +307,10 @@ function GateScreen({step,snapshot,proceed}:{step:SubjectStep;snapshot:SubjectSn
 function WashoutScreen({step,snapshot,act}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);
   const remaining=useRemaining(step,snapshot,done);
-  return <section className="washout-screen"><div className="washout-cross"/><time>{Math.ceil(remaining)}</time></section>;
+  return <section className="washout-screen"><div className="washout-cross"/><time className="task-countdown" aria-label="Time remaining">{clock(remaining)}</time></section>;
 }
 
-function ClipScreen({step,src,act,audioEnabled,active}:{step:SubjectStep;src:string;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;audioEnabled:boolean;active:boolean}) {
+function ClipScreen({step,src,act,audioEnabled,active,onAudioChange}:{step:SubjectStep;src:string;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;onAudioChange:(enabled:boolean)=>void;audioEnabled:boolean;active:boolean}) {
   const video=useRef<HTMLVideoElement>(null), onset=useRef(false), saving=useRef(false);
   const [state,setState]=useState<"ready"|"playing"|"ended"|"error">("ready");
   const [failure,setFailure]=useState("");
@@ -294,7 +320,6 @@ function ClipScreen({step,src,act,audioEnabled,active}:{step:SubjectStep;src:str
     catch{setFailure("The clip has finished. Retry to save and continue.");}
     finally{saving.current=false;}
   };
-  useEffect(()=>{if(!active)video.current?.pause();},[active]);
   const play=async()=>{
     try{
       if(!video.current || !src)throw new Error();
@@ -303,14 +328,13 @@ function ClipScreen({step,src,act,audioEnabled,active}:{step:SubjectStep;src:str
     }catch{setState("error");}
   };
   return <section className="subject-center clip-ready">
-    {/* The registered research stimulus is not altered with captions or transport controls. */}
-    {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-    <video ref={video} className="stimulus-video" hidden={state!=="playing"} src={src||undefined} playsInline muted={!audioEnabled}
+    <StudyPlayer videoRef={video} className="stimulus-video" aria-label="Study clip" hidden={state!=="playing"}
+      src={src||undefined} active={active} muted={!audioEnabled} onAudioChange={onAudioChange}
       onPlaying={()=>{setState("playing");if(!onset.current){onset.current=true;void act("log",{eventType:"media_onset"}).catch(()=>{});}}}
-      onPause={()=>{if(!video.current?.ended)setState(s=>s==="playing"?"ready":s);}}
+      onSeeked={e=>{if(onset.current)void act("log",{eventType:"media_seek",positionSec:e.currentTarget.currentTime}).catch(()=>{});}}
       onEnded={()=>void finish()}
       onError={()=>{setState("error");void act("log",{eventType:"media_error"}).catch(()=>{});}}/>
-    {state==="ready"||state==="error"?<>{state==="error"?<p role="alert">The clip could not play. Check the connection and retry.</p>:null}<button className="light-button" disabled={!active} onClick={()=>void play()}>{state==="error"?"Retry clip":"Play clip"}</button></>:null}
+    {state==="ready"||state==="error"?<>{state==="error"?<p role="alert">The clip could not play. Check the connection and retry.</p>:null}<TaskStart active={active} run={play} label={state==="error"?"Retry clip":onset.current?"Resume clip":"Start task"}/></>:null}
     {state==="ended" && (failure?<><p role="alert">{failure}</p><button className="light-button" onClick={()=>void finish()}>Retry saving</button></>:<p role="status">Saving…</p>)}
   </section>;
 }
@@ -343,12 +367,13 @@ function RatingScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<strin
     if(["ArrowLeft","ArrowUp"].includes(event.key))value=((values[stage]??2)+8)%10+1;
     if(event.key==="Home")value=1;if(event.key==="End")value=10;
     if(value!==null){event.preventDefault();choose(value);event.currentTarget.querySelectorAll<HTMLButtonElement>('button')[value-1]?.focus();}
-  }}>{Array.from({length:10},(_,index)=>index+1).map(value=><button key={value} role="radio" disabled={saving} tabIndex={(values[stage]??1)===value?0:-1} aria-checked={values[stage]===value} aria-label={`${value} of 10${value===1?`, ${dim.lo}`:value===10?`, ${dim.hi}`:""}`} onClick={()=>choose(value)}>{value}</button>)}</div><div className="rating-anchors"><span>1 · {dim.lo}</span><span>10 · {dim.hi}</span></div><details className="rating-keyboard-help"><summary>Keyboard shortcuts</summary>Use arrow keys or 1–9. Press 0 for 10.</details><div className="subject-response-actions">{stage>0?<button className="paper-button" disabled={saving} onClick={()=>setStage(stage-1)}>Back</button>:null}<button className="paper-button" disabled={values[stage]===null||saving} onClick={()=>void submit()}>{saving?"Saving…":stage===2?"Submit responses":"Continue"}</button></div>{error?<p role="alert">{error}</p>:null}</section>;
+  }}>{Array.from({length:10},(_,index)=>index+1).map(value=><button key={value} role="radio" disabled={saving} tabIndex={(values[stage]??1)===value?0:-1} aria-checked={values[stage]===value} aria-label={`${value} of 10${value===1?`, ${dim.lo}`:value===10?`, ${dim.hi}`:""}`} onClick={()=>choose(value)}>{value}</button>)}</div><div className="rating-anchors"><span>1 · {dim.lo}</span><span>10 · {dim.hi}</span></div><details className="rating-keyboard-help"><summary>Keyboard shortcuts</summary>Use arrow keys or 1–9. Press 0 for 10.</details><div className="subject-response-actions">{stage>0?<button className="paper-button" data-tone="secondary" disabled={saving} onClick={()=>setStage(stage-1)}>Back</button>:null}<button className="paper-button" disabled={values[stage]===null||saving} onClick={()=>void submit()}>{saving?"Saving…":stage===2?"Submit responses":"Continue"}</button></div>{error?<p role="alert">{error}</p>:null}</section>;
 }
 
-const COLOURS = [{name:"Red",hex:"#b83232"},{name:"Blue",hex:"#245fa9"},{name:"Green",hex:"#34743b"},{name:"Yellow",hex:"#d3a522"},{name:"Purple",hex:"#76509a"},{name:"Orange",hex:"#c66728"}];
-function StroopTask({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [started,setStarted]=useState(false),[trial,setTrial]=useState(0),[stimulus,setStimulus]=useState(()=>makeStimulus());
+function StroopTask({step,act,active}:{step:SubjectStep;active:boolean;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
+  const [started,setStarted]=useState(false),[trial,setTrial]=useState(0);
+  const [trials]=useState(()=>makeStroopTrials());
+  const stimulus=trials[trial];
   const [saving,setSaving]=useState(false),[failed,setFailed]=useState(false);
   const startedAt=useRef(0),locked=useRef(false),results=useRef<Array<{correct:boolean;rt:number}>>([]);
   useEffect(()=>{if(started){startedAt.current=performance.now();locked.current=false;}},[started,trial]);
@@ -361,78 +386,23 @@ function StroopTask({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,
   const answer=(name:string,eventTime:number)=>{
     if(locked.current)return;locked.current=true;
     results.current.push({correct:name===stimulus.ink,rt:Math.max(0,eventTime-startedAt.current)});
-    if(trial===29){void save();return;}
-    setTrial(trial+1);setStimulus(makeStimulus());
+    if(trial===trials.length-1){void save();return;}
+    setTrial(trial+1);
   };
-  if(!started)return <section className="subject-center"><p>For example, if the word “blue” is printed in red, choose Red.</p><button className="paper-button" onClick={()=>setStarted(true)}>Begin colour task</button></section>;
+  if(!started)return <section className="subject-center"><p>For example, if the word “blue” is printed in red, choose Red.</p><TaskStart active={active} run={async()=>setStarted(true)}/></section>;
   if(saving||failed)return <section className="subject-center">{failed?<><p role="alert">Your answers are still here.</p><button className="paper-button" onClick={()=>void save()}>Retry saving</button></>:<p role="status">Saving…</p>}</section>;
-  return <section className="task-screen"><p>Word {trial+1} of 30</p><div className="stroop-word" style={{color:stimulus.hex}}>{stimulus.word}</div><div className="colour-buttons">{COLOURS.map(colour=><button key={colour.name} style={{background:colour.hex}} onClick={e=>answer(colour.name,e.timeStamp)}>{colour.name}</button>)}</div></section>;
+  return <section className="task-screen"><p>Word {trial+1} of 30</p><div className="stroop-word" style={{color:stimulus.hex}}>{stimulus.word}</div><div className="colour-buttons">{COLOURS.map(colour=><button key={colour.name} style={{background:colour.hex,color:["Yellow","Orange"].includes(colour.name)?"#161616":"#fff"}} onClick={e=>answer(colour.name,e.timeStamp)}>{colour.name}</button>)}</div></section>;
 }
 
-function makeStimulus(){const word=COLOURS[Math.floor(Math.random()*COLOURS.length)];let ink=COLOURS[Math.floor(Math.random()*COLOURS.length)];if(Math.random()>.35)while(ink.name===word.name)ink=COLOURS[Math.floor(Math.random()*COLOURS.length)];return{word:word.name.toUpperCase(),ink:ink.name,hex:ink.hex}}
-
-function NBackTask({step,level:configuredLevel,active,act}:{step:SubjectStep;level:number;active:boolean;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
-  const [level]=useState(configuredLevel);
-  const [started,setStarted]=useState(false);const [lit,setLit]=useState<number|null>(null);
-  const [trial,setTrial]=useState(0);const [responded,setResponded]=useState(false);
-  const [practice,setPractice]=useState(0);const [feedback,setFeedback]=useState("");
-  const [finished,setFinished]=useState(false);const [error,setError]=useState("");
-  const sequence=useRef<number[]>([]);const onset=useRef(0);const response=useRef<number|null>(null);
-  const results=useRef<Array<{position:number;target:boolean;response:boolean;rtMs:number|null;warmup:boolean}>>([]);
-  const saving=useRef(false);
-  const finish=useCallback(async()=>{
-    if(saving.current)return;saving.current=true;setError("");
-    const scored=results.current.filter(r=>!r.warmup);
-    try{await act("taskComplete",{expectedStepId:step.id,eventType:"nback_complete",label:"N-back completed",metadata:{level,trials:20,scoredTrials:scored.length,practiceScored:false,hits:scored.filter(r=>r.target&&r.response).length,misses:scored.filter(r=>r.target&&!r.response).length,falseAlarms:scored.filter(r=>!r.target&&r.response).length,correctRejections:scored.filter(r=>!r.target&&!r.response).length,trialResults:results.current}});}
-    catch{setError("Results are still here. Check your connection, then retry saving.");}
-    finally{saving.current=false;}
-  },[act,level,step.id]);
-  useEffect(()=>{
-    if(!started||!active||finished)return;
-    if(trial>=20){const done=window.setTimeout(()=>{setFinished(true);void finish();},0);return()=>clearTimeout(done);}
-    if(sequence.current[trial]===undefined){let pos=Math.floor(Math.random()*9);if(trial>=level&&Math.random()<.3)pos=sequence.current[trial-level];sequence.current[trial]=pos;}
-    const show=window.setTimeout(()=>{setLit(sequence.current[trial]);setResponded(false);response.current=null;onset.current=performance.now();},0);
-    const hide=window.setTimeout(()=>setLit(null),800);
-    const next=window.setTimeout(()=>{
-      results.current[trial]={position:sequence.current[trial],target:trial>=level&&sequence.current[trial]===sequence.current[trial-level],response:response.current!==null,rtMs:response.current,warmup:trial<level};
-      setTrial(trial+1);
-    },1100);
-    return()=>{clearTimeout(show);clearTimeout(hide);clearTimeout(next);};
-  },[active,finish,finished,level,started,trial]);
-  const press=useCallback(()=>{if(!active||!started||finished||response.current!==null)return;response.current=Math.round(performance.now()-onset.current);setResponded(true);},[active,started,finished]);
-  useEffect(()=>{if(!started||finished)return;const key=(e:KeyboardEvent)=>{if(e.code==="Space"&&!e.repeat&&!(e.target instanceof HTMLButtonElement)){e.preventDefault();press();}};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);},[press,started,finished]);
-  if(finished)return <section className="subject-center"><h1>Task finished.</h1><p role="status">{error||"Saving your responses…"}</p>{error?<button className="paper-button" onClick={()=>void finish()}>Retry saving</button>:null}</section>;
-  if(!started){
-    const example=[0,...Array.from({length:level-1},(_,i)=>i+1),practice===1||practice===3?8:0];
-    return <section className="nback-intro">
-      <h2>Remember the position</h2><p>A square lights up in the grid. Press <strong>Match</strong> only when it is in the same place as <strong>{level} {level===1?"step":"steps"} earlier</strong>. Otherwise, do nothing and watch the next square.</p>
-      <p>Watch the first {level} {level===1?"square":"squares"} without responding. Each square appears briefly; you can respond until the next one appears.</p>
-      <h3>Practice example · not scored</h3><div className="nback-example">{example.map((position,i)=><div key={i}><span>{i===level?"Now":`${level-i} ${level-i===1?"step":"steps"} ago`}</span><div className="nback-mini" aria-label={`Square in position ${position+1}`}>{Array.from({length:9},(_,cell)=><i key={cell} className={cell===position?"lit":""}/>)}</div></div>)}</div>
-      <p>Does “Now” match the position {level} {level===1?"step":"steps"} ago?</p>
-      <div className="subject-response-actions"><button className="paper-button" onClick={()=>{setFeedback(practice===1?"Not this time. The positions differ, so wait for the next square.":"Correct. These positions match.");if(practice!==1)setPractice(2);}}>Match</button><button className="paper-button" onClick={()=>{setFeedback(practice===1?"Correct. During the real task, simply wait when they differ.":"Compare the first and last grids. They are the same, so press Match.");if(practice===1)setPractice(3);}}>No match: wait</button></div>
-      <p role="status">{feedback}</p>{practice===2?<button className="paper-button" onClick={()=>{setPractice(1);setFeedback("");}}>Try a different example</button>:null}{practice===3?<button className="paper-button" disabled={!active} onClick={()=>{void act("log",{eventType:"nback_scored_onset",level}).then(()=>setStarted(true)).catch(()=>setFeedback("Could not start. Check the connection and try again."));}}>Begin 20-square task</button>:null}
-      <p className="rating-keyboard-help">In the task, click Match or press Space once. No correctness feedback is shown during the recorded task.</p>
-    </section>;
-  }
-  return <section className="task-screen nback-running"><p>Square {Math.min(trial+1,20)} of 20</p><p>Match the position from <strong>{level} {level===1?"step":"steps"} ago</strong>.</p><div className="nback-grid" role="img" aria-label={lit===null?"Between squares":`Square in position ${lit+1}`} >{Array.from({length:9},(_,i)=><div key={i} className={lit===i?"lit":""}/>)}</div><button className="match-button" disabled={!active||responded} onClick={press} onKeyDown={e=>{if(e.repeat)e.preventDefault();}}>Match</button><p role="status">{responded?"Response received":trial<level?"Watch and remember. There is no earlier square to compare yet.":"Different position? Wait for the next square."}</p><small>Click Match or press Space.</small></section>;
-}
-
-function BreathingScreen({step,snapshot,act,src,audioEnabled}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;src:string;audioEnabled:boolean}) {
+function BreathingScreen({step,snapshot,act,src,audioEnabled,onAudioChange}:{step:SubjectStep;snapshot:SubjectSnapshot;act:(a:string,p?:Record<string,unknown>)=>Promise<void>;src:string;onAudioChange:(enabled:boolean)=>void;audioEnabled:boolean}) {
   const done=useCallback(()=>act("autoAdvance",{expectedStepId:step.id}),[act,step.id]);const remaining=useRemaining(step,snapshot,done);const phase=Math.floor((((step.durationSec??0)-remaining)/4)%4);const label=["In","Hold","Out","Hold"][phase];
+  const guide=<div className="breathing-content"><h1>{step.subjectPrompt}</h1><div className={`breathing-circle phase-${phase}`}><span>{label}</span></div><time className="task-countdown" aria-label="Time remaining">{clock(remaining)}</time></div>;
   return <section className={`subject-center breathing-screen ${src?"with-media":""}`}>
-    {src ? <ProtocolVideo className="breathing-video" src={src} audioEnabled={audioEnabled} loop /> : null}
-    <div className="breathing-content"><h1>{step.subjectPrompt}</h1><div className={`breathing-circle phase-${phase}`}><span>{label}</span></div><small>{Math.ceil(remaining)}</small></div>
+    {src?<StudyPlayer className="breathing-video" src={src} aria-label="Breathing guide video" active={snapshot.status==="running" && snapshot.acquisitionReady && !snapshot.announcement} onAudioChange={onAudioChange} autoPlay muted={!audioEnabled} loop>{guide}</StudyPlayer>:guide}
   </section>;
 }
 
-function ProtocolVideo({src,audioEnabled,className,loop=false}:{src:string;audioEnabled:boolean;className:string;loop?:boolean}) {
-  return (
-    // These registered protocol stimuli intentionally omit injected captions because captions would alter the research material.
-    // eslint-disable-next-line jsx-a11y/media-has-caption
-    <video className={className} src={src} autoPlay playsInline loop={loop} muted={!audioEnabled} preload="auto" />
-  );
-}
-function BreathHoldScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
+function BreathHoldScreen({step,act,active}:{step:SubjectStep;active:boolean;act:(a:string,p?:Record<string,unknown>)=>Promise<void>}) {
   const [state,setState]=useState<"ready"|"holding"|"released">("ready");
   const [elapsed,setElapsed]=useState(0),[failed,setFailed]=useState(false);
   const start=useRef(0),duration=useRef<number|null>(null),busy=useRef(false);
@@ -443,7 +413,7 @@ function BreathHoldScreen({step,act}:{step:SubjectStep;act:(a:string,p?:Record<s
     try{await act("taskComplete",{expectedStepId:step.id,eventType:"breath_hold_complete",label:"Breath hold completed",metadata:{durationSec:duration.current}});}
     catch{setFailed(true);}finally{busy.current=false;}
   };
-  return <section className="subject-center breath-hold">{state==="holding"?<><time>{elapsed.toFixed(1)}</time><button className="paper-button" onClick={()=>void release()}>Release and breathe normally</button></>:state==="ready"?<button className="paper-button" onClick={()=>{start.current=performance.now();setState("holding");}}>Begin when comfortable</button>:<><p>Breathe normally.</p>{failed?<button className="paper-button" onClick={()=>void release()}>Retry saving</button>:<p role="status">Saving…</p>}</>}</section>;
+  return <section className="subject-center breath-hold">{state==="holding"?<><time>{elapsed.toFixed(1)}</time><button className="paper-button" data-tone="caution" onClick={()=>void release()}>Release and breathe normally</button></>:state==="ready"?<TaskStart active={active} run={async()=>{start.current=performance.now();setState("holding");}}/>:<><p>Breathe normally.</p>{failed?<button className="paper-button" data-tone="caution" onClick={()=>void release()}>Retry saving</button>:<p role="status">Saving…</p>}</>}</section>;
 }
 
 function clock(value:number){const n=Math.max(0,Math.ceil(value));return`${Math.floor(n/60)}:${String(n%60).padStart(2,"0")}`}

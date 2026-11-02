@@ -13,7 +13,6 @@ export function permitsGuidedTransition(step: ProtocolStep, action: string, even
       return (step.type === "stroop" && event === "stroop_complete") ||
         (step.type === "nback" && event === "nback_complete") ||
         (step.title === "Breath hold" && event === "breath_hold_complete");
-    case "subjectSkip": return !!step.safety;
     default: return false;
   }
 }

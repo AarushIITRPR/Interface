@@ -1,3 +1,4 @@
+import {NBACK_PACE} from "@/lib/nback";
 import {allowedSubject} from "@/lib/subject-station-access";
 import { getOperatorUser } from "@/app/operator-auth";
 import { createSession, getLatestActiveSessionForParticipant, getSession, listSessions, mutateSession, toSubjectSnapshot } from "@/lib/session-engine";
@@ -44,6 +45,7 @@ export async function POST(request: Request) {
     if (!body.code || !body.action) return Response.json({error:"Session code and action are required."},{status:400});
     if (subjectView && !isSubjectAction(body.action,body.payload ?? {})) return unauthorized();
     if (!subjectView && !operator) return unauthorized();
+    if (!subjectView && ["consent","declineConsent","feedback","acquisitionHeartbeat","acquisitionFinalize"].includes(body.action)) return unauthorized();
     if(subjectView && !await allowedSubject(request,body.code))return wrongStation();
     const payload = subjectView ? sanitizeSubjectPayload(body.action,body.payload ?? {}) : body.payload ?? {};
     const session = await mutateSession(body.code,body.action,payload);
@@ -53,7 +55,7 @@ export async function POST(request: Request) {
   }
 }
 
-const SUBJECT_ACTIONS = new Set(["subjectBeginMovement","subjectStart","subjectSkip","subjectEnd","ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","subjectNavigate"]);
+const SUBJECT_ACTIONS = new Set(["consent","declineConsent","feedback","subjectBeginTask","subjectStart","subjectEnd","ack","advance","autoAdvance","log","pause","rating","taskComplete","subjectHeartbeat","subjectNavigate"]);
 
 function isSubjectAction(action:string,payload:Record<string,unknown>) {
   if (!SUBJECT_ACTIONS.has(action)) return false;
@@ -65,8 +67,11 @@ function sanitizeSubjectPayload(action:string,payload:Record<string,unknown>): R
   return {...subjectPayload(action,payload), subjectRequest:true, expectedStepStartedAt:String(payload.expectedStepStartedAt ?? "").slice(0,40), expectedAttempt:payload.expectedAttempt == null ? undefined : Number(payload.expectedAttempt)};
 }
 function subjectPayload(action:string,payload:Record<string,unknown>): Record<string,unknown> {
+  if(action==="consent")return {version:payload.version,sources:payload.sources,participate:payload.participate,record:payload.record,research:payload.research};
+  if(action==="feedback")return {rating:payload.rating,comment:payload.comment,skip:payload.skip};
+  if(action==="declineConsent")return {};
   const expectedStepId = String(payload.expectedStepId ?? "").slice(0,80);
-  if (action === "subjectSkip" || action==="subjectBeginMovement") return {expectedStepId};
+  if (action==="subjectBeginTask") return {expectedStepId};
   if (action === "subjectNavigate") return {expectedStepId,direction:Number(payload.direction)};
   if (action === "subjectHeartbeat") return {};
   if (action === "ack") return {};
@@ -75,7 +80,9 @@ function subjectPayload(action:string,payload:Record<string,unknown>): Record<st
   if (action === "autoAdvance") return {expectedStepId};
   if (action === "rating") return {expectedStepId,valence:scale(payload.valence),arousal:scale(payload.arousal),dominance:scale(payload.dominance)};
   if (action === "taskComplete") return {expectedStepId,eventType:String(payload.eventType ?? "task_complete").slice(0,80),label:String(payload.label ?? "Task completed").slice(0,120),metadata:payload.metadata ?? {}};
-  if (action === "log" && payload.eventType === "nback_scored_onset") return {expectedStepId,eventType:"nback_scored_onset",label:"N-back scored sequence started after practice",source:"subject",metadata:{level:Math.max(1,Math.min(3,Number(payload.level)||1)),practiceScored:false}};
+  if (action === "log" && payload.eventType === "nback_scored_onset") return {expectedStepId,eventType:"nback_scored_onset",label:"N-back scored sequence started after practice",source:"subject",metadata:{level:Math.max(1,Math.min(3,Number(payload.level)||1)),practiceScored:false,...(payload.timingVersion===NBACK_PACE.timingVersion?NBACK_PACE:{})}};
+  if(action==="log" && payload.eventType==="media_seek" && typeof payload.positionSec==="number" && Number.isFinite(payload.positionSec) && payload.positionSec>=0)
+    return {expectedStepId,eventType:"media_seek",label:"Participant repositioned clip",source:"subject",metadata:{positionSec:payload.positionSec}};
   const eventType = ["media_onset","media_offset","media_error"].includes(String(payload.eventType)) ? String(payload.eventType) : "subject_event";
   return {expectedStepId,eventType,label:eventType === "media_onset" ? "Video started" : eventType === "media_offset" ? "Video completed" : eventType === "media_error" ? "Media failed to load" : "Subject event",severity:eventType === "media_error" ? "error" : "info",source:"subject"};
 }

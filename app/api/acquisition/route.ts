@@ -1,4 +1,5 @@
 import { acquisitionCommand, getSession, mutateSession } from "@/lib/session-engine";
+import {hasConsent} from "@/lib/participation";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,8 @@ export async function POST(request: Request) {
     if (!constantTimeEqual(token,session.acquisitionToken)) return Response.json({error:"Invalid acquisition token."},{status:403});
 
     let current = session;
+    if(body.action==="poll" && session.status==="setup" && !hasConsent(session))
+      return Response.json({error:"Waiting for consent on the subject display. Connect the recorder after consent is saved."},{status:409});
     if (body.action === "heartbeat") {
       const agent = body.agent ?? {};
       current = await mutateSession(code,"acquisitionHeartbeat",{

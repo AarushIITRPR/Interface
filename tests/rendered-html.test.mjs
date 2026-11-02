@@ -38,13 +38,15 @@ test("keeps the experiences separate and copy free of em dashes", async () => {
   assert.match(subject, /role="alert"/);
   assert.match(subject, /Session code or participant ID/);
   assert.match(subject, /operatorConnected/);
-  assert.match(subject, /Change session/);
+  const header=await readFile(new URL("../app/portal-header.tsx",import.meta.url),"utf8");
+  assert.match(header, /Change session/);
   assert.match(subject, /participantSessionRequest/);
   assert.match(subject, /next\.revision > current\.revision/);
   assert.match(subject, /\["complete","aborted"\]/);
   for (const label of ['Live study','Session sequence','Recording review','Recording setup','Sensor input','OPEN LEDGER'])assert.ok(instructor.includes(label));
   assert.match(subject,/acquisitionReady/);
-  assert.match(subject,/End my session/);
+  assert.match(header,/End session/);
+  assert.match(subject,/act\("subjectEnd"\)/);
 
   assert.match(protocol, /WILLIAMS6/);
   assert.match(protocol, /Guided body scan/);

@@ -144,6 +144,9 @@ export type MediaConfig = {
 };
 
 export type SessionSnapshot = {
+  timedTaskStarted?:boolean;
+  consent?: {version:string; sources:string[]; acceptedAt:string};
+  feedback?: {rating:string|null; comment:string; skipped:boolean; savedAt:string};
   id: string;
   code: string;
   revision: number;
@@ -187,6 +190,9 @@ export type SubjectStep = Pick<ProtocolStep,
 };
 
 export type SubjectSnapshot = {
+  consentGiven:boolean;
+  consentSources:string[];
+  feedbackStage:"open"|"stopping"|"none";
   code: string;
   participantId: number;
   revision: number;
@@ -202,7 +208,7 @@ export type SubjectSnapshot = {
   acquisitionReady: boolean;
   selfGuided: boolean;
   canStartRecording: boolean;
-  awaitingMovement: boolean;
+  awaitingTaskStart: boolean;
   mediaSrc: string;
   canGoBack: boolean;
   canGoNext: boolean;

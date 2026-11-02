@@ -1,6 +1,6 @@
 // Explicit opt-in integration test. Creates and aborts ONE labelled local test session.
 // No physical sensors or recording agent are started. Never run against production.
-import {enrollStation} from "./enroll-station.mjs";
+import {consentToStudy,enrollStation} from "./enroll-station.mjs";
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mkdir} from 'node:fs/promises';
@@ -73,7 +73,15 @@ try{
   await until(async()=> (await get()).status==='running','subject started recording');
   isRecording=true;await report();
   await subject.getByRole('button',{name:'Begin first activity'}).click();
-  await until(async()=> (await get()).stepIndex===1,'subject began baseline');
+  await until(async()=> (await get()).stepIndex===1,'baseline instructions opened');
+  const startBaseline=subject.locator('.live-subject-copy').getByRole('button',{name:'Start task',exact:true});
+  await startBaseline.waitFor();
+  assert.equal((await get()).timedTaskStarted,false);
+  await startBaseline.click();
+  await until(async()=> (await get()).timedTaskStarted===true,'participant started baseline');
+  await subject.reload();
+  await subject.locator('.fixation-screen .task-countdown').waitFor();
+  assert.equal(await startBaseline.count(),0);
   console.log('PASS: participant-initiated recording after readiness, no manual setup advance');
 
   const sam=plan.findIndex(s=>s.type==='sam');
@@ -115,29 +123,26 @@ try{
 
   const nback=plan.findIndex(s=>s.type==='nback');let current=await get();
   while(current.stepIndex!==nback)current=await post('navigate',{direction:current.stepIndex<nback?1:-1});
-  await subject.getByRole('heading',{name:'Remember the position'}).waitFor();
-  await subject.getByRole('button',{name:'No match: wait',exact:true}).click();
-  assert.equal(await subject.getByRole('button',{name:'Begin 20-square task'}).count(),0);
-  await subject.getByRole('button',{name:'Match',exact:true}).click();
-  await subject.getByRole('button',{name:'Try a different example'}).click();
-  await subject.getByRole('button',{name:'No match: wait',exact:true}).click();
+  await subject.bringToFront();
+  await subject.getByRole('heading',{name:'Watch the example.'}).waitFor();
+  assert.equal(await subject.locator('.nb-simulation button').count(),0);
   await subject.screenshot({path:output+'/nback-practice.png',fullPage:true});
   await subject.setViewportSize({width:375,height:812});
   await subject.waitForFunction(()=>document.documentElement.scrollWidth<=window.innerWidth+1,undefined,{timeout:1500});
   await subject.screenshot({path:output+'/nback-mobile.png',fullPage:true});
-  await subject.bringToFront();await subject.getByRole('button',{name:'Begin 20-square task'}).click();
+  await subject.getByRole('button',{name:'Understood, start test'}).click({timeout:140000});
   await subject.locator('.nback-running').waitFor();
   await subject.waitForTimeout(50);
   await subject.getByRole('button',{name:'Match',exact:true}).click();
   assert.ok(await subject.getByRole('button',{name:'Match',exact:true}).isDisabled(),'one response per square');
   await until(async()=> (await get()).events.some(e=>e.eventType==='nback_complete'),'nback completion',650);
   const event=(await get()).events.find(e=>e.eventType==='nback_complete');
-  assert.equal(event.metadata.trials,20);assert.equal(event.metadata.trialResults.length,20);assert.equal(event.metadata.practiceScored,false);
+  assert.equal(event.metadata.intervalMs,2500);assert.equal(event.metadata.visibleMs,1000);assert.equal(event.metadata.gapMs,1500);assert.equal(event.metadata.trials,20);assert.equal(event.metadata.trialResults.length,20);assert.equal(event.metadata.practiceScored,false);
   assert.equal(event.metadata.hits+event.metadata.misses+event.metadata.falseAlarms+event.metadata.correctRejections,20-event.metadata.level);
-  console.log('PASS: n-back practice, mobile reflow, one-response guard and separated 20-trial results');
+  console.log('PASS: watch-only demonstration, mobile reflow, one-response guard and separated 20-trial results');
 
-  await instructor.getByRole('button',{name:'END SESSION',exact:true}).waitFor();
-  instructor.once('dialog',d=>d.dismiss());await instructor.getByRole('button',{name:'END SESSION',exact:true}).click();
+  await instructor.getByRole('button',{name:'End session',exact:true}).waitFor();
+  instructor.once('dialog',d=>d.dismiss());await instructor.getByRole('button',{name:'End session',exact:true}).click();
   assert.equal((await get()).status,'running');
   await post('pause');const paused=await get();
   await post('subjectNavigate',{direction:-1,expectedStepId:plan[paused.stepIndex].id,expectedStepStartedAt:paused.stepStartedAt},'subject');
@@ -146,6 +151,15 @@ try{
   second=(await extra.json()).session.code;
   assert.equal((await station(context,{action:'assign',code:second})).status(),409);
   await post('complete');const done=await get();
+  clearInterval(beat);
+  await subject.getByText("Keep this page open while the recorder finishes.").waitFor();
+  const finalized=await context.request.post(base+'/api/acquisition',{data:{action:"finalize",code,token:initial.acquisitionToken,recordings:[]}});
+  assert.ok(finalized.ok());
+  await subject.getByRole('radio',{name:'Easy',exact:true}).check();
+  await subject.getByLabel('What, if anything, could we make clearer?').fill('The speaking prompts were clear.');
+  await subject.getByRole('button',{name:'Send feedback'}).click();
+  await subject.getByText('Thank you.',{exact:true}).waitFor();
+  assert.equal((await get()).feedback.rating,'Easy');
   await post('subjectNavigate',{direction:-1,expectedStepId:plan[done.stepIndex].id,expectedStepStartedAt:done.stepStartedAt},'subject');
   assert.equal((await get()).status,'complete');
   await instructor.getByRole('button',{name:'Recording review',exact:true}).click();
@@ -164,6 +178,7 @@ try{
   await instructor.keyboard.press('Escape');
   console.log('PASS: visible end action, cancel safety, paused/finalized navigation rejected');
   await instructor.goto(base+'/instructor?session='+second);
+  await consentToStudy(subject);
   await subject.getByRole('link',{name:'Connect recorder',exact:true}).waitFor();
   assert.equal(new URL(subject.url()).searchParams.get('session'),second);
   assert.equal((await station(subjectContext,{action:'ticket',code})).status(),403);

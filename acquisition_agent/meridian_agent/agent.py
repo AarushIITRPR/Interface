@@ -173,7 +173,7 @@ class MeridianAgent:
 
     def write_marker(self, command: dict) -> None:
         step = command.get("step") or {}
-        marker = (command.get("sessionStatus"),command.get("stepIndex"),step.get("id"),step.get("attempt"),command.get("command"))
+        marker = (command.get("sessionStatus"),command.get("stepIndex"),step.get("id"),step.get("attempt"),step.get("startedAt"),command.get("command"))
         if marker == self.last_marker:
             return
         record = {
@@ -210,12 +210,12 @@ class MeridianAgent:
                     command = self.request("heartbeat",agent=self.agent_payload(),sensors=reports)
                     self.last_command = command
                     self.write_marker(command)
+                    if command.get("command") == "finalize":
+                        break
                     self.apply_command(command,reports)
                     network_errors = 0
                     healthy = sum(report["status"] == "recording" for report in reports)
                     print(f"\r{healthy}/{len(reports)} sensors recording | step {int(command.get('stepIndex',0))+1} | revision {command.get('revision')}",end="",flush=True)
-                    if command.get("command") == "finalize":
-                        break
                 except (URLError,OSError,ValueError,RuntimeError) as exc:
                     network_errors += 1
                     print(f"\nMeridian heartbeat unavailable ({type(exc).__name__}). Local recording continues.",file=sys.stderr)
