@@ -270,7 +270,7 @@ function EditorialSessionEntry({ operatorName, onOpen }: { operatorName: string;
   return (
     <main className="live-entry">
       <PortalHeader role="Instructor"/>
-      <section className="instructor-entry-form">
+      <section className="portal-entry-form">
         <form onSubmit={(event) => { event.preventDefault(); if(!busy && !checking && !lookupFailed)void (existing ? resume() : start()); }}>
           <h1>Prepare a session.</h1>
           <label htmlFor="participant-id">Participant ID</label>

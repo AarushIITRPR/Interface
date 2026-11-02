@@ -223,7 +223,6 @@
 .live-subject-task .task-screen { overflow: auto; }.live-subject-task .colour-buttons { flex-wrap: wrap; justify-content: center; }
 .live-subject .subject-overlay { z-index: 100; background: rgba(249,245,238,.985); color: var(--live-ink); }.live-subject .subject-overlay p { color: var(--live-ink); }
 .live-subject .safety-stop { z-index: 110; right: 25px; bottom: 76px; min-height: 44px; border-radius: 0; background: var(--live-paper-light); }
-.live-subject-connect .live-entry-grid { padding-block: 60px; }
 
 .live-api-device { display: block; min-width: 0; }
 .live-api-device > span { display: block; margin-bottom: 4px; color: var(--live-muted); font-size: .8rem; font-weight: 700; }
@@ -366,10 +365,10 @@
 .live-subject-progress { overflow:hidden; }
 .live-subject-copy h1 { overflow-wrap:break-word; line-height:.98; }
 .subject-recorder { position:relative; z-index:1; max-width:30rem; padding:24px; line-height:1.5; }
-.subject-recorder details,.live-entry-context details { margin-top:18px; }
-.subject-recorder summary,.live-entry-context summary { cursor:pointer; min-height:44px; padding-block:10px; }
+.subject-recorder details,.entry-lab-setup { margin-top:18px; }
+.subject-recorder summary,.entry-lab-setup summary { cursor:pointer; min-height:44px; padding-block:10px; }
 .subject-recorder a.wizard-primary,.recorder-pair a.wizard-primary { display:inline-flex; align-items:center; min-height:44px; color:inherit; text-decoration:underline; }
-.subject-recorder a:not(.wizard-primary),.subject-recorder p button,.live-entry-context details a { text-decoration:underline; }
+.subject-recorder a:not(.wizard-primary),.subject-recorder p button,.entry-lab-setup a { text-decoration:underline; }
 .setup-workflow,.recorder-pair { max-width:52rem; margin:0 auto; padding:clamp(28px,5vw,72px); color:var(--live-ink); }
 .recorder-pair { min-height:100vh; background:var(--live-paper-light); }
 .setup-workflow h2,.recorder-pair h1 { font:normal clamp(2rem,4vw,3.4rem)/1.08 Georgia,serif; margin:12px 0 24px; }
@@ -397,8 +396,8 @@
 .study-player-footer { display:flex; align-items:center; justify-content:flex-end; padding:6px 12px; background:#202529; color:white; }
 .study-player-footer button { display:inline-flex; align-items:center; gap:.5rem; min-height:40px; padding:0 .75rem; }
 .study-player:fullscreen { height:100%; width:100%; }
-.instructor-entry-form { width:min(600px,calc(100% - 44px)); margin:auto; padding-block:48px; }
-.instructor-entry-form input + button { margin-top:20px; }
+.portal-entry-form { width:min(600px,calc(100% - 44px)); margin:auto; padding-block:48px; }
+.portal-entry-form input + button { margin-top:20px; }
 @media(max-width:650px) {
   .live-subject .live-subject-copy { min-height:auto; padding:24px 20px; }
   .live-subject .live-subject-copy h1 { font-size:clamp(2rem,8vw,3rem); }

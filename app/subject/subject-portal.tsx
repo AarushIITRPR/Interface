@@ -220,7 +220,23 @@ function TaskStart({run,active,label="Start task"}:{run:()=>Promise<void>;active
 }
 
 function SubjectConnect({draft,error,connecting,setDraft,submit}:{draft:string;error:string;connecting:boolean;setDraft:(value:string)=>void;submit:()=>Promise<void>}) {
-  return <main className="live-entry live-subject-connect"><PortalHeader role="Subject"/><section className="live-entry-grid"><div className="live-entry-index"><i /><span>01</span><p>Guided<br />session</p></div><form onSubmit={(event)=>{event.preventDefault();void submit()}}><h1>Join your session.</h1><label htmlFor="session-code">Session code or participant ID</label><input id="session-code" value={draft} onChange={(event)=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} placeholder="0009AB7K" />{error ? <p className="live-entry-error" role="alert">{error}</p> : <div className="live-entry-state">Use the details provided for your study.</div>}<button type="submit" disabled={connecting || !draft.trim()}>{connecting ? "CONNECTING" : "CONNECT"}<ArrowUpRight size={16} /></button></form><div className="live-entry-context"><span>GUIDED DISPLAY</span><strong>One task at a time.</strong><p>Only the current instruction will appear during the study.</p><details><summary>First-time lab setup</summary><p>Open the instructor’s private invitation on this computer to pair its browser. You can install the recorder before the study.</p><a download href="/recorder-tools/MeridianRecorderSetup.exe">Install recorder for Windows (64-bit)</a></details></div></section></main>;
+  return <main className="live-entry">
+    <PortalHeader role="Subject"/>
+    <section className="portal-entry-form">
+      <form onSubmit={event=>{event.preventDefault();void submit();}}>
+        <h1>Join your session.</h1>
+        <label htmlFor="session-code">Session code or participant ID</label>
+        <input id="session-code" value={draft} onChange={event=>setDraft(event.target.value.toUpperCase())} autoComplete="off" autoCapitalize="characters" maxLength={12} placeholder="0009AB7K"/>
+        {error && <p className="live-entry-error" role="alert">{error}</p>}
+        <button type="submit" disabled={connecting || !draft.trim()}>{connecting?"CONNECTING":"CONNECT"}<ArrowUpRight size={16}/></button>
+      </form>
+      <details className="entry-lab-setup">
+        <summary>First-time lab setup</summary>
+        <p>Open the instructor’s private invitation on this computer to pair its browser. You can install the recorder before the study.</p>
+        <a download href="/recorder-tools/MeridianRecorderSetup.exe">Install recorder for Windows (64-bit)</a>
+      </details>
+    </section>
+  </main>;
 }
 
 function QuietField({complete=false}:{complete?:boolean}) { return <div className={`live-subject-cross ${complete?"complete":""}`} aria-hidden="true"><i/><i/></div>; }
