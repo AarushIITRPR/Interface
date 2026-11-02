@@ -21,6 +21,7 @@ This README describes the active editorial interface and **v8 self-guided protoc
 | Material | Location |
 | --- | --- |
 | Final project presentation | [View presentation on Canva](https://canva.link/e2bby66279clv8b) |
+| Walkthrough demo | [Watch on YouTube](https://youtu.be/AERDED5ypgQ) |
 | Demonstration video | [Interface Walkthrough Video](https://youtu.be/ZbuRNOc244Q) |
 | Workflow and design report | [Portal documentation (PDF)](docs/meridian_portal_documentation.pdf) |
 | Subject portal usability | [SUS evaluation (PDF)](docs/usability/sus-evaluation.pdf) · [Report A](docs/usability/report-a.pdf) · [Report B](docs/usability/report-b.pdf) |
