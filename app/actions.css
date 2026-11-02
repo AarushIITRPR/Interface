@@ -66,6 +66,12 @@
 }
 #meridian .portal-header-left { gap: 6px; }
 #meridian .live-instructor-menu { padding: 0; }
+#meridian .rating-options button[aria-checked=true] {
+  --action-fill:var(--live-paper-light);
+  --action-ink:var(--live-ink);
+  --action-edge:var(--live-ink);
+  font-weight:750;
+}
 #meridian .live-instructor-sidebar nav button {
   background: transparent;
   border: 0;

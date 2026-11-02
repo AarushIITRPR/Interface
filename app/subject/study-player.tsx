@@ -3,11 +3,6 @@
 import {Maximize, Minimize} from "lucide-react";
 import {useEffect, useRef, useState, type ReactNode, type RefObject, type VideoHTMLAttributes} from "react";
 
-function timestamp(seconds:number) {
-  const whole=Math.max(0,Math.ceil(seconds));
-  return `${Math.floor(whole/60)}:${String(whole%60).padStart(2,"0")}`;
-}
-
 type Props = VideoHTMLAttributes<HTMLVideoElement> & {
   active:boolean;
   videoRef?:RefObject<HTMLVideoElement|null>;
@@ -15,11 +10,10 @@ type Props = VideoHTMLAttributes<HTMLVideoElement> & {
   children?:ReactNode;
 };
 
-export function StudyPlayer({active,videoRef,hidden,onAudioChange,onPlaying,onSeeked,children,...props}:Props) {
+export function StudyPlayer({active,videoRef,hidden,onAudioChange,onPlaying,children,...props}:Props) {
   const localVideo=useRef<HTMLVideoElement>(null);
   const video=videoRef??localVideo;
   const player=useRef<HTMLDivElement>(null);
-  const [remaining,setRemaining]=useState<number|null>(null);
   const [fullscreen,setFullscreen]=useState(false);
   const [fullscreenError,setFullscreenError]=useState(false);
   const customFullscreen=typeof document!=="undefined" && !!document.fullscreenEnabled;
@@ -34,10 +28,6 @@ export function StudyPlayer({active,videoRef,hidden,onAudioChange,onPlaying,onSe
       if(player.current && document.fullscreenElement===player.current)void document.exitFullscreen().catch(()=>{});
     }
   },[active,hidden,video]);
-  const updateTime=()=>{
-    const el=video.current;
-    setRemaining(el && Number.isFinite(el.duration)?el.duration-el.currentTime:null);
-  };
   const toggleFullscreen=async()=>{
     try{
       setFullscreenError(false);
@@ -52,17 +42,15 @@ export function StudyPlayer({active,videoRef,hidden,onAudioChange,onPlaying,onSe
       <video {...props} ref={video} controls controlsList={customFullscreen?"nofullscreen":undefined}
         disablePictureInPicture playsInline preload="metadata"
         onPlaying={e=>{if(active)onPlaying?.(e);else e.currentTarget.pause();}}
-        onTimeUpdate={updateTime} onDurationChange={updateTime} onSeeked={e=>{updateTime();onSeeked?.(e);}}
         onVolumeChange={e=>onAudioChange(!e.currentTarget.muted)}/>
       {children && <div className="study-player-guide">{children}</div>}
     </div>
-    <div className="study-player-footer">
-      <span>{remaining===null?"Loading video…":`${timestamp(remaining)} remaining`}</span>
-      {customFullscreen && <button type="button" onClick={()=>void toggleFullscreen()}>
+    {customFullscreen && <div className="study-player-footer">
+      <button type="button" onClick={()=>void toggleFullscreen()}>
         {fullscreen?<Minimize size={16}/>:<Maximize size={16}/>}
         {fullscreen?"Exit fullscreen":"Fullscreen"}
-      </button>}
-    </div>
+      </button>
+    </div>}
     {fullscreenError && <p role="status">Fullscreen is unavailable in this window.</p>}
   </div>;
 }
