@@ -24,6 +24,7 @@ Member A leads the submission documentation, GitHub collaboration materials, and
 | Presentation (PPT) | Link pending |
 | Demonstration video | Link pending |
 | Workflow and design report | [Portal documentation (PDF)](docs/meridian_portal_documentation.pdf) |
+| Subject portal usability | [SUS evaluation (PDF)](docs/usability/sus-evaluation.pdf) · [Report A](docs/usability/report-a.pdf) · [Report B](docs/usability/report-b.pdf) |
 | Implementation history | [GitHub commits](https://github.com/AarushIITRPR/Interface/commits/main/) |
 
 ### YouTube links
